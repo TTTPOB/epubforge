@@ -30,6 +30,7 @@ class LLMClient:
         self.base_url = (cfg.vlm_base_url if use_vlm else cfg.llm_base_url).rstrip("/")
         self.model = cfg.vlm_model if use_vlm else cfg.llm_model
         self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
+        self.max_tokens = cfg.vlm_max_tokens if use_vlm else cfg.llm_max_tokens
         self.cache_dir = cfg.cache_dir
         api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self._client = OpenAI(
@@ -75,6 +76,8 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
 
         try:
             completion = self._client.chat.completions.parse(**kwargs)
@@ -93,11 +96,13 @@ class LLMClient:
                 "Endpoint rejected json_schema response_format (400); retrying with json_object"
             )
 
-        # Fallback: json_object mode — model must emit valid JSON, we parse manually
+        # Fallback: json_object mode — model must emit valid JSON, we parse manually.
+        # Use a large max_tokens to avoid truncated JSON; default 8192 when not configured.
         fallback_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "response_format": {"type": "json_object"},
+            "max_tokens": self.max_tokens or 8192,
         }
         if temperature is not None:
             fallback_kwargs["temperature"] = temperature

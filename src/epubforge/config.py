@@ -23,6 +23,8 @@ class Config:
     vlm_model: str = "google/gemini-flash-3"
     llm_timeout: float = 300.0
     vlm_timeout: float = 300.0
+    llm_max_tokens: int | None = None
+    vlm_max_tokens: int | None = None
     concurrency: int = 4
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
@@ -63,6 +65,8 @@ def load_config() -> Config:
                 cfg.llm_model = str(llm["model"])
             if "timeout_seconds" in llm:
                 cfg.llm_timeout = float(llm["timeout_seconds"])  # type: ignore[arg-type]
+            if "max_tokens" in llm:
+                cfg.llm_max_tokens = int(llm["max_tokens"])  # type: ignore[arg-type]
 
         if isinstance(vlm, dict):
             if "base_url" in vlm:
@@ -73,6 +77,8 @@ def load_config() -> Config:
                 cfg.vlm_model = str(vlm["model"])
             if "timeout_seconds" in vlm:
                 cfg.vlm_timeout = float(vlm["timeout_seconds"])  # type: ignore[arg-type]
+            if "max_tokens" in vlm:
+                cfg.vlm_max_tokens = int(vlm["max_tokens"])  # type: ignore[arg-type]
 
         if isinstance(rt, dict):
             if "concurrency" in rt:
@@ -101,6 +107,10 @@ def load_config() -> Config:
         cfg.llm_timeout = float(v)
     if v := os.environ.get("EPUBFORGE_VLM_TIMEOUT"):
         cfg.vlm_timeout = float(v)
+    if v := os.environ.get("EPUBFORGE_LLM_MAX_TOKENS"):
+        cfg.llm_max_tokens = int(v)
+    if v := os.environ.get("EPUBFORGE_VLM_MAX_TOKENS"):
+        cfg.vlm_max_tokens = int(v)
     if v := os.environ.get("EPUBFORGE_CONCURRENCY"):
         cfg.concurrency = int(v)
     if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
