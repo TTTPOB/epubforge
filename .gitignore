@@ -228,3 +228,7 @@ __marimo__/
 .dolt/
 *.db
 .beads-credential-key
+
+# epubforge config (secrets and local overrides)
+config.toml
+config.local.toml

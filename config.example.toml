@@ -1,0 +1,19 @@
+# Copy this file to config.local.toml and fill in your secrets.
+# Settings here can be overridden by EPUBFORGE_* environment variables.
+
+[llm]
+base_url = "https://openrouter.ai/api/v1"
+api_key  = ""  # required; or set EPUBFORGE_LLM_API_KEY
+model    = "anthropic/claude-haiku-4.5"
+
+[vlm]
+# Falls back to [llm] values if this section is omitted.
+base_url = "https://openrouter.ai/api/v1"
+api_key  = ""  # or set EPUBFORGE_VLM_API_KEY
+model    = "google/gemini-flash-3"
+
+[runtime]
+concurrency = 4
+cache_dir   = "work/.cache"
+work_dir    = "work"
+out_dir     = "out"

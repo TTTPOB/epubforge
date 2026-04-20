@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
 
-load_dotenv()
+def _load_toml(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
+        return tomllib.load(f)
 
 
 @dataclass
@@ -24,11 +28,11 @@ class Config:
 
     def require_llm(self) -> None:
         if not self.llm_api_key:
-            raise SystemExit("EPUBFORGE_LLM_API_KEY is required for LLM stages")
+            raise SystemExit("LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)")
 
     def require_vlm(self) -> None:
         if not self.vlm_api_key:
-            raise SystemExit("EPUBFORGE_VLM_API_KEY is required for VLM stage")
+            raise SystemExit("VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)")
 
     def book_work_dir(self, pdf_path: Path) -> Path:
         return self.work_dir / pdf_path.stem
@@ -38,19 +42,64 @@ class Config:
 
 
 def load_config() -> Config:
-    vlm_base_url = os.environ.get(
-        "EPUBFORGE_VLM_BASE_URL",
-        os.environ.get("EPUBFORGE_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-    )
-    return Config(
-        llm_base_url=os.environ.get("EPUBFORGE_LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-        llm_api_key=os.environ.get("EPUBFORGE_LLM_API_KEY", ""),
-        llm_model=os.environ.get("EPUBFORGE_LLM_MODEL", "anthropic/claude-haiku-4.5"),
-        vlm_base_url=vlm_base_url,
-        vlm_api_key=os.environ.get("EPUBFORGE_VLM_API_KEY", os.environ.get("EPUBFORGE_LLM_API_KEY", "")),
-        vlm_model=os.environ.get("EPUBFORGE_VLM_MODEL", "google/gemini-flash-3"),
-        concurrency=int(os.environ.get("EPUBFORGE_CONCURRENCY", "4")),
-        cache_dir=Path(os.environ.get("EPUBFORGE_CACHE_DIR", "work/.cache")),
-        work_dir=Path("work"),
-        out_dir=Path("out"),
-    )
+    # Layer 1: built-in defaults (via dataclass defaults)
+    cfg = Config()
+
+    # Layer 2+3: config.toml then config.local.toml
+    for toml_path in (Path("config.toml"), Path("config.local.toml")):
+        data = _load_toml(toml_path)
+        llm = data.get("llm") or {}
+        vlm = data.get("vlm") or {}
+        rt = data.get("runtime") or {}
+
+        if isinstance(llm, dict):
+            if "base_url" in llm:
+                cfg.llm_base_url = str(llm["base_url"])
+            if "api_key" in llm:
+                cfg.llm_api_key = str(llm["api_key"])
+            if "model" in llm:
+                cfg.llm_model = str(llm["model"])
+
+        if isinstance(vlm, dict):
+            if "base_url" in vlm:
+                cfg.vlm_base_url = str(vlm["base_url"])
+            if "api_key" in vlm:
+                cfg.vlm_api_key = str(vlm["api_key"])
+            if "model" in vlm:
+                cfg.vlm_model = str(vlm["model"])
+
+        if isinstance(rt, dict):
+            if "concurrency" in rt:
+                cfg.concurrency = int(rt["concurrency"])  # type: ignore[arg-type]
+            if "cache_dir" in rt:
+                cfg.cache_dir = Path(str(rt["cache_dir"]))
+            if "work_dir" in rt:
+                cfg.work_dir = Path(str(rt["work_dir"]))
+            if "out_dir" in rt:
+                cfg.out_dir = Path(str(rt["out_dir"]))
+
+    # Layer 4: environment variables (highest priority)
+    if v := os.environ.get("EPUBFORGE_LLM_BASE_URL"):
+        cfg.llm_base_url = v
+    if v := os.environ.get("EPUBFORGE_LLM_API_KEY"):
+        cfg.llm_api_key = v
+    if v := os.environ.get("EPUBFORGE_LLM_MODEL"):
+        cfg.llm_model = v
+    if v := os.environ.get("EPUBFORGE_VLM_BASE_URL"):
+        cfg.vlm_base_url = v
+    if v := os.environ.get("EPUBFORGE_VLM_API_KEY"):
+        cfg.vlm_api_key = v
+    if v := os.environ.get("EPUBFORGE_VLM_MODEL"):
+        cfg.vlm_model = v
+    if v := os.environ.get("EPUBFORGE_CONCURRENCY"):
+        cfg.concurrency = int(v)
+    if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
+        cfg.cache_dir = Path(v)
+
+    # vlm falls back to llm when not explicitly set
+    if not cfg.vlm_base_url:
+        cfg.vlm_base_url = cfg.llm_base_url
+    if not cfg.vlm_api_key:
+        cfg.vlm_api_key = cfg.llm_api_key
+
+    return cfg
