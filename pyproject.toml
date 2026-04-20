@@ -1,7 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "epubforge"
 version = "0.1.0"
-description = "Add your description here"
+description = "LLM/VLM-assisted PDF to EPUB converter for books and theses"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "docling>=2.0",
+    "httpx>=0.27",
+    "ebooklib>=0.18",
+    "typer>=0.12",
+    "rich>=13",
+    "pydantic>=2.7",
+    "pymupdf>=1.24",
+    "pillow>=10",
+    "python-dotenv>=1",
+]
+
+[project.scripts]
+epubforge = "epubforge.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/epubforge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

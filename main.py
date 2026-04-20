@@ -1,6 +1,4 @@
-def main():
-    print("Hello from epubforge!")
-
+from epubforge.cli import app
 
 if __name__ == "__main__":
-    main()
+    app()

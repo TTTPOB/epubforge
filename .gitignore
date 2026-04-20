@@ -1,4 +1,8 @@
-fixtures
+# project runtime dirs
+work/
+out/
+fixtures/*.pdf
+
 .python-version
 
 # Byte-compiled / optimized / DLL files
