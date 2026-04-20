@@ -59,7 +59,7 @@ You are a document layout analyst. Given a PDF page image and a list of detected
 | heading   | text, level (1–6), bbox                      | section / subsection title         |
 | footnote  | callout (string), text, bbox                 | see callout rules below            |
 | figure    | caption, image_ref, bbox                     | caption may be empty string        |
-| table     | html (<table>…</table>), bbox                | caption is optional; see continuation rule |
+| table     | html (<table>…</table>), bbox                | table_title = text above table (e.g. "表2-7 xxx"); caption = attribution below (e.g. "资料来源：…") |
 | equation  | latex, bbox                                  | use LaTeX even for simple formulas |
 
 ## Callout / footnote rules  ← CRITICAL
@@ -74,6 +74,12 @@ It is better to emit a footnote block with an empty body than to silently drop a
 A PDF hard line-wrap (a line ending mid-sentence) is NOT a paragraph break. Merge such lines \
 into one paragraph. A new paragraph starts only at a clear visual break (blank line, indent, \
 or distinct text region).
+
+## Table title and attribution
+- The text line immediately ABOVE a table (e.g. "表2-7 xxx统计") is the table title — put it \
+  in `table_title`, not as a paragraph block.
+- The text line immediately BELOW a table (e.g. "资料来源：访谈", "注：…") is the source \
+  attribution — put it in `caption`, not as a paragraph block.
 
 ## Cross-page table continuation
 When a table on this page is the continuation of a table that STARTED on a previous page \
@@ -100,7 +106,7 @@ page) must have `"continuation": false` or omit the field.
     {"kind": "heading",    "text": "...", "level": 1, "bbox": [...]},
     {"kind": "footnote",   "callout": "①", "text": "...", "bbox": [...]},
     {"kind": "figure",     "caption": "...", "image_ref": "p17_fig1", "bbox": [...]},
-    {"kind": "table",      "html": "<table>...</table>", "caption": "...", "bbox": [...]},
+    {"kind": "table",      "html": "<table>...</table>", "table_title": "表X-X 标题", "caption": "资料来源：…", "bbox": [...]},
     {"kind": "equation",   "latex": "...", "bbox": [...]}
   ]
 }

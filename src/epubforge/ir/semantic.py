@@ -46,6 +46,7 @@ class Figure(BaseModel):
 class Table(BaseModel):
     kind: Literal["table"] = "table"
     html: str
+    table_title: str = ""
     caption: str = ""
     continuation: bool = False
     bbox: list[float] | None = None
@@ -94,6 +95,7 @@ class VLMBlock(BaseModel):
     latex: str | None = None
     bbox: list[float] | None = None
     continuation: bool = False
+    table_title: str | None = None
 
 
 class VLMPageOutput(BaseModel):

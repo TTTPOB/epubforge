@@ -27,8 +27,10 @@ h3 { font-size: 1.2em; margin-top: 1.2em; }
 p { margin: 0.5em 0; text-indent: 1.5em; }
 figure { margin: 1em 0; text-align: center; }
 figcaption { font-size: 0.9em; color: #555; }
-table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.3em 0 0; }
 td, th { border: 1px solid #ccc; padding: 0.3em 0.6em; }
+p.table-title { font-weight: bold; margin: 1em 0 0.2em; text-indent: 0; }
+p.table-caption { font-size: 0.88em; color: #555; margin: 0.2em 0 1em; text-indent: 0; }
 aside.footnote { font-size: 0.85em; border-top: 1px solid #ccc; margin-top: 2em; padding-top: 0.5em; }
 .equation { font-family: monospace; margin: 0.8em 0; }
 """
@@ -113,9 +115,9 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
                 f'<figcaption>{_esc(block.caption)}</figcaption></figure>'
             )
         elif isinstance(block, Table):
-            caption = f"<caption>{_esc(block.caption)}</caption>" if block.caption else ""
-            inner = block.html.replace("<table>", f"<table>{caption}", 1) if block.caption else block.html
-            parts.append(inner)
+            title_html = f'<p class="table-title">{_esc(block.table_title)}</p>' if block.table_title else ""
+            caption_html = f'<p class="table-caption">{_esc(block.caption)}</p>' if block.caption else ""
+            parts.append(f"{title_html}{block.html}{caption_html}")
         elif isinstance(block, Equation):
             parts.append(f'<p class="equation">{_esc(block.latex)}</p>')
 
