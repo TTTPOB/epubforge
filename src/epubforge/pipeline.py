@@ -57,7 +57,13 @@ def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     console.print(f"  → {out}")
 
 
-def run_clean(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+def run_clean(
+    pdf_path: Path,
+    cfg: Config,
+    *,
+    force: bool = False,
+    page_nos: set[int] | None = None,
+) -> None:
     from epubforge.cleaner import clean_simple_pages
 
     work = cfg.book_work_dir(pdf_path)
@@ -66,11 +72,17 @@ def run_clean(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out_dir = work / "03_simple"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print("[bold]Stage 3:[/bold] LLM text cleaning…")
-    clean_simple_pages(raw, pages, out_dir, cfg, force=force)
+    clean_simple_pages(raw, pages, out_dir, cfg, force=force, page_nos=page_nos)
     console.print(f"  → {out_dir}/")
 
 
-def run_vlm(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+def run_vlm(
+    pdf_path: Path,
+    cfg: Config,
+    *,
+    force: bool = False,
+    page_nos: set[int] | None = None,
+) -> None:
     from epubforge.vlm_reader import read_complex_pages
 
     work = cfg.book_work_dir(pdf_path)
@@ -79,7 +91,7 @@ def run_vlm(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out_dir = work / "04_complex"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print("[bold]Stage 4:[/bold] VLM complex-page reading…")
-    read_complex_pages(pdf_path, raw, pages, out_dir, cfg, force=force)
+    read_complex_pages(pdf_path, raw, pages, out_dir, cfg, force=force, page_nos=page_nos)
     console.print(f"  → {out_dir}/")
 
 

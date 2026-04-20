@@ -16,9 +16,19 @@ app = typer.Typer(
 console = Console()
 
 
-def _pdf_arg() -> Path:
-    """Dummy sentinel — replaced by Click parameter at runtime."""
-    ...
+def _parse_pages(pages_str: str | None) -> set[int] | None:
+    """Parse '5,10-12,20' into {5, 10, 11, 12, 20}."""
+    if not pages_str:
+        return None
+    result: set[int] = set()
+    for part in pages_str.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            result.update(range(int(lo), int(hi) + 1))
+        else:
+            result.add(int(part))
+    return result
 
 
 @app.command()
@@ -57,22 +67,24 @@ def classify(
 def clean(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f"),
+    pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter e.g. '5,10-12'"),
 ) -> None:
     """Stage 3 — LLM text cleaning of simple pages → work/<name>/03_simple/."""
     cfg = load_config()
     cfg.require_llm()
-    pipeline.run_clean(pdf_path, cfg, force=force)
+    pipeline.run_clean(pdf_path, cfg, force=force, page_nos=_parse_pages(pages))
 
 
 @app.command()
 def vlm(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f"),
+    pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter e.g. '10,11,12'"),
 ) -> None:
     """Stage 4 — VLM structured reading of complex pages → work/<name>/04_complex/."""
     cfg = load_config()
     cfg.require_vlm()
-    pipeline.run_vlm(pdf_path, cfg, force=force)
+    pipeline.run_vlm(pdf_path, cfg, force=force, page_nos=_parse_pages(pages))
 
 
 @app.command()
