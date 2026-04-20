@@ -145,7 +145,6 @@ each block is plain body prose or a finer style variant that the parser missed.
 | page_footer      | page number/footer the parser missed |
 | list_item        | bullet or numbered list item the parser missed |
 | poem             | verse lines, typically narrow and centered |
-| table_note       | attribution or source note beneath a table |
 | toc_entry        | table of contents entry with leaders/dots + page number |
 | other            | does not clearly fit any of the above |
 
@@ -157,6 +156,21 @@ each block is plain body prose or a finer style variant that the parser missed.
   block outlined in a red rectangle — use this to judge relative position, font size vs \
   body, and surrounding layout; (2) a zoomed crop of just the target block — use this for \
   glyph-level detail such as indent and line count.
+- **A single short line with empty space to its right is NOT automatically a heading.** \
+  It is almost always `body` in these cases:
+  * the last line of a paragraph (short because the paragraph happened to end there),
+  * a lead-in line that ends with a colon/question mark introducing a following quote, \
+    list or enumeration (e.g. "副县长说：", "情况如下：", "因素大致有："),
+  * an enumerated item of the form "一，… ：" / "（1）… :" that is part of an inline list \
+    sharing the surrounding body font,
+  * a continuation/wrap line.
+  Heading classification (`chapter_title` / `section_title` / `subsection_title`) requires \
+  ALL of the following, verified from the full-page view: (a) glyphs that are clearly \
+  LARGER or BOLDER than the surrounding body text (not merely "same size with whitespace \
+  on the right"), AND (b) noticeable EXTRA vertical whitespace both above AND below the \
+  block, visibly separating it from adjacent paragraphs. If the block's font size matches \
+  its neighbours and it sits flush against a body paragraph above or below (no extra \
+  whitespace), it is `body` — even if it is short, left-aligned, and ends with a colon.
 - Your `exemplars` array MUST have **one entry per exemplar** (not per image) — if three \
   exemplars are provided you return three entries, not six.
 - For each exemplar return one object with role, confidence (0.0–1.0), and a reason \

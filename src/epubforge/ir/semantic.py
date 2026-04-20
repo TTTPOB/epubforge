@@ -141,7 +141,6 @@ class StyleRole(str, Enum):
     page_footer = "page_footer"
     list_item = "list_item"
     poem = "poem"
-    table_note = "table_note"
     toc_entry = "toc_entry"
     other = "other"
 
