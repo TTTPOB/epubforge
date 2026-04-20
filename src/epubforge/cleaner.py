@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from docling_core.types.doc import DocItemLabel, DoclingDocument
+from docling_core.types.doc.document import DocItem
 
 from epubforge.config import Config
 from epubforge.llm.client import LLMClient, Message
@@ -35,21 +36,30 @@ def clean_simple_pages(
     if page_nos is not None:
         simple_set &= page_nos
 
-    # Build page → ordered items mapping from text collection only
+    # Build page → ordered items mapping using Docling reading order.
+    # iterate_items() traverses the document body tree in reading order,
+    # handling multi-column layouts correctly — no manual bbox sort needed.
     page_items: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for item in doc.texts:
+    _seen: set[tuple[str, int]] = set()
+    for item, _level in doc.iterate_items():
+        if not isinstance(item, DocItem):
+            continue
+        text = getattr(item, "text", None)
+        if not text:
+            continue
         for prov in item.prov:
             pno = prov.page_no
-            if pno in simple_set:
-                page_items[pno].append({
-                    "label": item.label,
-                    "text": item.text,
-                    "bbox_t": prov.bbox.t if prov.bbox else 0.0,
-                })
-
-    # Sort each page's items by vertical position (top bbox coord)
-    for pno in page_items:
-        page_items[pno].sort(key=lambda x: x["bbox_t"])
+            if pno not in simple_set:
+                continue
+            key = (item.self_ref, pno)
+            if key in _seen:
+                continue
+            _seen.add(key)
+            page_items[pno].append({
+                "label": item.label,
+                "text": text,
+                "page": pno,
+            })
 
     # Group consecutive simple pages into section-bounded chunks
     groups = _build_groups(sorted(simple_set), page_items)
@@ -103,11 +113,12 @@ def _build_groups(
 
 
 def _format_blocks_for_llm(items: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
+    chunks: list[str] = []
     for it in items:
         if it["label"] in _SKIP_LABELS:
             continue
         label_str = it["label"].value if isinstance(it["label"], DocItemLabel) else it["label"]
         prefix = f"[{label_str.upper()}] " if it["label"] in _HEADER_LABELS else ""
-        lines.append(f"{prefix}{it['text']}")
-    return "\n".join(lines)
+        pno = it.get("page", 0)
+        chunks.append(f"[BLOCK p{pno}]\n{prefix}{it['text']}\n[/BLOCK]")
+    return "\n".join(chunks)
