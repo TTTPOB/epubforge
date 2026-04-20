@@ -8,16 +8,11 @@ pages (all belonging to the same section), output a cleaned JSON.
 
 ## Block kinds you may emit
 
-| kind      | required fields          | notes                        |
-|-----------|--------------------------|------------------------------|
-| paragraph | text                     | body prose                   |
-| heading   | text, level (1–6)        | section / subsection title   |
-
-## ALLOWED operations
-- Merge lines broken by PDF hard line-wraps (a line ending mid-sentence is NOT a paragraph break).
-- Remove page headers, footers, and bare page numbers.
-- Normalise heading levels (SectionHeader level 1 → heading level 1, etc.).
-- Preserve original wording exactly — do not paraphrase or translate.
+| kind      | required fields          | notes                                      |
+|-----------|--------------------------|---------------------------------------------|
+| paragraph | text                     | body prose                                 |
+| heading   | text, level (1–6)        | section / subsection title                 |
+| footnote  | callout, text            | footnote body — see rules below            |
 
 ## Paragraph boundary rules
 A new paragraph starts ONLY when ONE of the following is true:
@@ -26,22 +21,32 @@ A new paragraph starts ONLY when ONE of the following is true:
 3. The Docling input marks it as a distinct block (different element).
 A bare line-break inside a sentence is NEVER a paragraph boundary.
 
-## Inline footnote markers
-If the text contains inline markers such as ①②③, ④, [1], [2], superscript digits, or similar \
-footnote callout symbols, **preserve them in-place** — do not remove or rewrite them. \
-The assembler will match them to footnote bodies later.
+## Footnote rules
+- Text at the bottom of a page that begins with ①②③, [1], [2], superscript digits, or similar \
+markers is footnote body text — emit it as `kind:"footnote"` with `"callout"` set to the \
+exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
+- Do NOT merge footnote body text into a paragraph.
+- Inline callout markers that appear inside paragraph text (e.g. "…见注①。") must be \
+**preserved in-place** in the paragraph's `text` field. Do not remove them.
+
+## ALLOWED operations
+- Merge lines broken by PDF hard line-wraps (a line ending mid-sentence is NOT a paragraph break).
+- Remove page headers, footers, and bare page numbers.
+- Normalise heading levels (SectionHeader level 1 → heading level 1, etc.).
+- Preserve original wording exactly — do not paraphrase or translate.
 
 ## FORBIDDEN operations
 - Rewriting, paraphrasing, or translating content.
 - Adding, removing, or combining content across section boundaries.
 - Changing any factual information.
-- Removing inline footnote callout markers.
+- Removing inline footnote callout markers from paragraph text.
 
 ## Output schema
 {
   "blocks": [
-    {"kind": "paragraph", "text": "..."},
-    {"kind": "heading", "level": 1, "text": "..."}
+    {"kind": "paragraph", "text": "…"},
+    {"kind": "heading", "level": 1, "text": "…"},
+    {"kind": "footnote", "callout": "①", "text": "…"}
   ]
 }
 Output ONLY valid JSON — no markdown fences, no commentary.
