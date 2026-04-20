@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "epubforge",
+  "project_id": "0e2486b4-7b36-4396-95d0-50651e24f78f"
+}
