@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai import BadRequestError, OpenAI
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from epubforge.config import Config
@@ -17,6 +19,8 @@ from epubforge.config import Config
 Message = ChatCompletionMessageParam
 
 T = TypeVar("T", bound=BaseModel)
+
+log = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -48,6 +52,22 @@ class LLMClient:
             raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
             return response_format.model_validate_json(raw)
 
+        parsed = self._call_parsed(messages, response_format, temperature)
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"content": parsed.model_dump_json()}),
+            encoding="utf-8",
+        )
+        return parsed
+
+    def _call_parsed(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        response_format: type[T],
+        temperature: float | None,
+    ) -> T:
+        """Try OpenAI structured outputs; fall back to json_object mode on 400."""
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -56,21 +76,38 @@ class LLMClient:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        completion = self._client.chat.completions.parse(**kwargs)
-        message = completion.choices[0].message
-        parsed = message.parsed
-        if parsed is None:
-            raise RuntimeError(
-                f"LLM returned no parsed content for {response_format.__name__}: "
-                f"refusal={message.refusal!r}"
+        try:
+            completion = self._client.chat.completions.parse(**kwargs)
+            message = completion.choices[0].message
+            parsed = message.parsed
+            if parsed is None:
+                raise RuntimeError(
+                    f"LLM returned no parsed content for {response_format.__name__}: "
+                    f"refusal={message.refusal!r}"
+                )
+            return parsed
+        except BadRequestError as exc:
+            if exc.status_code != 400 or "response_format" not in str(exc):
+                raise
+            log.debug(
+                "Endpoint rejected json_schema response_format (400); retrying with json_object"
             )
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(
-            json.dumps({"content": parsed.model_dump_json()}),
-            encoding="utf-8",
-        )
-        return parsed
+        # Fallback: json_object mode — model must emit valid JSON, we parse manually
+        fallback_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        if temperature is not None:
+            fallback_kwargs["temperature"] = temperature
+
+        completion = cast(ChatCompletion, self._client.chat.completions.create(**fallback_kwargs))
+        content = completion.choices[0].message.content or ""
+        # Strip markdown fences the model may add
+        content = re.sub(r"^```(?:json)?\s*", "", content.strip())
+        content = re.sub(r"\s*```$", "", content)
+        return response_format.model_validate_json(content)
 
     def _cache_key(
         self,
