@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -21,7 +22,7 @@ from epubforge.ir.semantic import (
 )
 
 
-def _prov(page: int = 1, source: str = "passthrough") -> Provenance:
+def _prov(page: int = 1, source: Literal["llm", "vlm", "passthrough"] = "passthrough") -> Provenance:
     return Provenance(page=page, source=source)
 
 
