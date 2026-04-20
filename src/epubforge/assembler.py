@@ -197,6 +197,14 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 result[i] = block.model_copy(update={"paired": True})
                 log.debug("Paired footnote callout %r (page %d) into paragraph block %d", callout, block.provenance.page, j)
                 break
+            if isinstance(candidate, Table) and callout in candidate.html:
+                # Replace all occurrences — same callout may appear in multiple cells
+                result[j] = candidate.model_copy(update={
+                    "html": candidate.html.replace(callout, fn_marker)
+                })
+                result[i] = block.model_copy(update={"paired": True})
+                log.debug("Paired footnote callout %r (page %d) into table block %d", callout, block.provenance.page, j)
+                break
     return result
 
 

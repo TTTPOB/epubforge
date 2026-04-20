@@ -122,7 +122,7 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
         elif isinstance(block, Table):
             title_html = f'<p class="table-title">{_esc(block.table_title)}</p>' if block.table_title else ""
             caption_html = f'<p class="table-caption">{_esc(block.caption)}</p>' if block.caption else ""
-            parts.append(f"{title_html}{block.html}{caption_html}")
+            parts.append(f"{title_html}{_apply_fn_markers(block.html)}{caption_html}")
         elif isinstance(block, Equation):
             parts.append(f'<p class="equation">{_esc(block.latex)}</p>')
 
@@ -142,16 +142,18 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
     return body_html, footnotes_html
 
 
-def _render_inline(text: str) -> str:
-    """Escape HTML then replace \x02fn-PAGE-CALLOUT\x03 markers with noteref links."""
-    escaped = _esc(text)
-
+def _apply_fn_markers(html: str) -> str:
+    """Replace \x02fn-PAGE-CALLOUT\x03 markers with noteref links (no HTML escaping)."""
     def to_link(m: re.Match[str]) -> str:
         fn_id = m.group(1)
         callout = fn_id.split("-", 2)[2]
         return f'<sup epub:type="noteref"><a href="#{fn_id}">{callout}</a></sup>'
+    return _FN_MARKER_RE.sub(to_link, html)
 
-    return _FN_MARKER_RE.sub(to_link, escaped)
+
+def _render_inline(text: str) -> str:
+    """Escape HTML then convert fn markers to noteref links (for plain paragraph text)."""
+    return _apply_fn_markers(_esc(text))
 
 
 def _fn_id(fn: Footnote) -> str:
