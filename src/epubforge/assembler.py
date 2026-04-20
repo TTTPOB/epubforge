@@ -108,19 +108,33 @@ def _parse_block(raw: dict[str, Any], page: int, source: str) -> Block | None:
 
 
 def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
-    """Merge Table blocks marked continuation=True into the preceding Table block."""
+    """Merge Table blocks marked continuation=True into the preceding Table block.
+
+    Footnote blocks at the bottom of a page may sit between a table and its
+    cross-page continuation; we look back past them to find the preceding Table.
+    """
     result: list[Block] = []
     for block in blocks:
-        if isinstance(block, Table) and block.continuation and result and isinstance(result[-1], Table):
-            prev = result[-1]
-            result[-1] = prev.model_copy(update={
-                "html": _splice_table_html(prev.html, block.html),
-                "table_title": prev.table_title or block.table_title,
-                "caption": prev.caption or block.caption,
-            })
-            log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev.provenance.page)
-        else:
-            result.append(block)
+        if isinstance(block, Table) and block.continuation:
+            prev_tbl: Table | None = None
+            prev_idx: int | None = None
+            for j in range(len(result) - 1, -1, -1):
+                candidate = result[j]
+                if isinstance(candidate, Table):
+                    prev_tbl = candidate
+                    prev_idx = j
+                    break
+                if not isinstance(candidate, Footnote):
+                    break  # hit a non-footnote, non-table block — stop
+            if prev_tbl is not None and prev_idx is not None:
+                result[prev_idx] = prev_tbl.model_copy(update={
+                    "html": _splice_table_html(prev_tbl.html, block.html),
+                    "table_title": prev_tbl.table_title or block.table_title,
+                    "caption": prev_tbl.caption or block.caption,
+                })
+                log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev_tbl.provenance.page)
+                continue
+        result.append(block)
     return result
 
 
