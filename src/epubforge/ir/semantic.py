@@ -82,6 +82,19 @@ class Book(BaseModel):
     chapters: list[Chapter] = Field(default_factory=list)
 
 
+# --- stage 3 (cleaner) output schema ---
+
+class CleanBlock(BaseModel):
+    kind: Literal["paragraph", "heading", "footnote"]
+    text: str
+    level: int | None = None
+    callout: str | None = None
+
+
+class CleanOutput(BaseModel):
+    blocks: list[CleanBlock]
+
+
 # --- VLM output schema (used as response_format) ---
 
 class VLMBlock(BaseModel):
@@ -102,3 +115,9 @@ class VLMBlock(BaseModel):
 class VLMPageOutput(BaseModel):
     page: int
     blocks: list[VLMBlock]
+
+
+# --- stage 4 (VLM) multi-page wrapper ---
+
+class VLMGroupOutput(BaseModel):
+    pages: list[VLMPageOutput]

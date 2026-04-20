@@ -103,17 +103,22 @@ page) must have `"continuation": false` or omit the field.
 - Anchor every block to the provided text hints when the text matches visually.
 - bbox values are floats in PDF point units matching the anchor coordinate system.
 
-## Output schema (single page)
+## Output schema
 {
-  "page": <int>,
-  "blocks": [
-    {"kind": "paragraph",  "text": "...", "bbox": [x0, y0, x1, y1]},
-    {"kind": "heading",    "text": "...", "level": 1, "bbox": [...]},
-    {"kind": "footnote",   "callout": "①", "text": "...", "bbox": [...]},
-    {"kind": "figure",     "caption": "...", "image_ref": "p17_fig1", "bbox": [...]},
-    {"kind": "table",      "html": "<table>...</table>", "table_title": "表X-X 标题", "caption": "资料来源：…", "bbox": [...]},
-    {"kind": "equation",   "latex": "...", "bbox": [...]}
+  "pages": [
+    {
+      "page": <int>,
+      "blocks": [
+        {"kind": "paragraph",  "text": "...", "bbox": [x0, y0, x1, y1]},
+        {"kind": "heading",    "text": "...", "level": 1, "bbox": [...]},
+        {"kind": "footnote",   "callout": "①", "text": "...", "bbox": [...]},
+        {"kind": "figure",     "caption": "...", "image_ref": "p17_fig1", "bbox": [...]},
+        {"kind": "table",      "html": "<table>...</table>", "table_title": "...", "caption": "...", "bbox": [...], "continuation": false},
+        {"kind": "equation",   "latex": "...", "bbox": [...]}
+      ]
+    }
   ]
 }
+Return one entry per input page, in order. For single-page requests return a 1-element "pages" array.
 Output ONLY valid JSON — no markdown fences, no commentary.
 """

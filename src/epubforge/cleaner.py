@@ -12,6 +12,7 @@ from docling_core.types.doc import DocItemLabel, DoclingDocument
 from epubforge.config import Config
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import CLEAN_SYSTEM
+from epubforge.ir.semantic import CleanOutput
 
 _HEADER_LABELS = frozenset({DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE})
 _SKIP_LABELS = frozenset({DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER})
@@ -65,13 +66,8 @@ def clean_simple_pages(
             {"role": "system", "content": CLEAN_SYSTEM},
             {"role": "user", "content": user_text},
         ]
-        raw_reply = client.chat(messages, response_format={"type": "json_object"})
-        try:
-            parsed = json.loads(raw_reply)
-            blocks = parsed.get("blocks", [])
-        except json.JSONDecodeError:
-            blocks = [{"kind": "paragraph", "text": raw_reply,
-                       "provenance": {"page": group["pages"][0], "source": "llm"}}]
+        result = client.chat_parsed(messages, response_format=CleanOutput)
+        blocks = [b.model_dump(exclude_none=True) for b in result.blocks]
 
         out_path.write_text(
             json.dumps({"pages": group["pages"], "blocks": blocks}, ensure_ascii=False, indent=2),

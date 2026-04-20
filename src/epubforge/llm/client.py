@@ -1,74 +1,95 @@
-"""OpenAI-compatible httpx client with disk-level request caching."""
+"""OpenAI-SDK client with typed structured outputs and disk-level request caching."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypeVar
 
-
-class Message(TypedDict):
-    role: str
-    content: str | list[dict[str, Any]]
-
-import httpx
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel
 
 from epubforge.config import Config
 
+# Re-export so existing `from epubforge.llm.client import Message` imports stay valid.
+Message = ChatCompletionMessageParam
+
+T = TypeVar("T", bound=BaseModel)
+
 
 class LLMClient:
-    """Thin wrapper around an OpenAI-compatible chat endpoint."""
+    """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
     def __init__(self, cfg: Config, *, use_vlm: bool = False) -> None:
         self.base_url = (cfg.vlm_base_url if use_vlm else cfg.llm_base_url).rstrip("/")
-        self.api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self.model = cfg.vlm_model if use_vlm else cfg.llm_model
         self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
         self.cache_dir = cfg.cache_dir
+        api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
+        self._client = OpenAI(
+            base_url=self.base_url,
+            api_key=api_key,
+            timeout=self.timeout,
+            max_retries=2,
+        )
 
-    def chat(
+    def chat_parsed(
         self,
-        messages: list[Message],
+        messages: list[ChatCompletionMessageParam],
         *,
-        response_format: dict[str, str] | None = None,
+        response_format: type[T],
         temperature: float | None = 0.0,
-    ) -> str:
-        payload: dict[str, Any] = {
+    ) -> T:
+        cache_key = self._cache_key(messages, response_format, temperature)
+        cache_path = self._cache_path(cache_key)
+        if cache_path.exists():
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
+            return response_format.model_validate_json(raw)
+
+        kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
+            "response_format": response_format,
         }
         if temperature is not None:
-            payload["temperature"] = temperature
-        if response_format:
-            payload["response_format"] = response_format
+            kwargs["temperature"] = temperature
 
-        cache_key = self._cache_key({"base_url": self.base_url, "payload": payload})
-        cache_path = self._cache_path(cache_key)
-
-        if cache_path.exists():
-            return json.loads(cache_path.read_text(encoding="utf-8"))["content"]
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        resp = httpx.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        content: str = resp.json()["choices"][0]["message"]["content"]
+        completion = self._client.chat.completions.parse(**kwargs)
+        message = completion.choices[0].message
+        parsed = message.parsed
+        if parsed is None:
+            raise RuntimeError(
+                f"LLM returned no parsed content for {response_format.__name__}: "
+                f"refusal={message.refusal!r}"
+            )
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps({"content": content}), encoding="utf-8")
+        cache_path.write_text(
+            json.dumps({"content": parsed.model_dump_json()}),
+            encoding="utf-8",
+        )
+        return parsed
 
-        return content
-
-    def _cache_key(self, payload: dict[str, Any]) -> str:
-        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    def _cache_key(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        response_format: type[BaseModel],
+        temperature: float | None,
+    ) -> str:
+        key_obj: dict[str, Any] = {
+            "base_url": self.base_url,
+            "model": self.model,
+            "messages": messages,
+            "response_format": {
+                "name": response_format.__name__,
+                "schema": response_format.model_json_schema(),
+            },
+        }
+        if temperature is not None:
+            key_obj["temperature"] = temperature
+        blob = json.dumps(key_obj, sort_keys=True, ensure_ascii=False).encode()
         return hashlib.sha256(blob).hexdigest()
 
     def _cache_path(self, key: str) -> Path:

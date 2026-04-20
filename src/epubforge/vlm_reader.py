@@ -6,7 +6,7 @@ import base64
 import io
 import json
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from docling_core.types.doc import DocItemLabel, DoclingDocument
 from docling_core.types.doc.base import BoundingBox
@@ -20,7 +20,7 @@ class _AnchorItem(TypedDict):
 import fitz  # PyMuPDF
 
 from epubforge.config import Config
-from epubforge.ir.semantic import VLMPageOutput
+from epubforge.ir.semantic import VLMGroupOutput
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import VLM_SYSTEM
 
@@ -122,53 +122,34 @@ def _call_vlm_for_group(
 
     content.append({"type": "text", "text": instruction})
 
-    messages: list[Message] = [
+    messages: list[Message] = cast(list[Message], [
         {"role": "system", "content": VLM_SYSTEM},
         {"role": "user", "content": content},
-    ]
+    ])
 
     try:
-        raw_reply = client.chat(messages, response_format={"type": "json_object"}, temperature=1)
+        result = client.chat_parsed(
+            messages,
+            response_format=VLMGroupOutput,
+            temperature=1,
+        )
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("VLM call failed for pages %s: %s", group, exc)
-        return [{"page": pno, "blocks": [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}]} for pno in group]
+        return [
+            {"page": pno, "blocks": [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}]}
+            for pno in group
+        ]
 
-    return _parse_vlm_reply(raw_reply, group)
-
-
-def _parse_vlm_reply(raw_reply: str, group: list[int]) -> list[dict[str, Any]]:
-    try:
-        parsed = json.loads(raw_reply)
-    except json.JSONDecodeError:
-        return [{"page": pno, "blocks": [{"kind": "paragraph", "text": raw_reply}]} for pno in group]
-
-    # Single-page: expect {"page": N, "blocks": [...]}
-    if len(group) == 1:
-        parsed["page"] = group[0]
-        try:
-            VLMPageOutput.model_validate(parsed)
-        except Exception:
-            parsed = {"page": group[0], "blocks": [{"kind": "paragraph", "text": raw_reply}]}
-        return [parsed]
-
-    # Multi-page: expect {"pages": [...]} or a top-level array
-    pages_list: list[dict[str, Any]] = []
-    if isinstance(parsed, list):
-        pages_list = parsed
-    elif "pages" in parsed:
-        pages_list = parsed["pages"]
-    else:
-        pages_list = [parsed]
-
+    # Override page numbers: trust the caller, not the model's hallucinated values.
     results: list[dict[str, Any]] = []
     for i, pno in enumerate(group):
-        entry = pages_list[i] if i < len(pages_list) else {}
+        entry = (
+            result.pages[i].model_dump(exclude_none=True)
+            if i < len(result.pages)
+            else {"page": pno, "blocks": []}
+        )
         entry["page"] = pno
-        try:
-            VLMPageOutput.model_validate(entry)
-        except Exception:
-            entry = {"page": pno, "blocks": [{"kind": "paragraph", "text": str(entry)}]}
         results.append(entry)
     return results
 
