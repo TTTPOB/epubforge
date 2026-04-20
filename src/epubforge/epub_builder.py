@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-from typing import Any
 
 from ebooklib import epub
 
@@ -54,8 +53,8 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
     )
     ebook.add_item(css_item)
 
-    spine: list[Any] = ["nav"]
-    toc: list[Any] = []
+    spine: list[str | epub.EpubHtml] = ["nav"]
+    toc: list[epub.Link] = []
 
     for i, chapter in enumerate(book_model.chapters):
         xhtml_name = f"chap{i:04d}.xhtml"

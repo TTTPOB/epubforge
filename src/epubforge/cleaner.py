@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from epubforge.config import Config
-from epubforge.llm.client import LLMClient
+from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import CLEAN_SYSTEM
 
 _HEADER_LABELS = frozenset({"section_header", "title"})
@@ -59,7 +59,7 @@ def clean_simple_pages(
             continue
 
         user_text = _format_blocks_for_llm(group["items"])
-        messages = [
+        messages: list[Message] = [
             {"role": "system", "content": CLEAN_SYSTEM},
             {"role": "user", "content": user_text},
         ]

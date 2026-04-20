@@ -5,7 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
+
+
+class Message(TypedDict):
+    role: str
+    content: str | list[dict[str, Any]]
 
 import httpx
 
@@ -24,9 +29,9 @@ class LLMClient:
 
     def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[Message],
         *,
-        response_format: dict[str, Any] | None = None,
+        response_format: dict[str, str] | None = None,
         temperature: float | None = 0.0,
     ) -> str:
         payload: dict[str, Any] = {

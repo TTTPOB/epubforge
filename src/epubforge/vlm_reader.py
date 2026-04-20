@@ -6,13 +6,19 @@ import base64
 import io
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
+
+
+class _AnchorItem(TypedDict):
+    label: str
+    text: str
+    bbox: dict[str, float] | None
 
 import fitz  # PyMuPDF
 
 from epubforge.config import Config
 from epubforge.ir.semantic import VLMPageOutput
-from epubforge.llm.client import LLMClient
+from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import VLM_SYSTEM
 
 _DPI = 150
@@ -80,7 +86,7 @@ def _group_pages(complex_pages: list[int], table_pages: set[int]) -> list[list[i
 def _call_vlm_for_group(
     doc: fitz.Document,
     group: list[int],
-    anchors: dict[int, list[dict[str, Any]]],
+    anchors: dict[int, list[_AnchorItem]],
     client: LLMClient,
 ) -> list[dict[str, Any]]:
     """Send one or more pages to the VLM and return one result dict per page."""
@@ -114,7 +120,7 @@ def _call_vlm_for_group(
 
     content.append({"type": "text", "text": instruction})
 
-    messages = [
+    messages: list[Message] = [
         {"role": "system", "content": VLM_SYSTEM},
         {"role": "user", "content": content},
     ]
@@ -145,7 +151,7 @@ def _parse_vlm_reply(raw_reply: str, group: list[int]) -> list[dict[str, Any]]:
         return [parsed]
 
     # Multi-page: expect {"pages": [...]} or a top-level array
-    pages_list: list[Any] = []
+    pages_list: list[dict[str, Any]] = []
     if isinstance(parsed, list):
         pages_list = parsed
     elif "pages" in parsed:
@@ -175,8 +181,8 @@ def _render_page(doc: fitz.Document, page_no: int) -> tuple[str, str]:
     return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
 
 
-def _build_anchors(raw: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
-    anchors: dict[int, list[dict[str, Any]]] = {}
+def _build_anchors(raw: dict[str, Any]) -> dict[int, list[_AnchorItem]]:
+    anchors: dict[int, list[_AnchorItem]] = {}
     for col in ("texts", "tables", "pictures", "key_value_items", "form_items"):
         for item in raw.get(col) or []:
             for prov in item.get("prov") or []:
@@ -197,7 +203,7 @@ def _pages_with_tables(raw: dict[str, Any]) -> set[int]:
     return result
 
 
-def _format_anchors(items: list[dict[str, Any]]) -> str:
+def _format_anchors(items: list[_AnchorItem]) -> str:
     lines: list[str] = []
     for it in items:
         if it["label"] in _SKIP_LABELS:
