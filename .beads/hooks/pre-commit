@@ -22,3 +22,12 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v0.63.3 ---
+
+# Run pyrefly type check
+if command -v uv >/dev/null 2>&1; then
+  uv run pyrefly check 2>&1
+  if [ $? -ne 0 ]; then
+    echo >&2 "pyrefly: type errors found — commit blocked"
+    exit 1
+  fi
+fi
