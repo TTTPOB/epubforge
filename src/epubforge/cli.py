@@ -35,12 +35,13 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
 def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all stages even if outputs exist"),
+    from_stage: int = typer.Option(1, "--from", min=1, max=6, help="Clear and re-run from stage N (1–6)"),
 ) -> None:
     """Run the full six-stage pipeline."""
     cfg = load_config()
     cfg.require_llm()
     cfg.require_vlm()
-    pipeline.run_all(pdf_path, cfg, force=force)
+    pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage)
 
 
 @app.command()

@@ -22,13 +22,33 @@ def _skip(path: Path, force: bool, label: str) -> bool:
     return False
 
 
-def run_all(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+def run_all(pdf_path: Path, cfg: Config, *, force: bool = False, from_stage: int = 1) -> None:
+    if from_stage > 1:
+        work = cfg.book_work_dir(pdf_path)
+        _clear_from(work, cfg.book_out_path(pdf_path), from_stage)
     run_parse(pdf_path, cfg, force=force)
     run_classify(pdf_path, cfg, force=force)
     run_clean(pdf_path, cfg, force=force)
     run_vlm(pdf_path, cfg, force=force)
     run_assemble(pdf_path, cfg, force=force)
     run_build(pdf_path, cfg, force=force)
+
+
+def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
+    """Delete stage outputs for stages >= from_stage so downstream is re-run."""
+    stage_files: dict[int, list[Path]] = {
+        1: [work / "01_raw.json"],
+        2: [work / "02_pages.json"],
+        3: list((work / "03_simple").glob("*.json")) if (work / "03_simple").exists() else [],
+        4: list((work / "04_complex").glob("*.json")) if (work / "04_complex").exists() else [],
+        5: [work / "05_semantic.json"],
+        6: [epub_out],
+    }
+    for stage in range(from_stage, 7):
+        for p in stage_files.get(stage, []):
+            if p.exists():
+                p.unlink()
+                console.print(f"[dim]cleared stage {stage}: {p.name}[/dim]")
 
 
 def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
