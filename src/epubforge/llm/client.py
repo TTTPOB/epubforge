@@ -31,6 +31,8 @@ class LLMClient:
         self.model = cfg.vlm_model if use_vlm else cfg.llm_model
         self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
         self.max_tokens = cfg.vlm_max_tokens if use_vlm else cfg.llm_max_tokens
+        if use_vlm and self.max_tokens is None:
+            self.max_tokens = 16384
         self.cache_dir = cfg.cache_dir
         api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self._client = OpenAI(
@@ -68,7 +70,11 @@ class LLMClient:
         response_format: type[T],
         temperature: float | None,
     ) -> T:
-        """Try OpenAI structured outputs; fall back to json_object mode on 400."""
+        """Try OpenAI structured outputs; fall back to json_object mode on 400.
+
+        Automatically retries with doubled max_tokens if the response is truncated
+        (finish_reason == "length"), up to 3 attempts total (max 32768 tokens).
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -76,28 +82,54 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
 
-        try:
-            completion = self._client.chat.completions.parse(**kwargs)
+        budget = self.max_tokens
+        if budget is not None:
+            kwargs["max_tokens"] = budget
+
+        for _attempt in range(3):
+            try:
+                completion = self._client.chat.completions.parse(**kwargs)
+            except BadRequestError as exc:
+                if exc.status_code != 400 or "response_format" not in str(exc):
+                    raise
+                log.warning(
+                    "endpoint rejected json_schema response_format (400); "
+                    "falling back to json_object mode (no strict schema)"
+                )
+                return self._call_json_object_fallback(messages, response_format, temperature)
+
+            finish_reason = completion.choices[0].finish_reason
             message = completion.choices[0].message
             parsed = message.parsed
+
+            if finish_reason == "length":
+                new_budget = min((budget or 8192) * 2, 32768)
+                log.warning(
+                    "structured output truncated; retrying with max_tokens=%d", new_budget
+                )
+                budget = new_budget
+                kwargs["max_tokens"] = new_budget
+                continue
+
             if parsed is None:
                 raise RuntimeError(
                     f"LLM returned no parsed content for {response_format.__name__}: "
                     f"refusal={message.refusal!r}"
                 )
             return parsed
-        except BadRequestError as exc:
-            if exc.status_code != 400 or "response_format" not in str(exc):
-                raise
-            log.debug(
-                "Endpoint rejected json_schema response_format (400); retrying with json_object"
-            )
 
-        # Fallback: json_object mode — model must emit valid JSON, we parse manually.
-        # Use a large max_tokens to avoid truncated JSON; default 8192 when not configured.
+        raise RuntimeError(
+            f"Structured output for {response_format.__name__} was truncated after 3 attempts"
+        )
+
+    def _call_json_object_fallback(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        response_format: type[T],
+        temperature: float | None,
+    ) -> T:
+        """Fallback: json_object mode — model must emit valid JSON, parsed manually."""
         fallback_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
