@@ -218,12 +218,17 @@ def _detect_language(blocks: list[Block]) -> str:
 
 def _build_book(blocks: list[Block], work_dir: Path) -> Book:
     """Aggregate blocks into chapters at every level-1 Heading boundary."""
+    from docling_core.types.doc import DoclingDocument
+
     raw_path = work_dir / "01_raw.json"
-    title = "Untitled"
+    title = work_dir.name.replace("_", " ").title()
     if raw_path.exists():
-        raw = json.loads(raw_path.read_text(encoding="utf-8"))
-        meta = raw.get("metadata") or {}
-        title = meta.get("title") or (work_dir.name.replace("_", " ").title())
+        doc = DoclingDocument.load_from_json(raw_path)
+        origin = getattr(doc, "origin", None)
+        if origin and getattr(origin, "filename", None):
+            title = Path(origin.filename).stem
+        elif doc.name:
+            title = doc.name
 
     language = _detect_language(blocks)
 

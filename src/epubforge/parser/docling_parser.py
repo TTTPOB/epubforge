@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
@@ -30,8 +29,7 @@ def parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path) -> None:
     result = converter.convert(str(pdf_path))
     doc = result.document
 
-    raw = doc.export_to_dict()
-    out_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    doc.save_as_json(out_path)
 
     images_dir.mkdir(parents=True, exist_ok=True)
     _save_figure_crops(doc, images_dir)

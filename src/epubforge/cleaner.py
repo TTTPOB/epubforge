@@ -7,12 +7,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from docling_core.types.doc import DocItemLabel, DoclingDocument
+
 from epubforge.config import Config
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import CLEAN_SYSTEM
 
-_HEADER_LABELS = frozenset({"section_header", "title"})
-_SKIP_LABELS = frozenset({"page_header", "page_footer"})
+_HEADER_LABELS = frozenset({DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE})
+_SKIP_LABELS = frozenset({DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER})
 
 
 def clean_simple_pages(
@@ -25,28 +27,28 @@ def clean_simple_pages(
     page_nos: set[int] | None = None,
 ) -> None:
     """Clean simple pages via LLM; write one JSON per section-group to *out_dir*."""
-    raw: dict[str, Any] = json.loads(raw_path.read_text(encoding="utf-8"))
+    doc = DoclingDocument.load_from_json(raw_path)
     pages_data: list[dict[str, Any]] = json.loads(pages_path.read_text(encoding="utf-8"))["pages"]
 
     simple_set = {p["page"] for p in pages_data if p["kind"] == "simple"}
     if page_nos is not None:
         simple_set &= page_nos
 
-    # Build page → ordered items mapping from all text collections
+    # Build page → ordered items mapping from text collection only
     page_items: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for item in raw.get("texts") or []:
-        for prov in item.get("prov") or []:
-            pno = prov.get("page_no", 0)
+    for item in doc.texts:
+        for prov in item.prov:
+            pno = prov.page_no
             if pno in simple_set:
                 page_items[pno].append({
-                    "label": item.get("label", ""),
-                    "text": item.get("text", ""),
-                    "bbox": prov.get("bbox"),
+                    "label": item.label,
+                    "text": item.text,
+                    "bbox_t": prov.bbox.t if prov.bbox else 0.0,
                 })
 
     # Sort each page's items by vertical position (top bbox coord)
     for pno in page_items:
-        page_items[pno].sort(key=lambda x: (x["bbox"] or {}).get("t", 0) if x["bbox"] else 0)
+        page_items[pno].sort(key=lambda x: x["bbox_t"])
 
     # Group consecutive simple pages into section-bounded chunks
     groups = _build_groups(sorted(simple_set), page_items)
@@ -92,7 +94,6 @@ def _build_groups(
 
     for pno in sorted_pages:
         items = page_items.get(pno, [])
-        # Start a new group when a section header appears (but not at the very first page)
         has_header = any(it["label"] in _HEADER_LABELS for it in items)
         if has_header and current_pages:
             flush()
@@ -110,6 +111,7 @@ def _format_blocks_for_llm(items: list[dict[str, Any]]) -> str:
     for it in items:
         if it["label"] in _SKIP_LABELS:
             continue
-        prefix = f"[{it['label'].upper()}] " if it["label"] in _HEADER_LABELS else ""
+        label_str = it["label"].value if isinstance(it["label"], DocItemLabel) else it["label"]
+        prefix = f"[{label_str.upper()}] " if it["label"] in _HEADER_LABELS else ""
         lines.append(f"{prefix}{it['text']}")
     return "\n".join(lines)

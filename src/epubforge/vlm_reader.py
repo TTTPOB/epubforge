@@ -8,11 +8,14 @@ import json
 from pathlib import Path
 from typing import Any, TypedDict
 
+from docling_core.types.doc import DocItemLabel, DoclingDocument
+from docling_core.types.doc.base import BoundingBox
+
 
 class _AnchorItem(TypedDict):
-    label: str
+    label: DocItemLabel
     text: str
-    bbox: dict[str, float] | None
+    bbox: BoundingBox | None
 
 import fitz  # PyMuPDF
 
@@ -22,7 +25,7 @@ from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import VLM_SYSTEM
 
 _DPI = 150
-_SKIP_LABELS = frozenset({"page_header", "page_footer"})
+_SKIP_LABELS = frozenset({DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER})
 
 
 def read_complex_pages(
@@ -40,19 +43,19 @@ def read_complex_pages(
     Consecutive complex pages that both contain tables are grouped into one VLM
     call so that cross-page table continuations are handled correctly.
     """
-    raw: dict[str, Any] = json.loads(raw_path.read_text(encoding="utf-8"))
+    doc = DoclingDocument.load_from_json(raw_path)
     pages_data: list[dict[str, Any]] = json.loads(pages_path.read_text(encoding="utf-8"))["pages"]
 
     complex_pages = [p["page"] for p in pages_data if p["kind"] == "complex"]
     if page_nos is not None:
         complex_pages = [p for p in complex_pages if p in page_nos]
 
-    anchors = _build_anchors(raw)
-    table_pages = _pages_with_tables(raw)
+    anchors = _build_anchors(doc)
+    table_pages = _pages_with_tables(doc)
     groups = _group_pages(complex_pages, table_pages)
 
     client = LLMClient(cfg, use_vlm=True)
-    doc = fitz.open(str(pdf_path))
+    fitz_doc = fitz.open(str(pdf_path))
 
     for group in groups:
         # Skip if all outputs already exist
@@ -60,13 +63,13 @@ def read_complex_pages(
         if all(p.exists() for p in out_paths) and not force:
             continue
 
-        results = _call_vlm_for_group(doc, group, anchors, client)
+        results = _call_vlm_for_group(fitz_doc, group, anchors, client)
 
         for pno, result in zip(group, results):
             out_path = out_dir / f"p{pno:04d}.json"
             out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    doc.close()
+    fitz_doc.close()
 
 
 def _group_pages(complex_pages: list[int], table_pages: set[int]) -> list[list[int]]:
@@ -75,7 +78,6 @@ def _group_pages(complex_pages: list[int], table_pages: set[int]) -> list[list[i
         return []
     groups: list[list[int]] = [[complex_pages[0]]]
     for prev, curr in zip(complex_pages, complex_pages[1:]):
-        # Merge if consecutive page numbers AND both contain tables
         if curr == prev + 1 and prev in table_pages and curr in table_pages:
             groups[-1].append(curr)
         else:
@@ -157,7 +159,6 @@ def _parse_vlm_reply(raw_reply: str, group: list[int]) -> list[dict[str, Any]]:
     elif "pages" in parsed:
         pages_list = parsed["pages"]
     else:
-        # Fallback: treat entire reply as one page
         pages_list = [parsed]
 
     results: list[dict[str, Any]] = []
@@ -181,26 +182,25 @@ def _render_page(doc: fitz.Document, page_no: int) -> tuple[str, str]:
     return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
 
 
-def _build_anchors(raw: dict[str, Any]) -> dict[int, list[_AnchorItem]]:
+def _build_anchors(doc: DoclingDocument) -> dict[int, list[_AnchorItem]]:
+    import itertools
     anchors: dict[int, list[_AnchorItem]] = {}
-    for col in ("texts", "tables", "pictures", "key_value_items", "form_items"):
-        for item in raw.get(col) or []:
-            for prov in item.get("prov") or []:
-                pno = prov.get("page_no", 0)
-                anchors.setdefault(pno, []).append({
-                    "label": item.get("label", ""),
-                    "text": item.get("text", "")[:200],
-                    "bbox": prov.get("bbox"),
-                })
+    for item in itertools.chain(
+        doc.texts, doc.tables, doc.pictures, doc.key_value_items, doc.form_items
+    ):
+        text = getattr(item, "text", "")[:200]
+        for prov in item.prov:
+            pno = prov.page_no
+            anchors.setdefault(pno, []).append({
+                "label": item.label,
+                "text": text,
+                "bbox": prov.bbox,
+            })
     return anchors
 
 
-def _pages_with_tables(raw: dict[str, Any]) -> set[int]:
-    result: set[int] = set()
-    for item in raw.get("tables") or []:
-        for prov in item.get("prov") or []:
-            result.add(prov.get("page_no", 0))
-    return result
+def _pages_with_tables(doc: DoclingDocument) -> set[int]:
+    return {prov.page_no for tbl in doc.tables for prov in tbl.prov}
 
 
 def _format_anchors(items: list[_AnchorItem]) -> str:
@@ -208,7 +208,11 @@ def _format_anchors(items: list[_AnchorItem]) -> str:
     for it in items:
         if it["label"] in _SKIP_LABELS:
             continue
-        bbox = it["bbox"] or {}
-        coord = f"({bbox.get('l',0):.0f},{bbox.get('t',0):.0f},{bbox.get('r',0):.0f},{bbox.get('b',0):.0f})"
-        lines.append(f"  [{it['label']}] {it['text']!r} @{coord}")
+        bbox = it["bbox"]
+        if bbox is not None:
+            coord = f"({bbox.l:.0f},{bbox.t:.0f},{bbox.r:.0f},{bbox.b:.0f})"
+        else:
+            coord = "(?,?,?,?)"
+        label_str = it["label"].value if isinstance(it["label"], DocItemLabel) else it["label"]
+        lines.append(f"  [{label_str}] {it['text']!r} @{coord}")
     return "\n".join(lines) if lines else "(none)"

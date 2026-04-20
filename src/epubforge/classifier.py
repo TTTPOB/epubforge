@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
-# Labels that immediately make a page "complex"
-_COMPLEX_LABELS: frozenset[str] = frozenset(
-    {"table", "picture", "footnote", "formula", "code", "chart"}
+from docling_core.types.doc import (
+    DocItemLabel,
+    DoclingDocument,
 )
+
+_COMPLEX_LABELS: frozenset[DocItemLabel] = frozenset({
+    DocItemLabel.TABLE,
+    DocItemLabel.PICTURE,
+    DocItemLabel.FOOTNOTE,
+    DocItemLabel.FORMULA,
+    DocItemLabel.CODE,
+    DocItemLabel.CHART,
+})
 
 _MULTICOLUMN_GAP_RATIO = 0.05  # x-gap > 5% of page width → multi-column
 
@@ -26,41 +35,32 @@ def classify_pages(raw_path: Path, out_path: Path) -> None:
           ]
         }
     """
-    raw: dict[str, Any] = json.loads(raw_path.read_text(encoding="utf-8"))
+    doc = DoclingDocument.load_from_json(raw_path)
 
-    page_info: dict[int, dict[str, Any]] = defaultdict(
+    page_info: dict[int, dict] = defaultdict(
         lambda: {"kind": "simple", "element_refs": [], "text_bboxes": []}
     )
 
-    pages_meta: dict[int, dict[str, float]] = {}
-    for page_no, page_data in (raw.get("pages") or {}).items():
-        w = (page_data.get("size") or {}).get("width", 595.0)
-        pages_meta[int(page_no)] = {"width": w}
+    pages_meta: dict[int, float] = {
+        pno: page.size.width for pno, page in doc.pages.items()
+    }
 
-    def _process_items(items: list[dict[str, Any]]) -> None:
-        for item in items:
-            label: str = item.get("label", "")
-            ref: str = item.get("self_ref", "")
-            for prov in item.get("prov") or []:
-                page_no: int = prov.get("page_no", 0)
-                info = page_info[page_no]
-                info["element_refs"].append(ref)
-                if label in _COMPLEX_LABELS:
-                    info["kind"] = "complex"
-                if label == "text":
-                    bbox = prov.get("bbox") or {}
-                    l_val = bbox.get("l")
-                    r_val = bbox.get("r")
-                    if l_val is not None and r_val is not None:
-                        info["text_bboxes"].append((l_val, r_val))
+    for item in itertools.chain(
+        doc.texts, doc.tables, doc.pictures, doc.key_value_items, doc.form_items
+    ):
+        for prov in item.prov:
+            pno = prov.page_no
+            info = page_info[pno]
+            info["element_refs"].append(item.self_ref)
+            if item.label in _COMPLEX_LABELS:
+                info["kind"] = "complex"
+            if item.label == DocItemLabel.TEXT:
+                info["text_bboxes"].append((prov.bbox.l, prov.bbox.r))
 
-    for collection in ("texts", "tables", "pictures", "key_value_items", "form_items"):
-        _process_items(raw.get(collection) or [])
-
-    for page_no, info in page_info.items():
+    for pno, info in page_info.items():
         if info["kind"] == "complex":
             continue
-        page_width = (pages_meta.get(page_no) or {}).get("width", 595.0)
+        page_width = pages_meta.get(pno, 595.0)
         if _is_multicolumn(info["text_bboxes"], page_width):
             info["kind"] = "complex"
 
