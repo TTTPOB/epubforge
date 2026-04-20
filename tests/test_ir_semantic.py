@@ -19,6 +19,9 @@ from epubforge.ir.semantic import (
     Provenance,
     Table,
     VLMPageOutput,
+    VLMParagraph,
+    VLMTable,
+    VLMFootnote,
 )
 
 
@@ -128,3 +131,55 @@ class TestVLMPageOutput:
         }
         out = VLMPageOutput.model_validate(raw)
         assert len(out.blocks) == 5
+
+    def test_discriminated_union_correct_types(self) -> None:
+        raw = {
+            "page": 1,
+            "blocks": [
+                {"kind": "paragraph", "text": "Hello"},
+                {"kind": "table", "html": "<table/>"},
+            ],
+        }
+        out = VLMPageOutput.model_validate(raw)
+        assert isinstance(out.blocks[0], VLMParagraph)
+        assert isinstance(out.blocks[1], VLMTable)
+
+    def test_invalid_kind_raises_validation_error(self) -> None:
+        raw = {"page": 1, "blocks": [{"kind": "unknown_kind", "text": "x"}]}
+        with pytest.raises(ValidationError):
+            VLMPageOutput.model_validate(raw)
+
+    def test_table_requires_html(self) -> None:
+        raw = {"page": 1, "blocks": [{"kind": "table"}]}
+        with pytest.raises(ValidationError):
+            VLMPageOutput.model_validate(raw)
+
+    def test_footnote_requires_callout(self) -> None:
+        raw = {"page": 1, "blocks": [{"kind": "footnote", "text": "body"}]}
+        with pytest.raises(ValidationError):
+            VLMPageOutput.model_validate(raw)
+
+    def test_extra_fields_ignored(self) -> None:
+        # ref_bbox was a field in old VLMBlock; it should be silently ignored now
+        raw = {
+            "page": 1,
+            "blocks": [{"kind": "footnote", "callout": "①", "text": "note", "ref_bbox": [1, 2, 3, 4]}],
+        }
+        out = VLMPageOutput.model_validate(raw)
+        assert isinstance(out.blocks[0], VLMFootnote)
+
+
+class TestAssemblerPagePropagation:
+    def test_per_block_page_used(self) -> None:
+        from epubforge.assembler import _parse_block
+
+        block = _parse_block({"kind": "paragraph", "text": "x", "page": 42}, default_page=1, source="llm")
+        assert block is not None
+        assert block.provenance.page == 42
+
+    def test_falls_back_to_default_page(self) -> None:
+        from epubforge.assembler import _parse_block
+
+        block = _parse_block({"kind": "paragraph", "text": "x"}, default_page=7, source="llm")
+        assert block is not None
+        assert block.provenance.page == 7

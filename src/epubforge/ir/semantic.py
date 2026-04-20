@@ -112,19 +112,50 @@ class CleanOutput(BaseModel):
 
 # --- VLM output schema (used as response_format) ---
 
-class VLMBlock(BaseModel):
-    kind: str
-    text: str | None = None
-    level: int | None = None
-    callout: str | None = None
-    ref_bbox: list[float] | None = None
-    caption: str | None = None
-    image_ref: str | None = None
-    html: str | None = None
-    latex: str | None = None
+class _VLMBase(BaseModel):
     bbox: list[float] | None = None
+
+
+class VLMParagraph(_VLMBase):
+    kind: Literal["paragraph"] = "paragraph"
+    text: str
+
+
+class VLMHeading(_VLMBase):
+    kind: Literal["heading"] = "heading"
+    text: str
+    level: int = 1
+
+
+class VLMFootnote(_VLMBase):
+    kind: Literal["footnote"] = "footnote"
+    callout: str
+    text: str = ""
+
+
+class VLMFigure(_VLMBase):
+    kind: Literal["figure"] = "figure"
+    caption: str = ""
+    image_ref: str | None = None
+
+
+class VLMTable(_VLMBase):
+    kind: Literal["table"] = "table"
+    html: str
+    table_title: str = ""
+    caption: str = ""
     continuation: bool = False
-    table_title: str | None = None
+
+
+class VLMEquation(_VLMBase):
+    kind: Literal["equation"] = "equation"
+    latex: str = ""
+
+
+VLMBlock = Annotated[
+    Union[VLMParagraph, VLMHeading, VLMFootnote, VLMFigure, VLMTable, VLMEquation],
+    Field(discriminator="kind"),
+]
 
 
 class VLMPageOutput(BaseModel):
