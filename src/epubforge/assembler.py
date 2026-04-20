@@ -216,22 +216,16 @@ def _detect_language(blocks: list[Block]) -> str:
     return "zh" if cjk / len(sample) > 0.1 else "en"
 
 
-def _build_book(blocks: list[Block], work_dir: Path) -> Book:
+class _BookMeta:
+    def __init__(self, title: str, language: str, authors: list[str] | None = None, source_pdf: str = "") -> None:
+        self.title = title
+        self.language = language
+        self.authors: list[str] = authors or []
+        self.source_pdf = source_pdf
+
+
+def _build_book_from_stream(blocks: list[Block], meta: _BookMeta) -> Book:
     """Aggregate blocks into chapters at every level-1 Heading boundary."""
-    from docling_core.types.doc import DoclingDocument
-
-    raw_path = work_dir / "01_raw.json"
-    title = work_dir.name.replace("_", " ").title()
-    if raw_path.exists():
-        doc = DoclingDocument.load_from_json(raw_path)
-        origin = getattr(doc, "origin", None)
-        if origin and getattr(origin, "filename", None):
-            title = Path(origin.filename).stem
-        elif doc.name:
-            title = doc.name
-
-    language = _detect_language(blocks)
-
     chapters: list[Chapter] = []
     current_title = "Front Matter"
     current_blocks: list[Block] = []
@@ -250,4 +244,29 @@ def _build_book(blocks: list[Block], work_dir: Path) -> Book:
 
     flush()
 
-    return Book(title=title, language=language, chapters=chapters)
+    return Book(
+        title=meta.title,
+        language=meta.language,
+        authors=meta.authors,
+        source_pdf=meta.source_pdf,
+        chapters=chapters,
+    )
+
+
+def _build_book(blocks: list[Block], work_dir: Path) -> Book:
+    """Aggregate blocks into chapters at every level-1 Heading boundary."""
+    from docling_core.types.doc import DoclingDocument
+
+    raw_path = work_dir / "01_raw.json"
+    title = work_dir.name.replace("_", " ").title()
+    if raw_path.exists():
+        doc = DoclingDocument.load_from_json(raw_path)
+        origin = getattr(doc, "origin", None)
+        if origin and getattr(origin, "filename", None):
+            title = Path(origin.filename).stem
+        elif doc.name:
+            title = doc.name
+
+    language = _detect_language(blocks)
+    meta = _BookMeta(title=title, language=language)
+    return _build_book_from_stream(blocks, meta)
