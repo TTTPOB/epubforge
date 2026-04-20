@@ -33,13 +33,17 @@ def run_all(
     if from_stage > 1:
         work = cfg.book_work_dir(pdf_path)
         _clear_from(work, cfg.book_out_path(pdf_path), from_stage)
-    run_parse(pdf_path, cfg, force=force)
-    run_classify(pdf_path, cfg, force=force)
-    run_clean(pdf_path, cfg, force=force, page_nos=pages)
-    run_vlm(pdf_path, cfg, force=force, page_nos=pages)
-    run_assemble(pdf_path, cfg, force=force)
-    run_refine_toc(pdf_path, cfg, force=force)
-    run_build(pdf_path, cfg, force=force)
+    # Stages before from_stage: skip if output exists (never force-rerun)
+    def _f(stage: int) -> bool:
+        return force if stage >= from_stage else False
+
+    run_parse(pdf_path, cfg, force=_f(1))
+    run_classify(pdf_path, cfg, force=_f(2))
+    run_clean(pdf_path, cfg, force=_f(3), page_nos=pages)
+    run_vlm(pdf_path, cfg, force=_f(4), page_nos=pages)
+    run_assemble(pdf_path, cfg, force=_f(5))
+    run_refine_toc(pdf_path, cfg, force=_f(6))
+    run_build(pdf_path, cfg, force=_f(7))
 
 
 def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
