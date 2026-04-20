@@ -131,7 +131,7 @@ def _call_vlm_for_group(
         result = client.chat_parsed(
             messages,
             response_format=VLMGroupOutput,
-            temperature=1,
+            temperature=0,
         )
     except Exception as exc:
         import logging
