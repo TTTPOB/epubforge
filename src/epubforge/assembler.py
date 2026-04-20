@@ -80,8 +80,9 @@ def assemble(work_dir: Path, out_path: Path) -> None:
     out_path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
 
 
-def _parse_block(raw: dict[str, Any], page: int, source: str) -> Block | None:
+def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block | None:
     kind = raw.get("kind", "")
+    page = raw.get("page", default_page)
     prov = Provenance(page=page, source=source)  # type: ignore[arg-type]
     try:
         if kind == "paragraph":

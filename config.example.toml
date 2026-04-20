@@ -12,7 +12,8 @@ timeout_seconds = 120
 base_url        = "https://openrouter.ai/api/v1"
 api_key         = ""  # or set EPUBFORGE_VLM_API_KEY
 model           = "google/gemini-flash-3"
-timeout_seconds = 300  # VLM calls with images can be slow; keep >= 300
+timeout_seconds = 300   # VLM calls with images can be slow; keep >= 300
+# max_tokens    = 16384  # default 16384; increase if complex pages are truncated
 
 [runtime]
 concurrency = 4
