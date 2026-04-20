@@ -14,11 +14,25 @@ pages (all belonging to the same section), output a cleaned JSON.
 | heading   | text, level (1–6)        | section / subsection title                 |
 | footnote  | callout, text            | footnote body — see rules below            |
 
+## Input format
+The user message contains one or more Docling blocks, each delimited by:
+
+  [BLOCK pN]
+  ...content...
+  [/BLOCK]
+
+Where N is the source page number. These delimiters are metadata only — they
+MUST NOT appear in your output text. Two adjacent [BLOCK] regions are DISTINCT
+Docling elements: do NOT concatenate their contents into one paragraph unless
+rule 1 (blank line in original) or a visible PDF line-wrap at the boundary
+clearly indicates a single paragraph was split. When in doubt, keep them as
+separate paragraphs.
+
 ## Paragraph boundary rules
 A new paragraph starts ONLY when ONE of the following is true:
 1. There is a blank line in the original.
 2. The next line has a clear first-line indent (≥ 2 em-spaces or equivalent).
-3. The Docling input marks it as a distinct block (different element).
+3. The Docling input marks it as a distinct [BLOCK] element.
 A bare line-break inside a sentence is NEVER a paragraph boundary.
 
 ## Footnote rules
@@ -141,6 +155,9 @@ page) must have `"continuation": false` or omit the field.
 - Do NOT merge footnote text into a paragraph.
 - Do NOT describe a mathematical expression as prose — emit `kind:"equation"` with `latex`.
 - Do NOT drop any inline callout marker.
+- Do NOT repeat content. Each paragraph on the page appears exactly once in
+  the output. Never emit the same sentence or substring twice, whether
+  concatenated or as separate blocks.
 
 ## Other rules
 - Follow reading order: top-to-bottom, left-to-right.
