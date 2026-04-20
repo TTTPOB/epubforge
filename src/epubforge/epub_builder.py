@@ -54,11 +54,13 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
     ebook.add_item(css_item)
 
     spine: list[str | epub.EpubHtml] = ["nav"]
-    toc: list[epub.Link] = []
+    # entries: (level, href, title, uid)
+    toc_entries: list[tuple[int, str, str, str]] = []
 
     for i, chapter in enumerate(book_model.chapters):
         xhtml_name = f"chap{i:04d}.xhtml"
         body_html, footnotes_html = _render_chapter(chapter)
+        ch_id = chapter.id or f"chap{i:04d}"
         full_html = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             '<!DOCTYPE html>\n'
@@ -68,7 +70,7 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
             f'<title>{_esc(chapter.title)}</title>'
             '<link rel="stylesheet" href="../style/main.css"/>'
             '</head>\n'
-            f'<body>\n<h1>{_esc(chapter.title)}</h1>\n'
+            f'<body>\n<h1 id="{_esc(ch_id)}">{_esc(chapter.title)}</h1>\n'
             f'{body_html}\n{footnotes_html}\n'
             '</body>\n</html>'
         )
@@ -81,14 +83,59 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
         chap_item.add_item(css_item)
         ebook.add_item(chap_item)
         spine.append(chap_item)
-        toc.append(epub.Link(xhtml_name, chapter.title, f"chap{i:04d}"))
+        toc_entries.append((1, xhtml_name, chapter.title, ch_id))
+        for block in chapter.blocks:
+            if isinstance(block, Heading) and block.id:
+                href = f"{xhtml_name}#{block.id}"
+                lvl = min(block.level, 6)
+                toc_entries.append((lvl, href, block.text, block.id))
 
-    ebook.toc = toc
+    ebook.toc = _build_nested_toc(toc_entries)
     ebook.spine = spine
     ebook.add_item(epub.EpubNcx())
     ebook.add_item(epub.EpubNav())
 
     epub.write_epub(str(out_path), ebook)
+
+
+def _build_nested_toc(
+    entries: list[tuple[int, str, str, str]],
+) -> list[epub.Link | tuple[epub.Link | epub.Section, list]]:
+    """Build a nested ebooklib TOC structure from flat (level, href, title, uid) entries."""
+    if not entries:
+        return []
+
+    result: list = []
+    # stack[i] = list that items at level i+1 are appended to
+    stack: list[list] = [result]
+    prev_level = 1
+
+    for level, href, title, uid in entries:
+        link = epub.Link(href, title, uid)
+        if level <= prev_level:
+            # same level or shallower: pop back
+            target_depth = level - 1
+            while len(stack) > target_depth + 1:
+                stack.pop()
+        else:
+            # deeper: the last item in current list becomes a section with children
+            children: list = []
+            if stack[-1]:
+                last = stack[-1][-1]
+                if isinstance(last, tuple):
+                    # already a (Section/Link, children) pair
+                    stack.append(last[1])
+                else:
+                    # promote to tuple
+                    stack[-1][-1] = (last, children)
+                    stack.append(children)
+            else:
+                stack[-1].append((epub.Section(title), children))
+                stack.append(children)
+        stack[-1].append(link)
+        prev_level = level
+
+    return result
 
 
 def _render_chapter(chapter: Chapter) -> tuple[str, str]:
@@ -101,7 +148,8 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
             parts.append(f"<p>{_render_inline(block.text)}</p>")
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
-            parts.append(f"<{tag}>{_esc(block.text)}</{tag}>")
+            id_attr = f' id="{_esc(block.id)}"' if block.id else ""
+            parts.append(f"<{tag}{id_attr}>{_esc(block.text)}</{tag}>")
         elif isinstance(block, Footnote):
             footnotes.append(block)
             if not block.paired:
