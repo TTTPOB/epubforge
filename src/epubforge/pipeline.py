@@ -33,14 +33,18 @@ def run_all(
     if from_stage > 1:
         work = cfg.book_work_dir(pdf_path)
         _clear_from(work, cfg.book_out_path(pdf_path), from_stage)
-    # Stages before from_stage: skip if output exists (never force-rerun)
+    # Only run stages >= from_stage (earlier stages are assumed complete).
+    # Stages 1-2 are cheap checks so always run them; 3-4 are skipped entirely
+    # when from_stage > their number to avoid partial-group API calls.
     def _f(stage: int) -> bool:
         return force if stage >= from_stage else False
 
     run_parse(pdf_path, cfg, force=_f(1))
     run_classify(pdf_path, cfg, force=_f(2))
-    run_clean(pdf_path, cfg, force=_f(3), page_nos=pages)
-    run_vlm(pdf_path, cfg, force=_f(4), page_nos=pages)
+    if from_stage <= 3:
+        run_clean(pdf_path, cfg, force=_f(3), page_nos=pages)
+    if from_stage <= 4:
+        run_vlm(pdf_path, cfg, force=_f(4), page_nos=pages)
     run_assemble(pdf_path, cfg, force=_f(5))
     run_refine_toc(pdf_path, cfg, force=_f(6))
     run_build(pdf_path, cfg, force=_f(7))

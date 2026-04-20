@@ -71,7 +71,8 @@ def refine_toc(raw_path: Path, out_path: Path, cfg: Config) -> None:
         {"role": "user", "content": user_msg},
     ]
 
-    client = LLMClient(cfg)
+    # Use VLM endpoint: OpenRouter supports structured outputs; LLM endpoint (DeepSeek) may not.
+    client = LLMClient(cfg, use_vlm=True)
     result: TocRefineOutput = client.chat_parsed(messages, response_format=TocRefineOutput)
 
     if len(result.items) != len(candidates):
