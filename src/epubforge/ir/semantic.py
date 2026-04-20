@@ -47,6 +47,7 @@ class Table(BaseModel):
     kind: Literal["table"] = "table"
     html: str
     caption: str = ""
+    continuation: bool = False
     bbox: list[float] | None = None
     provenance: Provenance
 
@@ -92,6 +93,7 @@ class VLMBlock(BaseModel):
     html: str | None = None
     latex: str | None = None
     bbox: list[float] | None = None
+    continuation: bool = False
 
 
 class VLMPageOutput(BaseModel):

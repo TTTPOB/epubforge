@@ -104,7 +104,10 @@ def _call_vlm_for_group(
     if len(group) > 1:
         instruction = (
             f"The {len(group)} pages above may contain a table that continues across pages. "
-            "Return a JSON array — one object per page — each matching the VLMPageOutput schema."
+            "Return a JSON array — one object per page — each matching the VLMPageOutput schema. "
+            "For any table on page N+1 that is a direct continuation of a table from page N "
+            "(same logical table, only data rows, no column header), set \"continuation\": true "
+            "on that table block. A table that starts fresh on a page must NOT have continuation: true."
         )
     else:
         instruction = f"Analyse page {group[0]} and return the structured JSON."

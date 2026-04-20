@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +70,8 @@ def assemble(work_dir: Path, out_path: Path) -> None:
                 if block is not None:
                     all_blocks.append(block)
 
-    # Pair footnote callouts with bodies
+    # Merge cross-page table continuations, then pair footnotes
+    all_blocks = _merge_continued_tables(all_blocks)
     all_blocks = _pair_footnotes(all_blocks)
 
     # Group blocks into chapters at heading-level-1 boundaries
@@ -90,12 +92,40 @@ def _parse_block(raw: dict[str, Any], page: int, source: str) -> Block | None:
         if kind == "figure":
             return Figure(caption=raw.get("caption", ""), image_ref=raw.get("image_ref"), provenance=prov)
         if kind == "table":
-            return Table(html=raw.get("html", ""), caption=str(raw.get("caption") or ""), provenance=prov)
+            return Table(
+                html=raw.get("html", ""),
+                caption=str(raw.get("caption") or ""),
+                continuation=bool(raw.get("continuation", False)),
+                provenance=prov,
+            )
         if kind == "equation":
             return Equation(latex=raw.get("latex", ""), provenance=prov)
     except Exception as exc:
         log.warning("Skipping malformed block %s: %s", raw, exc)
     return None
+
+
+def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
+    """Merge Table blocks marked continuation=True into the preceding Table block."""
+    result: list[Block] = []
+    for block in blocks:
+        if isinstance(block, Table) and block.continuation and result and isinstance(result[-1], Table):
+            prev = result[-1]
+            result[-1] = prev.model_copy(update={
+                "html": _splice_table_html(prev.html, block.html),
+                "caption": prev.caption or block.caption,
+            })
+            log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev.provenance.page)
+        else:
+            result.append(block)
+    return result
+
+
+def _splice_table_html(base: str, cont: str) -> str:
+    """Strip outer <table> wrapper from cont and append its rows before </table> in base."""
+    inner = re.sub(r"^\s*<table[^>]*>", "", cont, count=1, flags=re.IGNORECASE)
+    inner = re.sub(r"</table>\s*$", "", inner, count=1, flags=re.IGNORECASE)
+    return re.sub(r"</table>\s*$", inner + "</table>", base, count=1, flags=re.IGNORECASE)
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
