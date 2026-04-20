@@ -26,6 +26,8 @@ epubforge = "epubforge.cli:app"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pyrefly>=0.16",
+    "pre-commit>=4",
 ]
 
 [tool.hatch.build.targets.wheel]
