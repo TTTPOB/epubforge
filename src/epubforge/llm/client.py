@@ -19,6 +19,7 @@ class LLMClient:
         self.base_url = (cfg.vlm_base_url if use_vlm else cfg.llm_base_url).rstrip("/")
         self.api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self.model = cfg.vlm_model if use_vlm else cfg.llm_model
+        self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
         self.cache_dir = cfg.cache_dir
 
     def chat(
@@ -51,7 +52,7 @@ class LLMClient:
             f"{self.base_url}/chat/completions",
             json=payload,
             headers=headers,
-            timeout=300.0,
+            timeout=self.timeout,
         )
         resp.raise_for_status()
         content: str = resp.json()["choices"][0]["message"]["content"]

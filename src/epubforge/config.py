@@ -21,6 +21,8 @@ class Config:
     vlm_base_url: str = ""
     vlm_api_key: str = ""
     vlm_model: str = "google/gemini-flash-3"
+    llm_timeout: float = 300.0
+    vlm_timeout: float = 300.0
     concurrency: int = 4
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
@@ -59,6 +61,8 @@ def load_config() -> Config:
                 cfg.llm_api_key = str(llm["api_key"])
             if "model" in llm:
                 cfg.llm_model = str(llm["model"])
+            if "timeout_seconds" in llm:
+                cfg.llm_timeout = float(llm["timeout_seconds"])  # type: ignore[arg-type]
 
         if isinstance(vlm, dict):
             if "base_url" in vlm:
@@ -67,6 +71,8 @@ def load_config() -> Config:
                 cfg.vlm_api_key = str(vlm["api_key"])
             if "model" in vlm:
                 cfg.vlm_model = str(vlm["model"])
+            if "timeout_seconds" in vlm:
+                cfg.vlm_timeout = float(vlm["timeout_seconds"])  # type: ignore[arg-type]
 
         if isinstance(rt, dict):
             if "concurrency" in rt:
@@ -91,6 +97,10 @@ def load_config() -> Config:
         cfg.vlm_api_key = v
     if v := os.environ.get("EPUBFORGE_VLM_MODEL"):
         cfg.vlm_model = v
+    if v := os.environ.get("EPUBFORGE_LLM_TIMEOUT"):
+        cfg.llm_timeout = float(v)
+    if v := os.environ.get("EPUBFORGE_VLM_TIMEOUT"):
+        cfg.vlm_timeout = float(v)
     if v := os.environ.get("EPUBFORGE_CONCURRENCY"):
         cfg.concurrency = int(v)
     if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
