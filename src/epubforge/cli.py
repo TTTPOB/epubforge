@@ -7,6 +7,7 @@ from rich.console import Console
 
 from epubforge.config import load_config
 from epubforge import pipeline
+from epubforge import styleprobe
 
 app = typer.Typer(
     name="epubforge",
@@ -106,3 +107,21 @@ def build(
     """Stage 6 — generate EPUB → out/<name>.epub."""
     cfg = load_config()
     pipeline.run_build(pdf_path, cfg, force=force)
+
+
+@app.command()
+def styles(
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    min_cluster_size: int = typer.Option(3, "--min-cluster-size", min=1, help="Min support to send cluster to VLM"),
+    max_exemplars: int = typer.Option(3, "--max-exemplars", min=1, max=5, help="Max exemplar crops per cluster"),
+    force: bool = typer.Option(False, "--force", "-f", help="Re-run even if outputs exist"),
+) -> None:
+    """Style probe — cluster block features and label via VLM → style_prototypes.json + styles_report.html."""
+    cfg = load_config()
+    cfg.require_vlm()
+    styleprobe.run_style_probe(
+        pdf_path, cfg,
+        min_cluster_size=min_cluster_size,
+        max_exemplars=max_exemplars,
+        force=force,
+    )
