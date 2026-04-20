@@ -167,15 +167,24 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     return blocks
 
 
+def _detect_language(blocks: list[Block]) -> str:
+    sample = "".join(b.text for b in blocks if isinstance(b, Paragraph))[:3000]
+    if not sample:
+        return "en"
+    cjk = sum(1 for c in sample if "\u4e00" <= c <= "\u9fff")
+    return "zh" if cjk / len(sample) > 0.1 else "en"
+
+
 def _build_book(blocks: list[Block], work_dir: Path) -> Book:
     """Aggregate blocks into chapters at every level-1 Heading boundary."""
-    # Try to get title from raw metadata
     raw_path = work_dir / "01_raw.json"
     title = "Untitled"
     if raw_path.exists():
         raw = json.loads(raw_path.read_text(encoding="utf-8"))
         meta = raw.get("metadata") or {}
         title = meta.get("title") or (work_dir.name.replace("_", " ").title())
+
+    language = _detect_language(blocks)
 
     chapters: list[Chapter] = []
     current_title = "Front Matter"
@@ -195,4 +204,4 @@ def _build_book(blocks: list[Block], work_dir: Path) -> Book:
 
     flush()
 
-    return Book(title=title, chapters=chapters)
+    return Book(title=title, language=language, chapters=chapters)
