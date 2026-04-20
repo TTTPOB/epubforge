@@ -24,6 +24,7 @@ class Heading(BaseModel):
     kind: Literal["heading"] = "heading"
     level: int = 1
     text: str
+    id: str | None = None
     provenance: Provenance
 
 
@@ -71,6 +72,7 @@ Block = Annotated[
 class Chapter(BaseModel):
     title: str
     level: int = 1
+    id: str | None = None
     blocks: list[Block] = Field(default_factory=list)
 
 
