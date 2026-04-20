@@ -84,6 +84,19 @@ class Book(BaseModel):
     chapters: list[Chapter] = Field(default_factory=list)
 
 
+# --- stage 5.5 (toc refiner) schemas ---
+
+class TocRefineItem(BaseModel):
+    idx: int
+    level: int
+    text: str
+    merge_with_prev: bool = False
+
+
+class TocRefineOutput(BaseModel):
+    items: list[TocRefineItem]
+
+
 # --- stage 3 (cleaner) output schema ---
 
 class CleanBlock(BaseModel):

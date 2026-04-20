@@ -35,13 +35,14 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
 def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all stages even if outputs exist"),
-    from_stage: int = typer.Option(1, "--from", min=1, max=6, help="Clear and re-run from stage N (1–6)"),
+    from_stage: int = typer.Option(1, "--from", min=1, max=7, help="Clear and re-run from stage N (1–7)"),
+    pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter for clean/vlm e.g. '1-44'"),
 ) -> None:
-    """Run the full six-stage pipeline."""
+    """Run the full pipeline (parse → classify → clean → vlm → assemble → refine-toc → build)."""
     cfg = load_config()
     cfg.require_llm()
     cfg.require_vlm()
-    pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage)
+    pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage, pages=_parse_pages(pages))
 
 
 @app.command()
@@ -96,6 +97,17 @@ def assemble(
     """Stage 5 — merge into Semantic IR → work/<name>/05_semantic.json."""
     cfg = load_config()
     pipeline.run_assemble(pdf_path, cfg, force=force)
+
+
+@app.command()
+def refine_toc(
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force", "-f"),
+) -> None:
+    """Stage 5.5 — refine heading hierarchy with LLM → work/<name>/05_semantic.json."""
+    cfg = load_config()
+    cfg.require_llm()
+    pipeline.run_refine_toc(pdf_path, cfg, force=force)
 
 
 @app.command()

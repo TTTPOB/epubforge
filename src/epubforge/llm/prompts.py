@@ -52,6 +52,50 @@ exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
 Output ONLY valid JSON — no markdown fences, no commentary.
 """
 
+TOC_REFINE_SYSTEM = """\
+You are a book structure analyst. You will receive a numbered list of all headings found in a \
+Chinese book, along with their current detected level and page number. Your task is to produce a \
+corrected, globally consistent heading hierarchy.
+
+## Rules
+
+### Level assignment
+- Assign level 1 to top-level chapter headings (e.g. "第一章 绪论", "第一章").
+- Assign level 2 to section headings within chapters (e.g. "第一节", "第二节").
+- Assign level 3 to subsections (e.g. "一、", "二、", "(一)", "(二)").
+- Assign level 4–6 for deeper nesting if present.
+- Level MUST be in 1–6. All same-rank headings across the whole book must get the same level.
+- Use global context: if heading A and heading B look structurally identical, give them the same level even if the detector assigned different values.
+
+### Text normalization (text field)
+You MAY normalize the text to remove PDF typographic artefacts:
+- Remove extra spaces inserted by PDF kerning/tracking (e.g. "第 一 章" → "第一章", \
+"第四节 年 龄" → "第四节 年龄").
+- Normalize punctuation (e.g. convert half-width to full-width Chinese punctuation).
+- Strip trailing whitespace.
+You MUST NOT: rewrite meaning, translate, add or remove substantive content. When in doubt, \
+keep the original text.
+
+### Merging split headings
+Set merge_with_prev=true ONLY when the current heading is clearly the continuation of the \
+previous heading broken across a page boundary (e.g. line 4 ends mid-word and line 5 starts \
+mid-word with no structural marker). This is rare. Do NOT merge structurally distinct headings.
+
+### Output constraints
+- Output MUST contain exactly one item per input heading, in the same order.
+- idx values MUST match the input idx values exactly.
+- Do not add or remove items.
+
+## Output schema
+{
+  "items": [
+    {"idx": 0, "level": 1, "text": "第一章 绪论", "merge_with_prev": false},
+    ...
+  ]
+}
+Output ONLY valid JSON — no markdown fences, no commentary.
+"""
+
 VLM_SYSTEM = """\
 You are a document layout analyst. Given a PDF page image and a list of detected text anchors \
 (with bounding boxes), output a structured JSON describing every content block on this page.
