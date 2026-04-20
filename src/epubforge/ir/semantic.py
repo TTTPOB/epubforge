@@ -31,6 +31,7 @@ class Footnote(BaseModel):
     kind: Literal["footnote"] = "footnote"
     callout: str
     text: str
+    paired: bool = False  # True when callout was found and marked in a preceding paragraph
     ref_bbox: list[float] | None = None
     provenance: Provenance
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 from ebooklib import epub
+
+_FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
 
 from epubforge.ir.semantic import (
     Book,
@@ -96,15 +99,17 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
 
     for block in chapter.blocks:
         if isinstance(block, Paragraph):
-            parts.append(f"<p>{_esc(block.text)}</p>")
+            parts.append(f"<p>{_render_inline(block.text)}</p>")
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
             parts.append(f"<{tag}>{_esc(block.text)}</{tag}>")
         elif isinstance(block, Footnote):
             footnotes.append(block)
-            parts.append(
-                f'<sup epub:type="noteref"><a href="#{_fn_id(block)}">{_esc(block.callout)}</a></sup>'
-            )
+            if not block.paired:
+                # callout was not found in any paragraph — emit standalone fallback ref
+                parts.append(
+                    f'<sup epub:type="noteref"><a href="#{_fn_id(block)}">{_esc(block.callout)}</a></sup>'
+                )
         elif isinstance(block, Figure):
             img_tag = (
                 f'<img src="../images/{_esc(block.image_ref or "")}" alt="{_esc(block.caption)}"/>'
@@ -135,6 +140,18 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
         footnotes_html = "\n".join(fn_parts)
 
     return body_html, footnotes_html
+
+
+def _render_inline(text: str) -> str:
+    """Escape HTML then replace \x02fn-PAGE-CALLOUT\x03 markers with noteref links."""
+    escaped = _esc(text)
+
+    def to_link(m: re.Match[str]) -> str:
+        fn_id = m.group(1)
+        callout = fn_id.split("-", 2)[2]
+        return f'<sup epub:type="noteref"><a href="#{fn_id}">{callout}</a></sup>'
+
+    return _FN_MARKER_RE.sub(to_link, escaped)
 
 
 def _fn_id(fn: Footnote) -> str:

@@ -176,9 +176,28 @@ def _absorb_table_text(blocks: list[Block]) -> list[Block]:
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
-    """Match footnote callout markers in paragraphs to footnote body blocks (best-effort)."""
-    # For MVP: footnotes are already parsed as Footnote blocks by VLM; no extra pairing needed.
-    return blocks
+    """Find each Footnote's callout char in preceding paragraphs and embed an inline marker.
+
+    The marker \x02fn-PAGE-CALLOUT\x03 is later converted to a <sup><a href=...> link by
+    epub_builder. Footnotes whose callout cannot be located are left unpaired (epub_builder
+    falls back to a standalone superscript reference).
+    """
+    result = list(blocks)
+    for i, block in enumerate(result):
+        if not isinstance(block, Footnote):
+            continue
+        callout = block.callout
+        fn_marker = f"\x02fn-{block.provenance.page}-{callout}\x03"
+        for j in range(i - 1, max(i - 40, -1), -1):
+            candidate = result[j]
+            if isinstance(candidate, Paragraph) and callout in candidate.text:
+                result[j] = candidate.model_copy(update={
+                    "text": candidate.text.replace(callout, fn_marker, 1)
+                })
+                result[i] = block.model_copy(update={"paired": True})
+                log.debug("Paired footnote callout %r (page %d) into paragraph block %d", callout, block.provenance.page, j)
+                break
+    return result
 
 
 def _detect_language(blocks: list[Block]) -> str:
