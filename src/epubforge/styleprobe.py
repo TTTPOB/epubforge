@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import re
 import shutil
@@ -22,11 +21,9 @@ from epubforge.config import Config
 from epubforge.ir.semantic import StyleClusterLabel, StyleRole
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import STYLE_PROBE_SYSTEM
+from epubforge.pdf_render import render_block_crop, render_page_with_highlight
 
 console = Console()
-
-_DPI = 150
-_MARGIN_PT = 10  # crop margin in PDF points
 
 # Docling labels that map 1-to-1 to a role without needing VLM.
 _LABEL_ROLE_MAP: dict[str, StyleRole] = {
@@ -149,7 +146,9 @@ def run_style_probe(
         exemplars: list[dict[str, Any]] = []
         for n, bi in enumerate(sampled):
             b = blocks[bi]
-            img_b64, _ = _render_block_crop(fitz_doc, b)
+            img_b64, _ = render_block_crop(
+                fitz_doc, b["page_no"], b["bbox"], b["coord_origin"]
+            )
             crop_path = dl_dir / f"{n}.jpg"
             crop_path.write_bytes(base64.b64decode(img_b64))
             exemplars.append({
@@ -188,14 +187,19 @@ def run_style_probe(
             vp_dir = styles_dir / vp_id
             vp_dir.mkdir(parents=True, exist_ok=True)
 
-            exemplar_images: list[tuple[str, str]] = []
+            exemplar_images: list[tuple[tuple[str, str], tuple[str, str]]] = []
             exemplar_data = []
             for n, bi in enumerate(sampled):
                 b = blocks[bi]
-                img_b64, mime = _render_block_crop(fitz_doc, b)
+                crop_b64, crop_mime = render_block_crop(
+                    fitz_doc, b["page_no"], b["bbox"], b["coord_origin"]
+                )
+                page_b64, page_mime = render_page_with_highlight(
+                    fitz_doc, b["page_no"], b["bbox"], b["coord_origin"]
+                )
                 crop_path = vp_dir / f"{n}.jpg"
-                crop_path.write_bytes(base64.b64decode(img_b64))
-                exemplar_images.append((img_b64, mime))
+                crop_path.write_bytes(base64.b64decode(crop_b64))
+                exemplar_images.append(((page_b64, page_mime), (crop_b64, crop_mime)))
                 exemplar_data.append({
                     "page": b["page_no"],
                     "ref": b["self_ref"],
@@ -430,64 +434,43 @@ def _stratified_sample(
 
 
 # ---------------------------------------------------------------------------
-# Block crop rendering
-# ---------------------------------------------------------------------------
-
-def _render_block_crop(
-    fitz_doc: fitz.Document,
-    block: dict[str, Any],
-) -> tuple[str, str]:
-    pno = block["page_no"]
-    page = fitz_doc[pno - 1]
-    page_h_fitz = page.rect.height
-
-    bbox = block["bbox"]
-    if block["coord_origin"] == CoordOrigin.BOTTOMLEFT:
-        t = page_h_fitz - bbox.t
-        b_coord = page_h_fitz - bbox.b
-    else:
-        t = bbox.t
-        b_coord = bbox.b
-
-    l = bbox.l - _MARGIN_PT
-    r = bbox.r + _MARGIN_PT
-    t = t - _MARGIN_PT
-    b_coord = b_coord + _MARGIN_PT
-
-    clip = fitz.Rect(
-        max(0, l), max(0, t),
-        min(page.rect.width, r), min(page_h_fitz, b_coord),
-    )
-    mat = fitz.Matrix(_DPI / 72, _DPI / 72)
-    pix = page.get_pixmap(matrix=mat, clip=clip)
-    buf = io.BytesIO(pix.tobytes("jpg", jpg_quality=80))
-    return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
-
-
-# ---------------------------------------------------------------------------
 # VLM call
 # ---------------------------------------------------------------------------
 
 def _label_cluster(
     client: LLMClient,
-    exemplar_images: list[tuple[str, str]],
+    exemplar_images: list[tuple[tuple[str, str], tuple[str, str]]],
     sig_hint: str,
 ) -> StyleClusterLabel:
+    n = len(exemplar_images)
     content: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": (
-                f"Cluster signature hints: {sig_hint}\n"
-                f"Below are {len(exemplar_images)} cropped block image(s) from this cluster. "
-                "All images come from blocks that docling labeled as generic TEXT (body-layer). "
-                "Assign the best role to each image in order."
+                f"Cluster signature hints: {sig_hint}. "
+                f"Below are {n} exemplar(s), each shown as a pair of images: the first is the "
+                "full page with the target block outlined in red; the second is a zoomed crop "
+                "of the target block. All exemplars come from blocks that docling labeled as "
+                "generic TEXT (body-layer). Assign a role to each exemplar in order."
             ),
         }
     ]
-    for img_b64, mime in exemplar_images:
+    for i, ((page_b64, page_mime), (crop_b64, crop_mime)) in enumerate(exemplar_images, start=1):
+        content.append({
+            "type": "text",
+            "text": f"Exemplar {i} — full page (target outlined in red):",
+        })
         content.append({
             "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{img_b64}"},
+            "image_url": {"url": f"data:{page_mime};base64,{page_b64}"},
+        })
+        content.append({
+            "type": "text",
+            "text": f"Exemplar {i} — zoomed crop:",
+        })
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{crop_mime};base64,{crop_b64}"},
         })
 
     messages: list[Message] = cast(list[Message], [

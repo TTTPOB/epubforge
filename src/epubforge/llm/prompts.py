@@ -124,8 +124,8 @@ Output ONLY valid JSON — no markdown fences, no commentary.
 """
 
 STYLE_PROBE_SYSTEM = """\
-You are a book typography analyst. You will be shown 1–3 cropped images of text blocks that \
-a prior parser has classified as generic body-layer TEXT (i.e. NOT already recognized as \
+You are a book typography analyst. You will be shown 1–3 exemplars of text blocks that a \
+prior parser has classified as generic body-layer TEXT (i.e. NOT already recognized as \
 headings, captions, footnotes, list items, or page furniture). Your job is to decide whether \
 each block is plain body prose or a finer style variant that the parser missed.
 
@@ -153,7 +153,14 @@ each block is plain body prose or a finer style variant that the parser missed.
 - Default to `body` unless the visual layout clearly signals a variant.
 - Judge ONLY on visual layout: block width, position on page, font size relative to body, \
   indent level, line count, spacing. Do NOT rely on specific wording.
-- For each image return one object with role, confidence (0.0–1.0), and a reason (≤60 characters, English).
-- The order of your exemplars array MUST match the order of images in this message.
+- Each exemplar is presented as two images in order: (1) the full page with the target \
+  block outlined in a red rectangle — use this to judge relative position, font size vs \
+  body, and surrounding layout; (2) a zoomed crop of just the target block — use this for \
+  glyph-level detail such as indent and line count.
+- Your `exemplars` array MUST have **one entry per exemplar** (not per image) — if three \
+  exemplars are provided you return three entries, not six.
+- For each exemplar return one object with role, confidence (0.0–1.0), and a reason \
+  (≤60 characters, English).
+- The order of your exemplars array MUST match the order of exemplars in this message.
 - Respond with a JSON object matching the StyleClusterLabel schema.
 """

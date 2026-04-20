@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -23,8 +21,8 @@ from epubforge.config import Config
 from epubforge.ir.semantic import VLMGroupOutput
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import VLM_SYSTEM
+from epubforge.pdf_render import render_page
 
-_DPI = 150
 _SKIP_LABELS = frozenset({DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER})
 
 
@@ -103,7 +101,7 @@ def _call_vlm_for_group(
                 f"Detected text anchors:\n{anchor_text}"
             ),
         })
-        img_b64, mime = _render_page(doc, pno)
+        img_b64, mime = render_page(doc, pno)
         content.append({
             "type": "image_url",
             "image_url": {"url": f"data:{mime};base64,{img_b64}"},
@@ -152,15 +150,6 @@ def _call_vlm_for_group(
         entry["page"] = pno
         results.append(entry)
     return results
-
-
-def _render_page(doc: fitz.Document, page_no: int) -> tuple[str, str]:
-    """Render a 1-indexed PDF page; return (base64_data, mime_type)."""
-    page = doc[page_no - 1]
-    mat = fitz.Matrix(_DPI / 72, _DPI / 72)
-    pix = page.get_pixmap(matrix=mat)
-    buf = io.BytesIO(pix.tobytes("jpg", jpg_quality=75))
-    return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
 
 
 def _build_anchors(doc: DoclingDocument) -> dict[int, list[_AnchorItem]]:
