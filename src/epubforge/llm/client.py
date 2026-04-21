@@ -6,6 +6,8 @@ import hashlib
 import json
 import logging
 import re
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -14,6 +16,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from epubforge.config import Config
+from epubforge.observability import get_tracker
 
 # Re-export so existing `from epubforge.llm.client import Message` imports stay valid.
 Message = ChatCompletionMessageParam
@@ -21,6 +24,14 @@ Message = ChatCompletionMessageParam
 T = TypeVar("T", bound=BaseModel)
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class _CallResult:
+    parsed: Any
+    prompt_tokens: int
+    completion_tokens: int
+    finish_reason: str
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -34,12 +45,37 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _count_chars(messages: list[ChatCompletionMessageParam]) -> int:
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(part.get("text", ""))
+    return total
+
+
+def _count_images(messages: list[ChatCompletionMessageParam]) -> int:
+    count = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    count += 1
+    return count
+
+
 class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
     def __init__(self, cfg: Config, *, use_vlm: bool = False) -> None:
         self.base_url = (cfg.vlm_base_url if use_vlm else cfg.llm_base_url).rstrip("/")
         self.model = cfg.vlm_model if use_vlm else cfg.llm_model
+        self._kind = "VLM" if use_vlm else "LLM"
         self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
         self.max_tokens = cfg.vlm_max_tokens if use_vlm else cfg.llm_max_tokens
         if use_vlm and self.max_tokens is None:
@@ -65,13 +101,39 @@ class LLMClient:
         merged_extra = _deep_merge(self.extra_body, extra_body or {})
         cache_key = self._cache_key(messages, response_format, temperature, merged_extra)
         cache_path = self._cache_path(cache_key)
+        req_id = cache_key[:8]
+        chars = _count_chars(messages)
+        images = _count_images(messages)
+
+        log.info(
+            "%s req=%s model=%s fmt=%s msgs=%d chars=%d images=%d",
+            self._kind, req_id, self.model, response_format.__name__,
+            len(messages), chars, images,
+        )
+
         if cache_path.exists():
             raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
+            log.info("%s req=%s cache HIT", self._kind, req_id)
+            get_tracker().record_hit()
             return response_format.model_validate_json(raw)
 
-        parsed = self._call_parsed(messages, response_format, temperature, merged_extra)
+        t0 = time.perf_counter()
+        result = self._call_parsed(messages, response_format, temperature, merged_extra, req_id=req_id)
+        elapsed = time.perf_counter() - t0
+
+        log.info(
+            "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc",
+            self._kind, req_id, elapsed, result.finish_reason,
+            result.prompt_tokens, result.completion_tokens,
+        )
+        get_tracker().record_miss(
+            prompt=result.prompt_tokens,
+            completion=result.completion_tokens,
+            elapsed=elapsed,
+        )
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
+        parsed = result.parsed
         cache_path.write_text(
             json.dumps({"content": parsed.model_dump_json()}),
             encoding="utf-8",
@@ -84,7 +146,8 @@ class LLMClient:
         response_format: type[T],
         temperature: float | None,
         merged_extra: dict[str, Any],
-    ) -> T:
+        req_id: str = "????????",
+    ) -> _CallResult:
         """Try OpenAI structured outputs; fall back to json_object mode on 400.
 
         Automatically retries with doubled max_tokens if the response is truncated
@@ -104,26 +167,31 @@ class LLMClient:
         if budget is not None:
             kwargs["max_tokens"] = budget
 
-        for _attempt in range(3):
+        for attempt in range(3):
             try:
                 completion = self._client.chat.completions.parse(**kwargs)
             except BadRequestError as exc:
                 if exc.status_code != 400 or "response_format" not in str(exc):
                     raise
                 log.warning(
-                    "endpoint rejected json_schema response_format (400); "
-                    "falling back to json_object mode (no strict schema)"
+                    "req=%s attempt=%d/3 endpoint rejected json_schema response_format (400); "
+                    "falling back to json_object mode (no strict schema)",
+                    req_id, attempt + 1,
                 )
-                return self._call_json_object_fallback(messages, response_format, temperature, merged_extra)
+                return self._call_json_object_fallback(
+                    messages, response_format, temperature, merged_extra, req_id=req_id
+                )
 
             finish_reason = completion.choices[0].finish_reason
             message = completion.choices[0].message
             parsed = message.parsed
+            usage = completion.usage
 
             if finish_reason == "length":
                 new_budget = min((budget or 8192) * 2, 65536)
                 log.warning(
-                    "structured output truncated; retrying with max_tokens=%d", new_budget
+                    "req=%s attempt=%d/3 structured output truncated; retrying with max_tokens=%d",
+                    req_id, attempt + 1, new_budget,
                 )
                 budget = new_budget
                 kwargs["max_tokens"] = new_budget
@@ -134,7 +202,15 @@ class LLMClient:
                     f"LLM returned no parsed content for {response_format.__name__}: "
                     f"refusal={message.refusal!r}"
                 )
-            return parsed
+
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            return _CallResult(
+                parsed=parsed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                finish_reason=finish_reason or "stop",
+            )
 
         raise RuntimeError(
             f"Structured output for {response_format.__name__} was truncated after 3 attempts"
@@ -146,7 +222,8 @@ class LLMClient:
         response_format: type[T],
         temperature: float | None,
         merged_extra: dict[str, Any],
-    ) -> T:
+        req_id: str = "????????",
+    ) -> _CallResult:
         """Fallback: json_object mode — model must emit valid JSON, parsed manually.
 
         Retries with doubled max_tokens if the response is truncated (finish_reason==length
@@ -166,17 +243,19 @@ class LLMClient:
         if merged_extra:
             fallback_kwargs["extra_body"] = merged_extra
 
-        for _attempt in range(3):
+        for attempt in range(3):
             completion = cast(
                 ChatCompletion, self._client.chat.completions.create(**fallback_kwargs)
             )
             finish_reason = completion.choices[0].finish_reason
             content = completion.choices[0].message.content or ""
+            usage = completion.usage
 
             if finish_reason == "length":
                 budget = min(budget * 2, 65536)
                 log.warning(
-                    "json_object response truncated; retrying with max_tokens=%d", budget
+                    "req=%s attempt=%d/3 json_object response truncated; retrying with max_tokens=%d",
+                    req_id, attempt + 1, budget,
                 )
                 fallback_kwargs["max_tokens"] = budget
                 continue
@@ -186,13 +265,22 @@ class LLMClient:
             content = re.sub(r"\s*```$", "", content)
 
             try:
-                return response_format.model_validate_json(content)
+                parsed = response_format.model_validate_json(content)
+                prompt_tokens = usage.prompt_tokens if usage else 0
+                completion_tokens = usage.completion_tokens if usage else 0
+                return _CallResult(
+                    parsed=parsed,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    finish_reason=finish_reason or "stop",
+                )
             except PydanticValidationError as exc:
-                if "EOF" in str(exc) and _attempt < 2:
+                if "EOF" in str(exc) and attempt < 2:
                     budget = min(budget * 2, 65536)
                     log.warning(
-                        "json_object response appears truncated (EOF); retrying with max_tokens=%d",
-                        budget,
+                        "req=%s attempt=%d/3 json_object response appears truncated (EOF); "
+                        "retrying with max_tokens=%d",
+                        req_id, attempt + 1, budget,
                     )
                     fallback_kwargs["max_tokens"] = budget
                     continue

@@ -28,6 +28,13 @@ def _make_client(tmp_path, *, use_vlm: bool = False) -> LLMClient:
     return LLMClient(cfg, use_vlm=use_vlm)
 
 
+def _make_usage(prompt: int = 10, completion: int = 5) -> MagicMock:
+    usage = MagicMock()
+    usage.prompt_tokens = prompt
+    usage.completion_tokens = completion
+    return usage
+
+
 def _make_completion(parsed: Any, finish_reason: str = "stop") -> MagicMock:
     msg = MagicMock()
     msg.parsed = parsed
@@ -37,6 +44,7 @@ def _make_completion(parsed: Any, finish_reason: str = "stop") -> MagicMock:
     choice.finish_reason = finish_reason
     completion = MagicMock()
     completion.choices = [choice]
+    completion.usage = _make_usage()
     return completion
 
 
@@ -55,7 +63,7 @@ class TestTruncationRetry:
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
 
-        assert result.value == "done"
+        assert result.parsed.value == "done"
         calls = mock_parse.call_args_list
         assert len(calls) == 2
         assert calls[0].kwargs["max_tokens"] == 4096
@@ -125,7 +133,7 @@ class TestJsonObjectFallback:
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
 
-        assert result.value == "fallback"
+        assert result.parsed.value == "fallback"
 
     def test_fallback_logs_warning(self, tmp_path, caplog) -> None:
         client = _make_client(tmp_path)
@@ -158,6 +166,7 @@ class TestJsonObjectFallback:
         choice.finish_reason = finish_reason
         comp = MagicMock()
         comp.choices = [choice]
+        comp.usage = _make_usage()
         return comp
 
     def test_fallback_retries_on_finish_reason_length(self, tmp_path) -> None:
@@ -176,7 +185,7 @@ class TestJsonObjectFallback:
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
-        assert result.value == "ok"
+        assert result.parsed.value == "ok"
 
     def test_fallback_retries_on_eof_validation_error(self, tmp_path) -> None:
         client = _make_client(tmp_path)
@@ -196,7 +205,7 @@ class TestJsonObjectFallback:
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
-        assert result.value == "complete"
+        assert result.parsed.value == "complete"
 
 
 class TestVlmDefaultMaxTokens:
