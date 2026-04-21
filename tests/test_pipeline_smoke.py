@@ -38,7 +38,7 @@ def test_full_pipeline_smoke() -> None:
         pytest.skip("Stages 3/4 outputs missing — run clean+vlm first")
 
     result = subprocess.run(
-        ["uv", "run", "epubforge", "run", str(FIXTURE), "--from", "5", "--force"],
+        ["uv", "run", "epubforge", "run", str(FIXTURE), "--from", "5", "--force-rerun"],
         capture_output=True,
         text=True,
     )

@@ -41,8 +41,8 @@ EPUBFORGE_CACHE_DIR      default: work/.cache
 
 ## Key Conventions
 
-- All stages accept `--force` to re-run even if output exists
-- Stages 1-4 skip if output already present (idempotent)
+- All stages accept `--force-rerun` (`-f`) to re-run even if output exists
+- All stages skip if output already present (idempotent); pass `--force-rerun` to override
 - VLM output must be structured JSON matching `VLMPageOutput` schema in `ir/semantic.py`
 - Never rewrite content — LLM only merges line breaks, removes headers/footers, normalises headings
 - `fixtures/` holds test PDFs (gitignored `*.pdf`); run `uv run epubforge run fixtures/<name>.pdf`

@@ -17,7 +17,7 @@ def _stage_path(work: Path, name: str) -> Path:
 
 def _skip(path: Path, force: bool, label: str) -> bool:
     if path.exists() and not force:
-        console.print(f"[dim]skip {label} — already exists ({path})[/dim]")
+        console.print(f"[dim]skip {label} — reusing {path} (pass --force-rerun to re-run)[/dim]")
         return True
     return False
 
@@ -30,40 +30,18 @@ def run_all(
     from_stage: int = 1,
     pages: set[int] | None = None,
 ) -> None:
-    if from_stage > 1:
-        work = cfg.book_work_dir(pdf_path)
-        _clear_from(work, cfg.book_out_path(pdf_path), from_stage)
-    # Only run stages >= from_stage (earlier stages are assumed complete).
-    # Stage 3 (extract) is skipped entirely when from_stage > 3 to avoid partial API calls.
+    # stages < from_stage use normal skip; stages >= from_stage are controlled by --force-rerun
     def _f(stage: int) -> bool:
         return force if stage >= from_stage else False
 
     run_parse(pdf_path, cfg, force=_f(1))
     run_classify(pdf_path, cfg, force=_f(2))
-    if from_stage <= 3:
-        run_extract(pdf_path, cfg, force=_f(3), pages=pages)
+    run_extract(pdf_path, cfg, force=_f(3), pages=pages)
     run_assemble(pdf_path, cfg, force=_f(4))
     run_refine_toc(pdf_path, cfg, force=_f(5))
     run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
     run_build(pdf_path, cfg, force=_f(7))
 
-
-def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
-    """Delete stage outputs for stages >= from_stage so downstream is re-run."""
-    stage_files: dict[int, list[Path]] = {
-        1: [work / "01_raw.json"],
-        2: [work / "02_pages.json"],
-        3: list((work / "03_extract").glob("*.json")) if (work / "03_extract").exists() else [],
-        4: [work / "05_semantic_raw.json"],
-        5: [work / "05_semantic.json"],
-        6: [work / "06_proofread.json", work / "style_registry.json"],
-        7: [epub_out],
-    }
-    for stage in range(from_stage, 8):
-        for p in stage_files.get(stage, []):
-            if p.exists():
-                p.unlink()
-                console.print(f"[dim]cleared stage {stage}: {p.name}[/dim]")
 
 
 def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
