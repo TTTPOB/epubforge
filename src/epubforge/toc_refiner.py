@@ -60,6 +60,8 @@ def refine_toc(raw_path: Path, out_path: Path, cfg: Config) -> None:
         out_path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
         return
 
+    log.info("refine-toc: %d heading candidates to refine", len(candidates))
+
     # Build user message listing all headings
     lines = ["Headings (idx | level | page | text):"]
     for seq, (stream_idx, h) in enumerate(candidates):

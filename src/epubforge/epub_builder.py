@@ -147,6 +147,15 @@ def build_epub(
 
     epub.write_epub(str(out_path), ebook)
 
+    n_chapters = len(book_model.chapters)
+    n_blocks = sum(len(ch.blocks) for ch in book_model.chapters)
+    n_images = len(figure_to_filename)
+    size = out_path.stat().st_size
+    log.info(
+        "epub_builder: chapters=%d blocks=%d images=%d size=%d bytes → %s",
+        n_chapters, n_blocks, n_images, size, out_path.name,
+    )
+
 
 def _map_figures_to_images(
     book_model: Book, images_dir: Path | None, ebook: epub.EpubBook

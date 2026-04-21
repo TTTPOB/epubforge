@@ -28,6 +28,7 @@ def assemble(work_dir: Path, out_path: Path) -> None:
     """Read stage 3 extract units from *work_dir* and write Semantic IR JSON to *out_path*."""
     extract_dir = work_dir / "03_extract"
     unit_files = sorted(extract_dir.glob("unit_*.json"))
+    log.info("assemble: reading %d unit files from %s", len(unit_files), extract_dir.name)
 
     all_blocks: list[Block] = []
 
@@ -78,6 +79,18 @@ def assemble(work_dir: Path, out_path: Path) -> None:
     # Group blocks into chapters at heading-level-1 boundaries
     book = _build_book(all_blocks, work_dir)
     out_path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
+
+    n_chapters = len(book.chapters)
+    n_blocks = sum(len(ch.blocks) for ch in book.chapters)
+    n_footnotes = sum(
+        1 for ch in book.chapters for b in ch.blocks
+        if isinstance(b, Footnote) and getattr(b, "paired", False)
+    )
+    n_tables = sum(1 for ch in book.chapters for b in ch.blocks if isinstance(b, Table))
+    log.info(
+        "assemble: chapters=%d blocks=%d footnotes_paired=%d tables=%d",
+        n_chapters, n_blocks, n_footnotes, n_tables,
+    )
 
 
 def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block | None:

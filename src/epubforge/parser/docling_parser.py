@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+
+log = logging.getLogger(__name__)
 
 
 def parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path) -> None:
@@ -33,6 +36,10 @@ def parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path) -> None:
 
     images_dir.mkdir(parents=True, exist_ok=True)
     _save_figure_crops(doc, images_dir)
+
+    n_pages = len(doc.pages)
+    n_pictures = sum(1 for _ in doc.pictures)
+    log.info("parse: pages=%d pictures=%d → %s", n_pages, n_pictures, out_path.name)
 
 
 def _save_figure_crops(doc, images_dir: Path) -> None:

@@ -85,6 +85,15 @@ def extract(
     pending_tail: dict[str, Any] | None = None
     pending_footnote: dict[str, Any] | None = None
 
+    n_llm = sum(1 for u in units if isinstance(u, LLMGroupUnit))
+    n_vlm = sum(1 for u in units if isinstance(u, VLMPageUnit))
+    all_pages = sorted({p for u in units for p in u.pages})
+    log.info(
+        "extract: %d units (%d LLM + %d VLM), pages=%s",
+        len(units), n_llm, n_vlm,
+        f"{all_pages[0]}-{all_pages[-1]}" if all_pages else "[]",
+    )
+
     try:
         for idx, unit in enumerate(units):
             out_path = out_dir / f"unit_{idx:04d}.json"
@@ -93,8 +102,16 @@ def extract(
                 data = json.loads(out_path.read_text(encoding="utf-8"))
                 blocks = data.get("blocks", [])
                 pending_tail, pending_footnote = _extract_pending_context(blocks, unit)
+                log.info(
+                    "extract unit %d/%d kind=%s pages=%s reused=Y",
+                    idx + 1, len(units), unit.kind, unit.pages,
+                )
                 continue
 
+            log.info(
+                "extract unit %d/%d kind=%s pages=%s reused=N",
+                idx + 1, len(units), unit.kind, unit.pages,
+            )
             if isinstance(unit, LLMGroupUnit):
                 blocks, flag, fn_flag = _process_llm_unit(unit, page_items, pending_tail, pending_footnote, llm_client)
             else:

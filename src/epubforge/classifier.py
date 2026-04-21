@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 from collections import defaultdict
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from docling_core.types.doc import (
     DocItemLabel,
@@ -81,6 +84,14 @@ def classify_pages(raw_path: Path, out_path: Path) -> None:
     out_path.write_text(
         json.dumps({"pages": pages_out}, ensure_ascii=False, indent=2),
         encoding="utf-8",
+    )
+
+    n_simple = sum(1 for p in pages_out if p["kind"] == "simple")
+    n_complex = sum(1 for p in pages_out if p["kind"] == "complex")
+    n_toc = sum(1 for p in pages_out if p["kind"] == "toc")
+    log.info(
+        "classify: simple=%d complex=%d toc=%d total=%d",
+        n_simple, n_complex, n_toc, len(pages_out),
     )
 
 

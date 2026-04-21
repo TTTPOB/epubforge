@@ -573,7 +573,20 @@ def proofread(
     phase2_extra = _build_thinking_extra(cfg.proofread_phase2_thinking_budget_tokens)
     history: list[_AppliedEdit] = []
 
+    chapters_in_scope = [
+        ch for ch in book.chapters
+        if pages is None or (_chapter_pages(ch) & pages)
+    ]
+    log.info(
+        "proofread: %d chapters (pages_filter=%s), phase1_budget=%d phase2_budget=%d",
+        len(chapters_in_scope),
+        f"{sorted(pages)[:5]}{'...' if pages and len(pages) > 5 else ''}" if pages else "all",
+        cfg.proofread_phase1_thinking_budget_tokens,
+        cfg.proofread_phase2_thinking_budget_tokens,
+    )
+
     # ---------- Phase 1: rolling labeling ----------
+    log.info("proofread phase1: rolling label over %d chapters", len(chapters_in_scope))
     for ch_idx, chapter in enumerate(book.chapters):
         if pages is not None and not (_chapter_pages(chapter) & pages):
             log.debug("proofreader: chapter %d %r outside page filter — skip", ch_idx, chapter.title)
@@ -604,6 +617,7 @@ def proofread(
             log.info("proofreader phase1: %s — %d proposals applied", label, len(applied))
 
     # ---------- Phase 2: global consistency audit ----------
+    log.info("proofread phase2: global audit")
     audit_items = _collect_audit_items(book, pages)
     if not audit_items:
         log.info("proofreader phase2: no non-default paragraphs found — skip")
