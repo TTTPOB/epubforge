@@ -34,9 +34,10 @@ break. You MUST join them into one continuous line:
   and Latin/numeric text.
 
 Additionally, Docling (the PDF extractor) sometimes inserts a **space character** at a line \
-boundary instead of (or in addition to) a newline. You MUST also remove any space that appears \
-between two Chinese/CJK characters — such spaces are always Docling line-wrap artifacts and are \
-NEVER present in the original text. This applies even when no \\n is visible.
+boundary instead of (or in addition to) a newline. A space between two Chinese/CJK characters \
+is usually a Docling line-wrap artifact — remove it unless the spacing is clearly intentional \
+(e.g. a deliberately spaced-out heading like "第 一 章" or a date format like "二〇一〇 年 六 月"). \
+This applies even when no \\n is visible.
 
 Example input block:
   [BLOCK p5]
@@ -85,8 +86,9 @@ form ONE paragraph split across a page boundary. In that case:
   rules as line-break normalisation above.
 
 ## Spacing rules — CRITICAL
-- REMOVE spaces between two Chinese/CJK characters — they are always Docling PDF-wrap \
-  artifacts. Example: "本论 文" → "本论文", "整 体图像" → "整体图像".
+- Spaces between two Chinese/CJK characters are usually Docling PDF-wrap artifacts — remove \
+  them. Example: "本论 文" → "本论文", "整 体图像" → "整体图像". Exception: preserve spaces \
+  in obviously intentional typographic patterns (spaced-out headings, date formats).
 - Do NOT add spaces between Chinese/CJK characters and Latin letters or digits \
   (no "盘古之白" / pangu spacing). Example: keep "第3章" as "第3章", not "第 3 章"; \
   keep "GDP增长" as "GDP增长", not "GDP 增长".
