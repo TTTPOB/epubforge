@@ -45,12 +45,13 @@ class Config:
         return self.out_dir / f"{pdf_path.stem}.epub"
 
 
-def load_config() -> Config:
+def load_config(config_path: Path | None = None) -> Config:
     # Layer 1: built-in defaults (via dataclass defaults)
     cfg = Config()
 
-    # Layer 2+3: config.toml then config.local.toml
-    for toml_path in (Path("config.toml"), Path("config.local.toml")):
+    # Layer 2+3: explicit path OR config.toml then config.local.toml
+    toml_paths = (config_path,) if config_path else (Path("config.toml"), Path("config.local.toml"))
+    for toml_path in toml_paths:
         data = _load_toml(toml_path)
         llm = data.get("llm") or {}
         vlm = data.get("vlm") or {}

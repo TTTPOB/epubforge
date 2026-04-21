@@ -15,6 +15,18 @@ app = typer.Typer(
 )
 console = Console()
 
+_config_path: Path | None = None
+
+
+@app.callback()
+def _global_options(
+    config: Path | None = typer.Option(
+        None, "--config", "-c", help="Path to TOML config file (overrides config.toml / config.local.toml)"
+    ),
+) -> None:
+    global _config_path
+    _config_path = config
+
 
 def _parse_pages(pages_str: str | None) -> set[int] | None:
     """Parse '5,10-12,20' into {5, 10, 11, 12, 20}."""
@@ -39,7 +51,7 @@ def run(
     pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter for clean/vlm e.g. '1-44'"),
 ) -> None:
     """Run the full pipeline (parse → classify → clean → vlm → assemble → refine-toc → build)."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
     pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage, pages=_parse_pages(pages))
@@ -51,7 +63,7 @@ def parse(
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """Stage 1 — Docling parse → work/<name>/01_raw.json."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     pipeline.run_parse(pdf_path, cfg, force=force)
 
 
@@ -61,7 +73,7 @@ def classify(
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """Stage 2 — classify pages as simple/complex → work/<name>/02_pages.json."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     pipeline.run_classify(pdf_path, cfg, force=force)
 
 
@@ -72,7 +84,7 @@ def clean(
     pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter e.g. '5,10-12'"),
 ) -> None:
     """Stage 3 — LLM text cleaning of simple pages → work/<name>/03_simple/."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     cfg.require_llm()
     pipeline.run_clean(pdf_path, cfg, force=force, page_nos=_parse_pages(pages))
 
@@ -84,7 +96,7 @@ def vlm(
     pages: str | None = typer.Option(None, "--pages", "-p", help="Page filter e.g. '10,11,12'"),
 ) -> None:
     """Stage 4 — VLM structured reading of complex pages → work/<name>/04_complex/."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     cfg.require_vlm()
     pipeline.run_vlm(pdf_path, cfg, force=force, page_nos=_parse_pages(pages))
 
@@ -95,7 +107,7 @@ def assemble(
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """Stage 5 — merge into Semantic IR → work/<name>/05_semantic.json."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     pipeline.run_assemble(pdf_path, cfg, force=force)
 
 
@@ -105,7 +117,7 @@ def refine_toc(
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """Stage 5.5 — refine heading hierarchy with LLM → work/<name>/05_semantic.json."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     cfg.require_llm()
     pipeline.run_refine_toc(pdf_path, cfg, force=force)
 
@@ -116,5 +128,5 @@ def build(
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """Stage 6 — generate EPUB → out/<name>.epub."""
-    cfg = load_config()
+    cfg = load_config(_config_path)
     pipeline.run_build(pdf_path, cfg, force=force)
