@@ -3,21 +3,37 @@
 ## Project Overview
 
 LLM/VLM-assisted PDF → EPUB pipeline for books and academic theses.
-Six-stage pipeline: parse → classify → clean_simple → read_complex → assemble → build_epub.
+Seven-stage pipeline: parse → classify → extract → assemble → refine-toc → proofread → build.
 
 Each stage writes to `work/<book_name>/0N_*.json` and is independently re-runnable.
 LLM/VLM calls are cached in `work/.cache/` (key = sha256 of model+prompt+image).
 
 ## Pipeline Stages
 
-| # | Command | Input | Output | Issue |
-|---|---------|-------|--------|-------|
-| 1 | `parse` | PDF | `01_raw.json` (Docling JSON) | epubforge-5k2 |
-| 2 | `classify` | `01_raw.json` | `02_pages.json` (simple/complex labels) | epubforge-51n |
-| 3 | `clean` | simple pages | `03_simple/*.json` (LLM cleaned blocks) | epubforge-2u9 |
-| 4 | `vlm` | complex pages | `04_complex/*.json` (VLM structured JSON) | epubforge-2om |
-| 5 | `assemble` | stages 3+4 | `05_semantic.json` (Semantic IR) | epubforge-d81 |
-| 6 | `build` | `05_semantic.json` | `out/<name>.epub` | epubforge-cjc |
+| # | CLI flag `--from` | Command | Input | Output |
+|---|-------------------|---------|-------|--------|
+| 1 | `--from 1` | `parse` | PDF | `01_raw.json` (Docling JSON) |
+| 2 | `--from 2` | `classify` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
+| 3 | `--from 3` | `extract` | `01_raw.json` + `02_pages.json` | `03_extract/unit_*.json` (LLM+VLM blocks) |
+| 4 | `--from 4` | `assemble` | `03_extract/` | `05_semantic_raw.json` (Semantic IR) |
+| 5 | `--from 5` | `refine-toc` | `05_semantic_raw.json` | `05_semantic.json` (refined headings) |
+| 6 | `--from 6` | `proofread` | `05_semantic.json` | `06_proofread.json` (Phase1+Phase2 edits) |
+| 7 | `--from 7` | `build` | `06_proofread.json` | `out/<name>.epub` |
+
+## Observability
+
+All stages and every LLM/VLM request emit INFO-level logs. By default logs are written to
+`work/<book>/logs/run-<timestamp>.log` (plain text, grep-friendly) and also to stderr via
+RichHandler (coloured, aligned).
+
+CLI flags:
+- `--log-level / -L` — set level (DEBUG/INFO/WARNING); env `EPUBFORGE_LOG_LEVEL`
+- `--log-file` — override log file path (default: auto-generated per run)
+
+Per-request log lines include: kind (LLM/VLM), req_id (first 8 chars of cache key),
+model, format name, message count, char count, image count, cache HIT/MISS, elapsed
+time, finish reason, and prompt+completion token counts. Each stage emits a summary
+line on completion showing elapsed time, total requests, cache hit rate, and tokens used.
 
 ## Two-Layer IR
 
