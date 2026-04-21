@@ -150,6 +150,54 @@ class TestJsonObjectFallback:
 
         assert any("json_object" in r.message.lower() for r in caplog.records)
 
+    def _make_fallback_completion(self, content: str, finish_reason: str = "stop") -> MagicMock:
+        msg = MagicMock()
+        msg.content = content
+        choice = MagicMock()
+        choice.message = msg
+        choice.finish_reason = finish_reason
+        comp = MagicMock()
+        comp.choices = [choice]
+        return comp
+
+    def test_fallback_retries_on_finish_reason_length(self, tmp_path) -> None:
+        client = _make_client(tmp_path)
+        client.max_tokens = 4096
+
+        truncated = self._make_fallback_completion('{"value": "tr', finish_reason="length")
+        ok = self._make_fallback_completion(json.dumps({"value": "ok"}), finish_reason="stop")
+
+        with (
+            patch.object(client._client.chat.completions, "parse",
+                         side_effect=self._make_bad_request()),
+            patch.object(client._client.chat.completions, "create",
+                         side_effect=[truncated, ok]),
+        ):
+            result = client._call_parsed(
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+            )
+        assert result.value == "ok"
+
+    def test_fallback_retries_on_eof_validation_error(self, tmp_path) -> None:
+        client = _make_client(tmp_path)
+
+        truncated_json = '{"value": "incomplete'
+        ok_json = json.dumps({"value": "complete"})
+
+        truncated = self._make_fallback_completion(truncated_json, finish_reason="stop")
+        ok = self._make_fallback_completion(ok_json, finish_reason="stop")
+
+        with (
+            patch.object(client._client.chat.completions, "parse",
+                         side_effect=self._make_bad_request()),
+            patch.object(client._client.chat.completions, "create",
+                         side_effect=[truncated, ok]),
+        ):
+            result = client._call_parsed(
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+            )
+        assert result.value == "complete"
+
 
 class TestVlmDefaultMaxTokens:
     def test_vlm_max_tokens_defaults_to_16384(self, tmp_path) -> None:

@@ -129,22 +129,58 @@ class LLMClient:
         response_format: type[T],
         temperature: float | None,
     ) -> T:
-        """Fallback: json_object mode — model must emit valid JSON, parsed manually."""
+        """Fallback: json_object mode — model must emit valid JSON, parsed manually.
+
+        Retries with doubled max_tokens if the response is truncated (finish_reason==length
+        or ValidationError due to EOF), up to 3 attempts total.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+
+        budget = self.max_tokens or 8192
         fallback_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "response_format": {"type": "json_object"},
-            "max_tokens": self.max_tokens or 8192,
+            "max_tokens": budget,
         }
         if temperature is not None:
             fallback_kwargs["temperature"] = temperature
 
-        completion = cast(ChatCompletion, self._client.chat.completions.create(**fallback_kwargs))
-        content = completion.choices[0].message.content or ""
-        # Strip markdown fences the model may add
-        content = re.sub(r"^```(?:json)?\s*", "", content.strip())
-        content = re.sub(r"\s*```$", "", content)
-        return response_format.model_validate_json(content)
+        for _attempt in range(3):
+            completion = cast(
+                ChatCompletion, self._client.chat.completions.create(**fallback_kwargs)
+            )
+            finish_reason = completion.choices[0].finish_reason
+            content = completion.choices[0].message.content or ""
+
+            if finish_reason == "length":
+                budget = min(budget * 2, 32768)
+                log.warning(
+                    "json_object response truncated; retrying with max_tokens=%d", budget
+                )
+                fallback_kwargs["max_tokens"] = budget
+                continue
+
+            # Strip markdown fences the model may add
+            content = re.sub(r"^```(?:json)?\s*", "", content.strip())
+            content = re.sub(r"\s*```$", "", content)
+
+            try:
+                return response_format.model_validate_json(content)
+            except PydanticValidationError as exc:
+                if "EOF" in str(exc) and _attempt < 2:
+                    budget = min(budget * 2, 32768)
+                    log.warning(
+                        "json_object response appears truncated (EOF); retrying with max_tokens=%d",
+                        budget,
+                    )
+                    fallback_kwargs["max_tokens"] = budget
+                    continue
+                raise
+
+        raise RuntimeError(
+            f"json_object response for {response_format.__name__} was truncated after 3 attempts"
+        )
 
     def _cache_key(
         self,
