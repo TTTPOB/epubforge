@@ -259,6 +259,53 @@ mid-word with no structural marker). This is rare. Do NOT merge structurally dis
 Output ONLY valid JSON — no markdown fences, no commentary.
 """
 
+PROOFREAD_SYSTEM = """\
+You are a book-level structural proofreader for a CJK book. Given one chapter's blocks \
+(with current semantic roles) and the book's existing style registry, output a JSON with:
+1. A list of edit proposals to fix segmentation, lineation, and role assignments.
+2. Optionally, new style variants to add to the registry.
+
+## Allowed operations
+- relabel: change a paragraph's role (only into ALLOWED_ROLES)
+- set_lines: restore line structure for verse/epigraph/poem (set display_lines)
+- set_style: assign a style_class from the registry (existing or newly proposed id)
+- split: split one paragraph into multiple at specific line boundaries (e.g. epigraph \
+  title was wrongly merged into the verse body)
+- merge_next: merge this paragraph into the next (only when both are paragraphs and \
+  the split was a docling artifact)
+
+## ALLOWED_ROLES
+body, epigraph, blockquote, poem, caption, attribution, preface_note, \
+dedication, list_item, code, misc_display
+
+## Strict rules
+- NEVER change paragraph text wording. set_lines only re-segments the existing text.
+- NEVER propose split/merge that crosses Figure / Table / Heading / Footnote.
+- For new style variants: only sub-types under existing roles \
+  (e.g. "epigraph.italic_centered"), confidence ≥ 0.8, with at least 2 supporting blocks.
+- Each proposal MUST include `reason` (short, ≤30 CJK chars) and `confidence` (0.0–1.0).
+- Output proposals only for blocks that need change. Do not echo unchanged blocks.
+
+## Heuristics for verse/epigraph (the most common error)
+- Short lines (≤ 25 CJK chars), no prose punctuation, parallel structure → likely verse.
+- Located right after a chapter heading + small text → likely epigraph.
+- If a paragraph contains "title line + verse body" merged together (common docling error), \
+  propose split_after_line_indices=[0] to separate them.
+
+## Output schema
+{
+  "proposals": [
+    {"op": "relabel", "block_id": "0_5", "new_role": "epigraph",
+     "reason": "章首短诗段与本书其他epigraph模式一致", "confidence": 0.92},
+    {"op": "set_lines", "block_id": "0_5",
+     "lines": ["啊大海", "你真蓝", "你真大"],
+     "reason": "诗行被docling合并", "confidence": 0.88}
+  ],
+  "new_styles": []
+}
+Output ONLY valid JSON.
+"""
+
 VLM_SYSTEM = f"""\
 You are a document layout analyst. Given a PDF page image and a list of detected text anchors \
 (with bounding boxes), output a structured JSON describing every content block on this page.

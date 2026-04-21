@@ -1,4 +1,4 @@
-"""Pipeline orchestration: stages 1-6 with per-stage caching."""
+"""Pipeline orchestration: stages 1-7 with per-stage caching."""
 
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ def run_all(
         run_extract(pdf_path, cfg, force=_f(3), pages=pages)
     run_assemble(pdf_path, cfg, force=_f(4))
     run_refine_toc(pdf_path, cfg, force=_f(5))
-    run_build(pdf_path, cfg, force=_f(6))
+    run_proofread(pdf_path, cfg, force=_f(6))
+    run_build(pdf_path, cfg, force=_f(7))
 
 
 def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
@@ -55,9 +56,10 @@ def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
         3: list((work / "03_extract").glob("*.json")) if (work / "03_extract").exists() else [],
         4: [work / "05_semantic_raw.json"],
         5: [work / "05_semantic.json"],
-        6: [epub_out],
+        6: [work / "06_proofread.json", work / "style_registry.json"],
+        7: [epub_out],
     }
-    for stage in range(from_stage, 7):
+    for stage in range(from_stage, 8):
         for p in stage_files.get(stage, []):
             if p.exists():
                 p.unlink()
@@ -134,15 +136,37 @@ def run_refine_toc(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     console.print(f"  → {out}")
 
 
+def run_proofread(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+    from epubforge.proofreader import proofread
+
+    work = cfg.book_work_dir(pdf_path)
+    src = _stage_path(work, "05_semantic.json")
+    out = _stage_path(work, "06_proofread.json")
+    registry = _stage_path(work, "style_registry.json")
+    if _skip(out, force, "proofread"):
+        return
+    console.print("[bold]Stage 6:[/bold] book-level proofreading…")
+    proofread(src, out, registry, cfg)
+    console.print(f"  → {out}")
+
+
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     from epubforge.epub_builder import build_epub
 
     work = cfg.book_work_dir(pdf_path)
-    semantic = _stage_path(work, "05_semantic.json")
+    proofread_out = _stage_path(work, "06_proofread.json")
+    refined = _stage_path(work, "05_semantic.json")
+    semantic = proofread_out if proofread_out.exists() else refined
+    registry = _stage_path(work, "style_registry.json")
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.book_out_path(pdf_path)
     if _skip(out, force, "build"):
         return
-    console.print("[bold]Stage 6:[/bold] building EPUB…")
-    build_epub(semantic, out, images_dir=work / "images")
+    console.print("[bold]Stage 7:[/bold] building EPUB…")
+    build_epub(
+        semantic,
+        out,
+        images_dir=work / "images",
+        registry_path=registry if registry.exists() else None,
+    )
     console.print(f"  → {out}")

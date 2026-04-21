@@ -1,4 +1,4 @@
-"""Stage 6 — EPUB3 generation from Semantic IR."""
+"""Stage 7 — EPUB3 generation from Semantic IR."""
 
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ from epubforge.ir.semantic import (
     Paragraph,
     Table,
 )
+from epubforge.ir.style_registry import StyleRegistry
 
-_CSS = """
+_CSS_BASE = """
 body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
 h1 { font-size: 1.8em; margin-top: 2em; }
 h2 { font-size: 1.4em; margin-top: 1.5em; }
@@ -39,11 +40,54 @@ p.table-title { font-weight: bold; margin: 1em 0 0.2em; text-indent: 0; }
 p.table-caption { font-size: 0.88em; color: #555; margin: 0.2em 0 1em; text-indent: 0; }
 aside.footnote { font-size: 0.85em; border-top: 1px solid #ccc; margin-top: 2em; padding-top: 0.5em; }
 .equation { font-family: monospace; margin: 0.8em 0; }
+p.epigraph { font-style: italic; margin: 1em 3em; text-indent: 0; }
+p.blockquote { margin: 1em 2em; text-indent: 0; }
+p.poem { white-space: pre-wrap; text-indent: 0; text-align: center; margin: 1em 0; }
+p.caption { font-size: 0.88em; color: #555; text-indent: 0; }
+p.attribution { text-align: right; font-style: italic; text-indent: 0; }
+p.dedication { text-align: center; font-style: italic; margin: 2em 0; }
+p.preface-note { font-size: 0.9em; margin: 0.5em 1em; text-indent: 0; }
 """
 
 
-def build_epub(semantic_path: Path, out_path: Path, *, images_dir: Path | None = None) -> None:
+def _generate_css(registry: StyleRegistry | None) -> str:
+    if not registry:
+        return _CSS_BASE
+    extra: list[str] = []
+    existing_classes = {
+        line.split("{")[0].strip().lstrip("p.").lstrip(".")
+        for line in _CSS_BASE.splitlines()
+        if "{" in line and line.strip().startswith("p.")
+    }
+    for style in registry.styles:
+        if style.css_class in existing_classes:
+            continue
+        rules = "; ".join(f"{k}: {v}" for k, v in style.css_rules.items())
+        extra.append(f"p.{style.css_class} {{ {rules}; }}")
+    if not extra:
+        return _CSS_BASE
+    return _CSS_BASE + "\n" + "\n".join(extra)
+
+
+def _load_registry(registry_path: Path) -> StyleRegistry | None:
+    try:
+        return StyleRegistry.model_validate_json(registry_path.read_text(encoding="utf-8"))
+    except Exception:
+        log.warning("epub_builder: failed to load style registry from %s", registry_path)
+        return None
+
+
+def build_epub(
+    semantic_path: Path,
+    out_path: Path,
+    *,
+    images_dir: Path | None = None,
+    registry_path: Path | None = None,
+) -> None:
     book_model = Book.model_validate_json(semantic_path.read_text(encoding="utf-8"))
+    registry = _load_registry(registry_path) if registry_path else None
+    css = _generate_css(registry)
+
     ebook = epub.EpubBook()
     ebook.set_identifier(str(uuid.uuid4()))
     ebook.set_title(book_model.title)
@@ -53,7 +97,7 @@ def build_epub(semantic_path: Path, out_path: Path, *, images_dir: Path | None =
 
     css_item = epub.EpubItem(
         uid="style", file_name="style/main.css",
-        media_type="text/css", content=_CSS.encode(),
+        media_type="text/css", content=css.encode(),
     )
     ebook.add_item(css_item)
 
@@ -204,7 +248,7 @@ def _render_chapter(
 
     for block in chapter.blocks:
         if isinstance(block, Paragraph):
-            parts.append(f"<p>{_render_inline(block.text, fn_map)}</p>")
+            parts.append(_render_paragraph(block, fn_map))
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
             id_attr = f' id="{_esc(block.id)}"' if block.id else ""
@@ -256,6 +300,17 @@ def _render_chapter(
         footnotes_html = "\n".join(fn_parts)
 
     return body_html, footnotes_html
+
+
+def _render_paragraph(p: Paragraph, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:
+    cls = p.style_class or (p.role if p.role != "body" else None)
+    cls_attr = f' class="{_esc(cls)}"' if cls else ""
+    if p.display_lines:
+        inner = "<br/>".join(_esc(line) for line in p.display_lines)
+        inner = _apply_fn_markers(inner, fn_map)
+    else:
+        inner = _render_inline(p.text, fn_map)
+    return f"<p{cls_attr}>{inner}</p>"
 
 
 def _apply_fn_markers(html: str, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:

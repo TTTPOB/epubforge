@@ -47,10 +47,10 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
 def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all stages even if outputs exist"),
-    from_stage: int = typer.Option(1, "--from", min=1, max=6, help="Clear and re-run from stage N (1–6)"),
+    from_stage: int = typer.Option(1, "--from", min=1, max=7, help="Clear and re-run from stage N (1–7)"),
     pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
 ) -> None:
-    """Run the full pipeline (parse → classify → extract → assemble → refine-toc → build)."""
+    """Run the full pipeline (parse → classify → extract → assemble → refine-toc → proofread → build)."""
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
@@ -111,10 +111,21 @@ def refine_toc(
 
 
 @app.command()
+def proofread(
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force", "-f"),
+) -> None:
+    """Stage 6 — book-level proofread → work/<name>/06_proofread.json."""
+    cfg = load_config(_config_path)
+    cfg.require_llm()
+    pipeline.run_proofread(pdf_path, cfg, force=force)
+
+
+@app.command()
 def build(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
-    """Stage 6 — generate EPUB → out/<name>.epub."""
+    """Stage 7 — generate EPUB → out/<name>.epub."""
     cfg = load_config(_config_path)
     pipeline.run_build(pdf_path, cfg, force=force)

@@ -17,6 +17,9 @@ class Provenance(BaseModel):
 class Paragraph(BaseModel):
     kind: Literal["paragraph"] = "paragraph"
     text: str
+    role: str = "body"
+    display_lines: list[str] | None = None
+    style_class: str | None = None
     provenance: Provenance
 
 
