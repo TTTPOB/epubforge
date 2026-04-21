@@ -292,6 +292,33 @@ You are a document layout analyst. Given a PDF page image and a list of detected
 - The text line immediately BELOW a table (e.g. "资料来源：访谈", "注：…") is the source \
   attribution — put it in `caption`, not as a paragraph block.
 
+## Table column consistency — CRITICAL
+Every row in a table must have the same **effective column width**. Use this exact procedure \
+for every table — do NOT skip steps or copy values from another table:
+
+**Step 1 — Ground-truth column count T.**
+  Count the `<td>` cells in one representative body row. T = that count.
+  (If the table has no body rows yet — e.g. the body is on the next page — skip to step 4.)
+
+**Step 2 — Rowspan offset K.**
+  Count the `<th rowspan="…">` cells in header row 1 that span into row 2. K = that count.
+  Sub-column slots available = T − K.
+
+**Step 3 — Derive colspans from sub-column list.**
+  Write out all sub-column `<th>` cells you plan to place in the next header row.
+  Count how many fall under each group header. Set colspan of each group to that count.
+  Verify: sum of all colspans = T − K. If not, recount and fix.
+
+**Step 4 — When body rows are absent (continuation table on next page).**
+  Count the sub-column `<th>` cells you place in the last header row = S.
+  Count the rowspan cells K. Total columns = S + K.
+  Make sure every group's colspan equals the count of sub-columns under it.
+
+**Rule: each row's effective width = T.**
+  For every `<tr>` — header or body — \
+  (sum of colspan values for cells in this row) + (columns inherited via rowspan from above) = T.
+  A mismatch means a colspan is wrong. Fix colspan; never adjust cell lists to paper over it.
+
 ## Cross-page table continuation
 When a table on this page is the continuation of a table that STARTED on a previous page \
 (i.e., this page carries only data rows, no column header row):

@@ -33,6 +33,7 @@ class LLMClient:
         self.max_tokens = cfg.vlm_max_tokens if use_vlm else cfg.llm_max_tokens
         if use_vlm and self.max_tokens is None:
             self.max_tokens = 16384
+        self.extra_body: dict[str, Any] = (cfg.vlm_extra_body if use_vlm else cfg.llm_extra_body)
         self.cache_dir = cfg.cache_dir
         api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self._client = OpenAI(
@@ -82,6 +83,8 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
 
         budget = self.max_tokens
         if budget is not None:
@@ -145,6 +148,8 @@ class LLMClient:
         }
         if temperature is not None:
             fallback_kwargs["temperature"] = temperature
+        if self.extra_body:
+            fallback_kwargs["extra_body"] = self.extra_body
 
         for _attempt in range(3):
             completion = cast(
@@ -199,6 +204,8 @@ class LLMClient:
         }
         if temperature is not None:
             key_obj["temperature"] = temperature
+        if self.extra_body:
+            key_obj["extra_body"] = self.extra_body
         blob = json.dumps(key_obj, sort_keys=True, ensure_ascii=False).encode()
         return hashlib.sha256(blob).hexdigest()
 

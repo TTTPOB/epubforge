@@ -4,6 +4,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 def _load_toml(path: Path) -> dict[str, object]:
@@ -25,6 +26,8 @@ class Config:
     vlm_timeout: float = 300.0
     llm_max_tokens: int | None = None
     vlm_max_tokens: int | None = None
+    llm_extra_body: dict[str, Any] = field(default_factory=dict)
+    vlm_extra_body: dict[str, Any] = field(default_factory=dict)
     concurrency: int = 4
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
@@ -68,6 +71,8 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.llm_timeout = float(llm["timeout_seconds"])  # type: ignore[arg-type]
             if "max_tokens" in llm:
                 cfg.llm_max_tokens = int(llm["max_tokens"])  # type: ignore[arg-type]
+            if "extra_body" in llm and isinstance(llm["extra_body"], dict):
+                cfg.llm_extra_body = dict(llm["extra_body"])  # type: ignore[arg-type]
 
         if isinstance(vlm, dict):
             if "base_url" in vlm:
@@ -80,6 +85,8 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.vlm_timeout = float(vlm["timeout_seconds"])  # type: ignore[arg-type]
             if "max_tokens" in vlm:
                 cfg.vlm_max_tokens = int(vlm["max_tokens"])  # type: ignore[arg-type]
+            if "extra_body" in vlm and isinstance(vlm["extra_body"], dict):
+                cfg.vlm_extra_body = dict(vlm["extra_body"])  # type: ignore[arg-type]
 
         if isinstance(rt, dict):
             if "concurrency" in rt:
