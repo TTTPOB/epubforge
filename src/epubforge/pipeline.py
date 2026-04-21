@@ -41,7 +41,7 @@ def run_all(
     run_parse(pdf_path, cfg, force=_f(1))
     run_classify(pdf_path, cfg, force=_f(2))
     if from_stage <= 3:
-        run_extract(pdf_path, cfg, force=_f(3))
+        run_extract(pdf_path, cfg, force=_f(3), pages=pages)
     run_assemble(pdf_path, cfg, force=_f(4))
     run_refine_toc(pdf_path, cfg, force=_f(5))
     run_build(pdf_path, cfg, force=_f(6))
@@ -95,16 +95,17 @@ def run_extract(
     cfg: Config,
     *,
     force: bool = False,
+    pages: set[int] | None = None,
 ) -> None:
     from epubforge.extract import extract
 
     work = cfg.book_work_dir(pdf_path)
     raw = _stage_path(work, "01_raw.json")
-    pages = _stage_path(work, "02_pages.json")
+    pages_json = _stage_path(work, "02_pages.json")
     out_dir = work / "03_extract"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print("[bold]Stage 3:[/bold] extracting (LLM + VLM)…")
-    extract(pdf_path, raw, pages, out_dir, cfg, force=force)
+    extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
     console.print(f"  → {out_dir}/")
 
 

@@ -57,12 +57,15 @@ def extract(
     cfg: Config,
     *,
     force: bool = False,
+    page_filter: set[int] | None = None,
 ) -> None:
     """Unified Stage 3: process all units in PDF page order with cross-unit pending_tail."""
     doc = DoclingDocument.load_from_json(raw_path)
     pages_data: list[dict[str, Any]] = json.loads(
         pages_path.read_text(encoding="utf-8")
     )["pages"]
+    if page_filter is not None:
+        pages_data = [p for p in pages_data if p["page"] in page_filter]
 
     simple_set = {p["page"] for p in pages_data if p["kind"] == "simple"}
     page_items = _build_page_items(doc, simple_set)

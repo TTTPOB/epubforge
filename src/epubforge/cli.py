@@ -48,12 +48,13 @@ def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run all stages even if outputs exist"),
     from_stage: int = typer.Option(1, "--from", min=1, max=6, help="Clear and re-run from stage N (1–6)"),
+    pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
 ) -> None:
     """Run the full pipeline (parse → classify → extract → assemble → refine-toc → build)."""
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
-    pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage)
+    pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage, pages=_parse_pages(pages))
 
 
 @app.command()
