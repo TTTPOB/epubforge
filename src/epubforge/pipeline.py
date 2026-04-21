@@ -144,5 +144,5 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "build"):
         return
     console.print("[bold]Stage 6:[/bold] building EPUB…")
-    build_epub(semantic, out)
+    build_epub(semantic, out, images_dir=work / "images")
     console.print(f"  → {out}")

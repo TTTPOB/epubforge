@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
+from collections import defaultdict
 from pathlib import Path
 
 from ebooklib import epub
 
 _FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
+
+log = logging.getLogger(__name__)
 
 from epubforge.ir.semantic import (
     Book,
@@ -38,7 +42,7 @@ aside.footnote { font-size: 0.85em; border-top: 1px solid #ccc; margin-top: 2em;
 """
 
 
-def build_epub(semantic_path: Path, out_path: Path) -> None:
+def build_epub(semantic_path: Path, out_path: Path, *, images_dir: Path | None = None) -> None:
     book_model = Book.model_validate_json(semantic_path.read_text(encoding="utf-8"))
     ebook = epub.EpubBook()
     ebook.set_identifier(str(uuid.uuid4()))
@@ -53,14 +57,16 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
     )
     ebook.add_item(css_item)
 
+    figure_to_filename = _map_figures_to_images(book_model, images_dir, ebook)
+
     spine: list[str | epub.EpubHtml] = ["nav"]
     # entries: (level, href, title, uid)
     toc_entries: list[tuple[int, str, str, str]] = []
 
     for i, chapter in enumerate(book_model.chapters):
         xhtml_name = f"chap{i:04d}.xhtml"
-        body_html, footnotes_html = _render_chapter(chapter)
         ch_id = chapter.id or f"chap{i:04d}"
+        body_html, footnotes_html = _render_chapter(chapter, figure_to_filename)
         full_html = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             '<!DOCTYPE html>\n'
@@ -96,6 +102,42 @@ def build_epub(semantic_path: Path, out_path: Path) -> None:
     ebook.add_item(epub.EpubNav())
 
     epub.write_epub(str(out_path), ebook)
+
+
+def _map_figures_to_images(
+    book_model: Book, images_dir: Path | None, ebook: epub.EpubBook
+) -> dict[int, str]:
+    """Map each Figure block (by id()) to its disk filename, and register images with ebook."""
+    figure_to_filename: dict[int, str] = {}
+    if images_dir is None or not images_dir.exists():
+        return figure_to_filename
+
+    figures_by_page: dict[int, list[Figure]] = defaultdict(list)
+    for chapter in book_model.chapters:
+        for block in chapter.blocks:
+            if isinstance(block, Figure):
+                figures_by_page[block.provenance.page].append(block)
+
+    registered: set[str] = set()
+    for page, figs in figures_by_page.items():
+        disk_files = sorted(images_dir.glob(f"p{page:04d}_*.png"))
+        for ordinal, fig in enumerate(figs):
+            if ordinal >= len(disk_files):
+                log.warning("no image file for figure on page %d (ordinal %d)", page, ordinal)
+                continue
+            fname = disk_files[ordinal].name
+            figure_to_filename[id(fig)] = fname
+            if fname not in registered:
+                stem = Path(fname).stem
+                ebook.add_item(epub.EpubItem(
+                    uid=f"img-{stem}",
+                    file_name=f"images/{fname}",
+                    media_type="image/png",
+                    content=disk_files[ordinal].read_bytes(),
+                ))
+                registered.add(fname)
+
+    return figure_to_filename
 
 
 def _build_nested_toc(
@@ -138,7 +180,7 @@ def _build_nested_toc(
     return result
 
 
-def _render_chapter(chapter: Chapter) -> tuple[str, str]:
+def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tuple[str, str]:
     """Return (body_html, footnotes_html) for the chapter."""
     parts: list[str] = []
     footnotes: list[Footnote] = []
@@ -158,10 +200,11 @@ def _render_chapter(chapter: Chapter) -> tuple[str, str]:
                     f'<sup epub:type="noteref"><a href="#{_fn_id(block)}">{_esc(block.callout)}</a></sup>'
                 )
         elif isinstance(block, Figure):
-            img_tag = (
-                f'<img src="../images/{_esc(block.image_ref or "")}" alt="{_esc(block.caption)}"/>'
-                if block.image_ref else ""
-            )
+            fname = figure_to_filename.get(id(block))
+            if fname:
+                img_tag = f'<img src="images/{_esc(fname)}" alt="{_esc(block.caption)}"/>'
+            else:
+                img_tag = ""
             parts.append(
                 f'<figure>{img_tag}'
                 f'<figcaption>{_esc(block.caption)}</figcaption></figure>'
