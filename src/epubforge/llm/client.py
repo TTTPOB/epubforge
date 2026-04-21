@@ -73,7 +73,7 @@ class LLMClient:
         """Try OpenAI structured outputs; fall back to json_object mode on 400.
 
         Automatically retries with doubled max_tokens if the response is truncated
-        (finish_reason == "length"), up to 3 attempts total (max 32768 tokens).
+        (finish_reason == "length"), up to 3 attempts total (max 65536 tokens).
         """
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -104,7 +104,7 @@ class LLMClient:
             parsed = message.parsed
 
             if finish_reason == "length":
-                new_budget = min((budget or 8192) * 2, 32768)
+                new_budget = min((budget or 8192) * 2, 65536)
                 log.warning(
                     "structured output truncated; retrying with max_tokens=%d", new_budget
                 )
@@ -154,7 +154,7 @@ class LLMClient:
             content = completion.choices[0].message.content or ""
 
             if finish_reason == "length":
-                budget = min(budget * 2, 32768)
+                budget = min(budget * 2, 65536)
                 log.warning(
                     "json_object response truncated; retrying with max_tokens=%d", budget
                 )
@@ -169,7 +169,7 @@ class LLMClient:
                 return response_format.model_validate_json(content)
             except PydanticValidationError as exc:
                 if "EOF" in str(exc) and _attempt < 2:
-                    budget = min(budget * 2, 32768)
+                    budget = min(budget * 2, 65536)
                     log.warning(
                         "json_object response appears truncated (EOF); retrying with max_tokens=%d",
                         budget,
