@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from rich.console import Console
 
 from epubforge.config import Config
+from epubforge.observability import get_tracker, stage_timer
 
 console = Console()
+log = logging.getLogger(__name__)
 
 
 def _stage_path(work: Path, name: str) -> Path:
@@ -34,14 +37,16 @@ def run_all(
     def _f(stage: int) -> bool:
         return force if stage >= from_stage else False
 
-    run_parse(pdf_path, cfg, force=_f(1))
-    run_classify(pdf_path, cfg, force=_f(2))
-    run_extract(pdf_path, cfg, force=_f(3), pages=pages)
-    run_assemble(pdf_path, cfg, force=_f(4))
-    run_refine_toc(pdf_path, cfg, force=_f(5))
-    run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
-    run_build(pdf_path, cfg, force=_f(7))
+    with stage_timer(log, "pipeline"):
+        run_parse(pdf_path, cfg, force=_f(1))
+        run_classify(pdf_path, cfg, force=_f(2))
+        run_extract(pdf_path, cfg, force=_f(3), pages=pages)
+        run_assemble(pdf_path, cfg, force=_f(4))
+        run_refine_toc(pdf_path, cfg, force=_f(5))
+        run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
+        run_build(pdf_path, cfg, force=_f(7))
 
+    log.info("pipeline total: %s", get_tracker().summary_line())
 
 
 def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
@@ -53,7 +58,8 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
         return
     work.mkdir(parents=True, exist_ok=True)
     console.print(f"[bold]Stage 1:[/bold] parsing {pdf_path.name}…")
-    parse_pdf(pdf_path, out, images_dir=work / "images")
+    with stage_timer(log, "1 parse"):
+        parse_pdf(pdf_path, out, images_dir=work / "images")
     console.print(f"  → {out}")
 
 
@@ -66,7 +72,8 @@ def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "classify"):
         return
     console.print("[bold]Stage 2:[/bold] classifying pages…")
-    classify_pages(raw, out)
+    with stage_timer(log, "2 classify"):
+        classify_pages(raw, out)
     console.print(f"  → {out}")
 
 
@@ -85,7 +92,8 @@ def run_extract(
     out_dir = work / "03_extract"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print("[bold]Stage 3:[/bold] extracting (LLM + VLM)…")
-    extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
+    with stage_timer(log, "3 extract"):
+        extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
     console.print(f"  → {out_dir}/")
 
 
@@ -97,7 +105,8 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "assemble"):
         return
     console.print("[bold]Stage 4:[/bold] assembling Semantic IR…")
-    assemble(work, out)
+    with stage_timer(log, "4 assemble"):
+        assemble(work, out)
     console.print(f"  → {out}")
 
 
@@ -110,7 +119,8 @@ def run_refine_toc(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "refine-toc"):
         return
     console.print("[bold]Stage 5:[/bold] refining TOC hierarchy…")
-    refine_toc(raw, out, cfg)
+    with stage_timer(log, "5 refine-toc"):
+        refine_toc(raw, out, cfg)
     console.print(f"  → {out}")
 
 
@@ -130,7 +140,8 @@ def run_proofread(
     if _skip(out, force, "proofread"):
         return
     console.print("[bold]Stage 6:[/bold] book-level proofreading…")
-    proofread(src, out, registry, cfg, pages=pages)
+    with stage_timer(log, "6 proofread"):
+        proofread(src, out, registry, cfg, pages=pages)
     console.print(f"  → {out}")
 
 
@@ -147,10 +158,11 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "build"):
         return
     console.print("[bold]Stage 7:[/bold] building EPUB…")
-    build_epub(
-        semantic,
-        out,
-        images_dir=work / "images",
-        registry_path=registry if registry.exists() else None,
-    )
+    with stage_timer(log, "7 build"):
+        build_epub(
+            semantic,
+            out,
+            images_dir=work / "images",
+            registry_path=registry if registry.exists() else None,
+        )
     console.print(f"  → {out}")
