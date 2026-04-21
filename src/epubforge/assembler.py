@@ -25,50 +25,36 @@ log = logging.getLogger(__name__)
 
 
 def assemble(work_dir: Path, out_path: Path) -> None:
-    """Read stages 2–4 from *work_dir* and write Semantic IR JSON to *out_path*."""
-    pages_data: list[dict[str, Any]] = json.loads(
-        (work_dir / "02_pages.json").read_text(encoding="utf-8")
-    )["pages"]
+    """Read stage 3 extract units from *work_dir* and write Semantic IR JSON to *out_path*."""
+    extract_dir = work_dir / "03_extract"
+    unit_files = sorted(extract_dir.glob("unit_*.json"))
 
-    simple_dir = work_dir / "03_simple"
-    complex_dir = work_dir / "04_complex"
-
-    # Build page → group file mapping for simple pages
-    page_to_group: dict[int, Path] = {}
-    for gf in sorted(simple_dir.glob("group_*.json")):
-        gdata = json.loads(gf.read_text(encoding="utf-8"))
-        for pno in gdata.get("pages", []):
-            page_to_group[pno] = gf
-
-    # Walk pages in reading order, collect all blocks
     all_blocks: list[Block] = []
-    consumed_groups: set[Path] = set()
 
-    for page_info in pages_data:
-        pno: int = page_info["page"]
-        kind: str = page_info["kind"]
+    for uf in unit_files:
+        data = json.loads(uf.read_text(encoding="utf-8"))
+        unit_kind = data["unit"]["kind"]
+        source = "llm" if unit_kind == "llm_group" else "vlm"
+        default_page = data["unit"]["pages"][0]
+        flag = data.get("first_block_continues_prev_tail", False)
 
-        if kind == "simple":
-            gf = page_to_group.get(pno)
-            if gf is None or gf in consumed_groups:
-                continue
-            consumed_groups.add(gf)
-            gdata = json.loads(gf.read_text(encoding="utf-8"))
-            for raw_block in gdata.get("blocks", []):
-                block = _parse_block(raw_block, pno, "llm")
-                if block is not None:
-                    all_blocks.append(block)
+        raw_blocks = data.get("blocks", [])
+        parsed = [_parse_block(b, default_page, source) for b in raw_blocks]
+        parsed = [b for b in parsed if b is not None]
 
-        else:  # complex
-            cf = complex_dir / f"p{pno:04d}.json"
-            if not cf.exists():
-                log.warning("Missing VLM output for page %d, skipping", pno)
-                continue
-            cdata = json.loads(cf.read_text(encoding="utf-8"))
-            for raw_block in cdata.get("blocks", []):
-                block = _parse_block(raw_block, pno, "vlm")
-                if block is not None:
-                    all_blocks.append(block)
+        if flag and parsed:
+            cont = parsed[0]
+            if isinstance(cont, Paragraph):
+                _append_to_last_paragraph(all_blocks, cont.text)
+                all_blocks.extend(parsed[1:])
+            else:
+                log.warning(
+                    "first_block_continues_prev_tail=True but first block is not Paragraph "
+                    "(kind=%s, unit=%s)", cont.kind, uf.name  # type: ignore[union-attr]
+                )
+                all_blocks.extend(parsed)
+        else:
+            all_blocks.extend(parsed)
 
     # Merge cross-page table continuations, absorb adjacent title/caption paragraphs, pair footnotes
     all_blocks = _merge_continued_tables(all_blocks)
@@ -212,6 +198,32 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 log.debug("Paired footnote callout %r (page %d) into table block %d", callout, block.provenance.page, j)
                 break
     return result
+
+
+def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> None:
+    """Append cont_text to the last Paragraph in blocks, skipping trailing Footnotes."""
+    for i in range(len(blocks) - 1, -1, -1):
+        candidate = blocks[i]
+        if isinstance(candidate, Footnote):
+            continue
+        if isinstance(candidate, Paragraph):
+            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text)})
+            return
+        break
+    log.warning("first_block_continues_prev_tail=True but no anchor Paragraph found; dropping continuation")
+
+
+def _cjk_join(prev: str, cont: str) -> str:
+    """Join two text segments: no space between CJK chars, one space between Latin/digit chars."""
+    prev = prev.rstrip()
+    cont = cont.lstrip()
+    if not prev or not cont:
+        return prev + cont
+    a, b = prev[-1], cont[0]
+    is_cjk = lambda c: "\u4e00" <= c <= "\u9fff"
+    if is_cjk(a) or is_cjk(b):
+        return prev + cont
+    return prev + " " + cont
 
 
 def _detect_language(blocks: list[Block]) -> str:

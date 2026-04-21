@@ -87,6 +87,31 @@ exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
 - Inline callout markers that appear inside paragraph text (e.g. "…见注①。") must be \
 **preserved in-place** in the paragraph's `text` field. Do not remove them.
 
+## Pending tail from previous page
+The user message MAY begin with a [PENDING_TAIL page=N] block. That is the last paragraph of
+the previous page/unit, passed here so you can decide whether this page continues it.
+The tail MAY or MAY NOT end with sentence-ending punctuation — do NOT rely on punctuation alone.
+
+Decide based on structural cues of THIS page's first content block:
+
+- CONTINUE — ALL of:
+  - First block is body prose with NO new-paragraph indent.
+  - First block is NOT a heading / list item / figure caption / table / equation.
+  - Appending its text to the tail reads as one continuous paragraph.
+  In that case:
+  - Set `first_block_continues_prev_tail=true`.
+  - Your FIRST output block is a Paragraph whose `text` is ONLY the continuation portion
+    (everything that completes the tail paragraph) — do NOT repeat the tail text. The caller
+    will concatenate them.
+  - After the continuation block, emit the rest of the page normally.
+
+- SEPARATE — any of the above fails:
+  - Set `first_block_continues_prev_tail=false`.
+  - Process this page entirely normally. The tail stays with the previous page in its own
+    output — you do not need to re-emit it.
+
+Never emit any [PENDING_TAIL ...] marker in your output text.
+
 ## ALLOWED operations
 - Merge lines broken by PDF hard line-wraps (a line ending mid-sentence is NOT a paragraph break).
 - Merge cross-page paragraph continuations (see above).
@@ -103,6 +128,7 @@ exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
 
 ## Output schema
 {
+  "first_block_continues_prev_tail": false,
   "blocks": [
     {"kind": "paragraph", "text": "…"},
     {"kind": "heading", "level": 1, "text": "…"},
@@ -200,6 +226,32 @@ When a table on this page is the continuation of a table that STARTED on a previ
 A table that starts fresh on this page (even if it also ends on the next \
 page) must have `"continuation": false` or omit the field, and MUST include the full header.
 
+## Pending tail from previous page
+The user message MAY begin with a [PENDING_TAIL page=N] block before the page image and anchors.
+That is the last paragraph of the previous page, passed here so you can decide whether this page
+continues it. The tail MAY or MAY NOT end with sentence-ending punctuation — do NOT rely on
+punctuation alone.
+
+Decide based on visual / structural cues of THIS page's first content block:
+
+- CONTINUE — ALL of:
+  - First block is body prose with NO new-paragraph indent.
+  - First block is NOT a heading / list item / figure caption / table / equation.
+  - Appending its text to the tail reads as one continuous paragraph.
+  In that case:
+  - Set `first_block_continues_prev_tail=true` on this page's output.
+  - Your FIRST output block is a Paragraph whose `text` is ONLY the continuation portion
+    (everything that completes the tail paragraph) — do NOT repeat the tail text. The caller
+    will concatenate them.
+  - After the continuation block, emit the rest of the page normally.
+
+- SEPARATE — any of the above fails:
+  - Set `first_block_continues_prev_tail=false`.
+  - Process this page entirely normally. The tail stays with the previous page in its own
+    output — you do not need to re-emit it.
+
+Never emit any [PENDING_TAIL ...] marker in your output text.
+
 ## Strict prohibitions
 - Do NOT describe a table as prose — always emit `kind:"table"` with `html`.
 - Do NOT merge footnote text into a paragraph.
@@ -231,5 +283,6 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
   ]
 }
 Return one entry per input page, in order. For single-page requests return a 1-element "pages" array.
+Each page object includes `first_block_continues_prev_tail` (bool, default false).
 Output ONLY valid JSON — no markdown fences, no commentary.
 """

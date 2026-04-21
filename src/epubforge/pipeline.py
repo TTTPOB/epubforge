@@ -34,20 +34,17 @@ def run_all(
         work = cfg.book_work_dir(pdf_path)
         _clear_from(work, cfg.book_out_path(pdf_path), from_stage)
     # Only run stages >= from_stage (earlier stages are assumed complete).
-    # Stages 1-2 are cheap checks so always run them; 3-4 are skipped entirely
-    # when from_stage > their number to avoid partial-group API calls.
+    # Stage 3 (extract) is skipped entirely when from_stage > 3 to avoid partial API calls.
     def _f(stage: int) -> bool:
         return force if stage >= from_stage else False
 
     run_parse(pdf_path, cfg, force=_f(1))
     run_classify(pdf_path, cfg, force=_f(2))
     if from_stage <= 3:
-        run_clean(pdf_path, cfg, force=_f(3), page_nos=pages)
-    if from_stage <= 4:
-        run_vlm(pdf_path, cfg, force=_f(4), page_nos=pages)
-    run_assemble(pdf_path, cfg, force=_f(5))
-    run_refine_toc(pdf_path, cfg, force=_f(6))
-    run_build(pdf_path, cfg, force=_f(7))
+        run_extract(pdf_path, cfg, force=_f(3))
+    run_assemble(pdf_path, cfg, force=_f(4))
+    run_refine_toc(pdf_path, cfg, force=_f(5))
+    run_build(pdf_path, cfg, force=_f(6))
 
 
 def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
@@ -55,13 +52,12 @@ def _clear_from(work: Path, epub_out: Path, from_stage: int) -> None:
     stage_files: dict[int, list[Path]] = {
         1: [work / "01_raw.json"],
         2: [work / "02_pages.json"],
-        3: list((work / "03_simple").glob("*.json")) if (work / "03_simple").exists() else [],
-        4: list((work / "04_complex").glob("*.json")) if (work / "04_complex").exists() else [],
-        5: [work / "05_semantic_raw.json"],
-        6: [work / "05_semantic.json"],
-        7: [epub_out],
+        3: list((work / "03_extract").glob("*.json")) if (work / "03_extract").exists() else [],
+        4: [work / "05_semantic_raw.json"],
+        5: [work / "05_semantic.json"],
+        6: [epub_out],
     }
-    for stage in range(from_stage, 8):
+    for stage in range(from_stage, 7):
         for p in stage_files.get(stage, []):
             if p.exists():
                 p.unlink()
@@ -94,41 +90,21 @@ def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     console.print(f"  → {out}")
 
 
-def run_clean(
+def run_extract(
     pdf_path: Path,
     cfg: Config,
     *,
     force: bool = False,
-    page_nos: set[int] | None = None,
 ) -> None:
-    from epubforge.cleaner import clean_simple_pages
+    from epubforge.extract import extract
 
     work = cfg.book_work_dir(pdf_path)
     raw = _stage_path(work, "01_raw.json")
     pages = _stage_path(work, "02_pages.json")
-    out_dir = work / "03_simple"
+    out_dir = work / "03_extract"
     out_dir.mkdir(parents=True, exist_ok=True)
-    console.print("[bold]Stage 3:[/bold] LLM text cleaning…")
-    clean_simple_pages(raw, pages, out_dir, cfg, force=force, page_nos=page_nos)
-    console.print(f"  → {out_dir}/")
-
-
-def run_vlm(
-    pdf_path: Path,
-    cfg: Config,
-    *,
-    force: bool = False,
-    page_nos: set[int] | None = None,
-) -> None:
-    from epubforge.vlm_reader import read_complex_pages
-
-    work = cfg.book_work_dir(pdf_path)
-    raw = _stage_path(work, "01_raw.json")
-    pages = _stage_path(work, "02_pages.json")
-    out_dir = work / "04_complex"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    console.print("[bold]Stage 4:[/bold] VLM complex-page reading…")
-    read_complex_pages(pdf_path, raw, pages, out_dir, cfg, force=force, page_nos=page_nos)
+    console.print("[bold]Stage 3:[/bold] extracting (LLM + VLM)…")
+    extract(pdf_path, raw, pages, out_dir, cfg, force=force)
     console.print(f"  → {out_dir}/")
 
 
@@ -139,7 +115,7 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out = _stage_path(work, "05_semantic_raw.json")
     if _skip(out, force, "assemble"):
         return
-    console.print("[bold]Stage 5:[/bold] assembling Semantic IR…")
+    console.print("[bold]Stage 4:[/bold] assembling Semantic IR…")
     assemble(work, out)
     console.print(f"  → {out}")
 
@@ -152,7 +128,7 @@ def run_refine_toc(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out = _stage_path(work, "05_semantic.json")
     if _skip(out, force, "refine-toc"):
         return
-    console.print("[bold]Stage 5.5:[/bold] refining TOC hierarchy…")
+    console.print("[bold]Stage 5:[/bold] refining TOC hierarchy…")
     refine_toc(raw, out, cfg)
     console.print(f"  → {out}")
 
