@@ -91,7 +91,7 @@ def run_extract(
     pages_json = _stage_path(work, "02_pages.json")
     out_dir = work / "03_extract"
     out_dir.mkdir(parents=True, exist_ok=True)
-    console.print("[bold]Stage 3:[/bold] extracting (LLM + VLM)…")
+    console.print("[bold]Stage 3:[/bold] extracting (VLM)…")
     with stage_timer(log, "3 extract"):
         extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
     console.print(f"  → {out_dir}/")
@@ -137,11 +137,17 @@ def run_proofread(
     src = _stage_path(work, "05_semantic.json")
     out = _stage_path(work, "06_proofread.json")
     registry = _stage_path(work, "style_registry.json")
+    book_memory_path = work / "03_extract" / "book_memory.json"
+    audit_notes_path = work / "03_extract" / "audit_notes.json"
     if _skip(out, force, "proofread"):
         return
     console.print("[bold]Stage 6:[/bold] book-level proofreading…")
     with stage_timer(log, "6 proofread"):
-        proofread(src, out, registry, cfg, pages=pages)
+        proofread(
+            src, out, registry, cfg, pages=pages,
+            book_memory_path=book_memory_path if book_memory_path.exists() else None,
+            audit_notes_path=audit_notes_path if audit_notes_path.exists() else None,
+        )
     console.print(f"  → {out}")
 
 

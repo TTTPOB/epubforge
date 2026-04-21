@@ -319,6 +319,23 @@ Use them as consistency anchors when labeling the current chunk.
 If the user message says "chunk i/n", focus on items in that chunk. Revisions may still
 reach items outside the current chunk (including anchors in mode=audit).
 
+## Book memory context (when provided)
+The user message in mode=audit may contain a [BOOK_MEMORY] block with facts from the extract
+stage. Use these to inform your proposals:
+- `footnote_callouts`: any inline symbol in this list is a valid footnote callout — do NOT
+  relabel paragraphs that contain only such a symbol as something else.
+- `attribution_templates`: use the observed patterns to confirm or standardise attribution
+  blocks. If a block matches a template, it is attribution (not epigraph).
+- `punctuation_quirks`: known OCR substitutions. If you see text with these anomalies and
+  there is no EditOp to fix wording, note it in reason.
+- `epigraph_chapters`: page numbers where epigraphs were seen by VLM — cross-reference when
+  auditing role=epigraph blocks.
+
+## Extract-stage audit notes (when provided)
+The user message in mode=audit may contain an [AUDIT_NOTES] block listing suspicious items
+found during VLM extraction (orphan_footnote, suspect_attribution, punctuation_anomaly, etc.).
+Prioritise these hints when scanning the audit items — they are likely to need EditOps.
+
 ## Output schema
 {
   "proposals": [
@@ -331,6 +348,38 @@ reach items outside the current chunk (including anchors in mode=audit).
   "new_styles": []
 }
 Output ONLY valid JSON.
+"""
+
+
+_BOOK_MEMORY_VLM_RULES = """\
+## Book-level memory [BOOK_MEMORY]
+The user message may begin with a [BOOK_MEMORY] block containing JSON facts accumulated from
+earlier pages of this book:
+- `footnote_callouts`: symbols already identified as footnote markers (①②③, *, †, [1], etc.)
+  — if you see one of these in the page, it IS a footnote callout; do not mistake it for
+  a paragraph. If you spot a new callout symbol not yet in the list, add it.
+- `attribution_templates`: observed attribution line patterns — use these to recognise
+  attribution lines on this page and emit them consistently.
+- `punctuation_quirks`: known docling OCR substitutions (e.g. "." instead of "。") — correct
+  them when you see them.
+- `running_headers`: page header/footer strings to strip — do not emit these as content blocks.
+- Other fields: use as consistency anchors.
+
+You MUST return an `updated_book_memory` in your JSON output. Copy all existing facts and
+EXTEND (never delete) the lists when you discover new facts on this page. Keep each list within
+its allowed length; drop the least-useful entry if a list is full.
+
+## Audit notes
+For each page, you MAY emit `audit_notes` — a list of suspicious findings that need human or
+proofreader attention. Use these kinds:
+- "orphan_footnote": a footnote callout in prose but no corresponding footnote body on the page
+- "suspect_attribution": a line that looks like attribution but could not be confirmed
+- "punctuation_anomaly": a CJK punctuation replacement artifact (e.g. "." where "。" expected)
+- "unknown_callout": an unrecognised footnote-like symbol
+- "other": anything else noteworthy
+
+Each audit note: {"page": N, "block_index": null_or_int, "kind": "…", "hint": "…(≤200 chars)"}
+Emit audit_notes only when you are reasonably confident; omit the field if nothing is suspicious.\
 """
 
 
@@ -408,6 +457,8 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
 
 {_PENDING_TAIL_RULES}
 
+{_BOOK_MEMORY_VLM_RULES}
+
 ## Strict prohibitions
 - Do NOT describe a table as prose — always emit `kind:"table"` with `html`.
 - Do NOT merge footnote text into a paragraph.
@@ -428,6 +479,8 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
   "pages": [
     {{
       "page": <int>,
+      "first_block_continues_prev_tail": false,
+      "first_footnote_continues_prev_footnote": false,
       "blocks": [
         {{"kind": "paragraph",  "text": "...", "bbox": [x0, y0, x1, y1]}},
         {{"kind": "heading",    "text": "...", "level": 1, "bbox": [...]}},
@@ -435,11 +488,23 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
         {{"kind": "figure",     "caption": "...", "image_ref": "p17_fig1", "bbox": [...]}},
         {{"kind": "table",      "html": "<table>...</table>", "table_title": "...", "caption": "...", "bbox": [...], "continuation": false}},
         {{"kind": "equation",   "latex": "...", "bbox": [...]}}
+      ],
+      "audit_notes": [
+        {{"page": <int>, "block_index": null, "kind": "orphan_footnote", "hint": "..."}}
       ]
     }}
-  ]
+  ],
+  "updated_book_memory": {{
+    "footnote_callouts": ["①", "②"],
+    "attribution_templates": [],
+    "epigraph_chapters": [],
+    "punctuation_quirks": [],
+    "running_headers": [],
+    "chapter_heading_style": null,
+    "notes": []
+  }}
 }}
 Return one entry per input page, in order. For single-page requests return a 1-element "pages" array.
-Each page object includes `first_block_continues_prev_tail` and `first_footnote_continues_prev_footnote` (both bool, default false).
+`audit_notes` may be an empty list. `updated_book_memory` is REQUIRED in every response.
 Output ONLY valid JSON — no markdown fences, no commentary.
 """

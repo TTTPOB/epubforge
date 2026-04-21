@@ -509,15 +509,29 @@ def _build_phase2_messages(
     *,
     chunk_idx: int,
     total: int,
+    book_memory_json: str | None = None,
+    audit_notes: list[dict] | None = None,
 ) -> list[ChatCompletionMessageParam]:
     from epubforge.llm.prompts import PROOFREAD_SYSTEM
 
     chunk_note = f"chunk {chunk_idx + 1}/{total}" if total > 1 else "all edited paragraphs"
+
+    memory_section = ""
+    if book_memory_json:
+        memory_section = f"[BOOK_MEMORY]\n{book_memory_json}\n[/BOOK_MEMORY]\n\n"
+
+    notes_section = ""
+    if audit_notes:
+        notes_json = json.dumps(audit_notes, ensure_ascii=False, indent=2)
+        notes_section = f"[AUDIT_NOTES]\n{notes_json}\n[/AUDIT_NOTES]\n\n"
+
     if audit_chunk.anchors:
         anchors_json = json.dumps(audit_chunk.anchors, ensure_ascii=False, indent=2)
         items_json = json.dumps(audit_chunk.items, ensure_ascii=False, indent=2)
         user_content = (
             f"mode=audit\n"
+            f"{memory_section}"
+            f"{notes_section}"
             f"# Style registry\n{_registry_json(registry)}\n\n"
             f"# Anchors (shared across chunks — use for consistency comparison; "
             f"revisions on these require confidence ≥ 0.85 and must apply book-wide)\n{anchors_json}\n\n"
@@ -527,6 +541,8 @@ def _build_phase2_messages(
         items_json = json.dumps(audit_chunk.items, ensure_ascii=False, indent=2)
         user_content = (
             f"mode=audit\n"
+            f"{memory_section}"
+            f"{notes_section}"
             f"# Style registry\n{_registry_json(registry)}\n\n"
             f"# Audit {chunk_note} — all edited paragraphs across the book\n{items_json}"
         )
@@ -570,12 +586,30 @@ def proofread(
     cfg: Config,
     *,
     pages: set[int] | None = None,
+    book_memory_path: Path | None = None,
+    audit_notes_path: Path | None = None,
 ) -> None:
     from epubforge.llm.client import LLMClient
 
     book = Book.model_validate_json(semantic_path.read_text(encoding="utf-8"))
     registry = _load_or_seed_registry(registry_path, book.title)
     client = LLMClient(cfg, use_vlm=False)
+
+    book_memory_json: str | None = None
+    if book_memory_path and book_memory_path.exists():
+        try:
+            book_memory_json = book_memory_path.read_text(encoding="utf-8")
+            log.info("proofreader: loaded book_memory from %s", book_memory_path)
+        except Exception:
+            log.warning("proofreader: failed to read book_memory_path — skipping")
+
+    audit_notes: list[dict] = []
+    if audit_notes_path and audit_notes_path.exists():
+        try:
+            audit_notes = json.loads(audit_notes_path.read_text(encoding="utf-8"))
+            log.info("proofreader: loaded %d audit notes from %s", len(audit_notes), audit_notes_path)
+        except Exception:
+            log.warning("proofreader: failed to read audit_notes_path — skipping")
 
     phase1_extra = _build_thinking_extra(cfg.proofread_phase1_thinking_budget_tokens)
     phase2_extra = _build_thinking_extra(cfg.proofread_phase2_thinking_budget_tokens)
@@ -642,6 +676,8 @@ def proofread(
             messages = _build_phase2_messages(
                 audit_chunk, registry,
                 chunk_idx=audit_idx, total=len(audit_chunks),
+                book_memory_json=book_memory_json,
+                audit_notes=audit_notes if audit_idx == 0 else None,
             )
             label = f"phase2 audit chunk {audit_idx + 1}/{len(audit_chunks)}"
             result = _safe_call(client, messages, phase2_extra, label)
