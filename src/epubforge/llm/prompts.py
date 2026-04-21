@@ -22,18 +22,62 @@ The user message contains one or more Docling blocks, each delimited by:
   [/BLOCK]
 
 Where N is the source page number. These delimiters are metadata only — they
-MUST NOT appear in your output text. Two adjacent [BLOCK] regions are DISTINCT
-Docling elements: do NOT concatenate their contents into one paragraph unless
-rule 1 (blank line in original) or a visible PDF line-wrap at the boundary
-clearly indicates a single paragraph was split. When in doubt, keep them as
-separate paragraphs.
+MUST NOT appear in your output text.
+
+## Line-break normalisation — MANDATORY FIRST STEP
+Every newline (\\n) within a single [BLOCK] is a PDF hard line-wrap — it is NOT a paragraph \
+break. You MUST join them into one continuous line:
+- Remove the newline character.
+- Remove any trailing whitespace before the newline and any leading whitespace after it.
+- Do NOT insert any space where the newline was removed if the surrounding characters are both \
+  Chinese/CJK; only keep (or insert) a single space if the join point is between Latin/numeric \
+  and Latin/numeric text.
+
+Example input block:
+  [BLOCK p5]
+  这是一个很长的句子，因为 PDF 换行而被
+  分成了两行，需要合并。
+  [/BLOCK]
+Expected output text: "这是一个很长的句子，因为 PDF 换行而被分成了两行，需要合并。"
 
 ## Paragraph boundary rules
 A new paragraph starts ONLY when ONE of the following is true:
 1. There is a blank line in the original.
 2. The next line has a clear first-line indent (≥ 2 em-spaces or equivalent).
-3. The Docling input marks it as a distinct [BLOCK] element.
+3. The block ends with proper sentence-ending punctuation (。！？……）etc.) AND the next \
+   [BLOCK] clearly starts a new thought (new indent, new numbered item, or heading).
 A bare line-break inside a sentence is NEVER a paragraph boundary.
+
+## Poetry / verse detection — IMPORTANT
+If a sequence of lines has ALL of the following characteristics, they are verse / poetry lines \
+and must NOT be merged with each other:
+- Lines are short (typically ≤ 25 Chinese characters each).
+- Lines do NOT end with ordinary prose punctuation (。；：).
+- Lines form a rhythmic or parallel structure (poem, verse, lyric, epigraph).
+Common locations: chapter openings, book prefaces, epigraphs.
+
+For verse, you MUST preserve the line boundaries. Preferred: emit each line as its own \
+paragraph block. Acceptable alternative: emit the stanza as one paragraph block whose `text` \
+field uses literal \\n to separate each verse line. Either way, do NOT collapse verse lines \
+into one run-on sentence.
+
+Example: a stanza "蒲公英，蒲公英，\\n开花在夏日的清晨" must NOT become \
+"蒲公英，蒲公英，开花在夏日的清晨".
+
+## Cross-page paragraph continuation — IMPORTANT
+If a [BLOCK] on page N ends WITHOUT Chinese sentence-ending punctuation \
+（。！？……；— or equivalent）and the very next [BLOCK] (even from page N+1) \
+does NOT start with a heading marker or an indented first sentence, they almost certainly \
+form ONE paragraph split across a page boundary. In that case:
+- Merge them into a single paragraph block.
+- Remove any trailing space before the join and any leading space after it following the same \
+  rules as line-break normalisation above.
+
+## Spacing rules — CRITICAL
+- Do NOT add spaces between Chinese/CJK characters and Latin letters or digits \
+  (no "盘古之白" / pangu spacing). Example: keep "第3章" as "第3章", not "第 3 章"; \
+  keep "GDP增长" as "GDP增长", not "GDP 增长".
+- Preserve existing spaces that were clearly in the source; do not add new ones.
 
 ## Footnote rules
 - Text at the bottom of a page that begins with ①②③, [1], [2], superscript digits, or similar \
@@ -45,6 +89,7 @@ exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
 
 ## ALLOWED operations
 - Merge lines broken by PDF hard line-wraps (a line ending mid-sentence is NOT a paragraph break).
+- Merge cross-page paragraph continuations (see above).
 - Remove page headers, footers, and bare page numbers.
 - Normalise heading levels (SectionHeader level 1 → heading level 1, etc.).
 - Preserve original wording exactly — do not paraphrase or translate.
@@ -54,6 +99,7 @@ exact marker string (e.g. "①", "[1]") and `"text"` set to the body.
 - Adding, removing, or combining content across section boundaries.
 - Changing any factual information.
 - Removing inline footnote callout markers from paragraph text.
+- Adding spaces between CJK and Latin/digit characters (盘古之白).
 
 ## Output schema
 {
@@ -146,9 +192,13 @@ or distinct text region).
 
 ## Cross-page table continuation
 When a table on this page is the continuation of a table that STARTED on a previous page \
-(i.e., this page carries only data rows, no column header row), set `"continuation": true` \
-on that table block. A table that starts fresh on this page (even if it also ends on the next \
-page) must have `"continuation": false` or omit the field.
+(i.e., this page carries only data rows, no column header row):
+- Set `"continuation": true` on that table block.
+- The `html` field MUST contain ONLY the data rows (`<tbody><tr>…</tr></tbody>`) — do NOT \
+  repeat the column header row (`<thead>` or the first `<tr>` with `<th>` cells). The header \
+  will be taken from the first page of the table automatically.
+A table that starts fresh on this page (even if it also ends on the next \
+page) must have `"continuation": false` or omit the field, and MUST include the full header.
 
 ## Strict prohibitions
 - Do NOT describe a table as prose — always emit `kind:"table"` with `html`.

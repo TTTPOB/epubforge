@@ -140,9 +140,14 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
 
 
 def _splice_table_html(base: str, cont: str) -> str:
-    """Strip outer <table> wrapper from cont and append its rows before </table> in base."""
+    """Strip outer <table> wrapper and header rows from cont, append data rows into base."""
     inner = re.sub(r"^\s*<table[^>]*>", "", cont, count=1, flags=re.IGNORECASE)
     inner = re.sub(r"</table>\s*$", "", inner, count=1, flags=re.IGNORECASE)
+    # Remove <thead>…</thead> from continuation to avoid duplicate column headers
+    inner = re.sub(r"<thead\b[^>]*>.*?</thead>", "", inner, flags=re.IGNORECASE | re.DOTALL)
+    # Remove leading <tr> that contains only <th> cells (header row not wrapped in <thead>)
+    inner = re.sub(r"^\s*<tr\b[^>]*>(\s*<th\b[^>]*>.*?</th>\s*)+</tr>", "", inner,
+                   count=1, flags=re.IGNORECASE | re.DOTALL)
     return re.sub(r"</table>\s*$", inner + "</table>", base, count=1, flags=re.IGNORECASE)
 
 
