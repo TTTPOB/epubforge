@@ -22,7 +22,7 @@ _DEFAULT_STYLES: list[dict] = [
     {
         "id": "epigraph",
         "parent_role": "epigraph",
-        "description": "Chapter opening epigraph",
+        "description": "Chapter or section opening quoted text — verse, poem, or saying placed before body text. Also correct for each individual line when a multi-line opening poem is split into separate blocks.",
         "css_class": "epigraph",
         "css_rules": {"font-style": "italic", "margin": "1em 3em", "text-indent": "0"},
     },
@@ -36,7 +36,7 @@ _DEFAULT_STYLES: list[dict] = [
     {
         "id": "poem",
         "parent_role": "poem",
-        "description": "Verse / poetry with preserved line breaks",
+        "description": "Standalone poem or verse embedded within body text (not a chapter-opening epigraph).",
         "css_class": "poem",
         "css_rules": {
             "white-space": "pre-wrap",

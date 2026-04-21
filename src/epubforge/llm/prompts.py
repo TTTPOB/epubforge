@@ -268,9 +268,11 @@ The user message starts with a "mode" marker:
 - mode=label: you see one chapter chunk plus a prior_proposals_summary. Propose edits
   for blocks in this chunk. You MAY revise already-edited blocks mentioned in the
   summary, but keep revisions rare and high-confidence.
-- mode=audit: you see a global list of all already-edited paragraphs (with text).
-  Scan for INCONSISTENCIES across the whole list. Propose revisions for any block
-  whose current role is inconsistent with the dominant pattern for similar text.
+- mode=audit: you see all non-default paragraphs (with text) PLUS up to 3 neighboring
+  body paragraphs around each (marked is_context=true). Scan for INCONSISTENCIES and
+  also relabel any context neighbor that clearly needs a role (e.g., an attribution
+  line following a poem/epigraph block). Propose revisions for any block whose current
+  role is inconsistent with the dominant pattern for similar text.
 
 ## Allowed operations
 - relabel: change a paragraph's role (only into ALLOWED_ROLES)

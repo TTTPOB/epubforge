@@ -419,10 +419,28 @@ def _collect_audit_items(book: Book, pages: set[int] | None) -> list[dict]:
     for ch_idx, ch in enumerate(book.chapters):
         if pages is not None and not (_chapter_pages(ch) & pages):
             continue
+
+        # Identify non-default paragraph indices first
+        non_default: set[int] = set()
         for b_idx, b in enumerate(ch.blocks):
             if not isinstance(b, Paragraph):
                 continue
-            if b.role == "body" and not b.display_lines and not b.style_class:
+            if b.role != "body" or b.display_lines or b.style_class:
+                non_default.add(b_idx)
+
+        # Build inclusion map: False = primary non-default, True = context neighbor
+        included: dict[int, bool] = {b_idx: False for b_idx in non_default}
+        for b_idx in non_default:
+            for offset in range(-3, 4):
+                if offset == 0:
+                    continue
+                neighbor = b_idx + offset
+                if 0 <= neighbor < len(ch.blocks) and neighbor not in included:
+                    included[neighbor] = True
+
+        for b_idx in sorted(included):
+            b = ch.blocks[b_idx]
+            if not isinstance(b, Paragraph):
                 continue
             text = b.text
             if len(text) > 400:
@@ -433,6 +451,7 @@ def _collect_audit_items(book: Book, pages: set[int] | None) -> list[dict]:
                 "role": b.role,
                 "style_class": b.style_class,
                 "has_display_lines": bool(b.display_lines),
+                "is_context": included[b_idx],
                 "text": text,
             })
     return items
