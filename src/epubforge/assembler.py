@@ -272,13 +272,15 @@ def _build_book_from_stream(blocks: list[Block], meta: _BookMeta) -> Book:
     current_title = "Front Matter"
     current_blocks: list[Block] = []
 
-    def flush() -> None:
-        if current_blocks or chapters == []:
+    def flush(at_heading_boundary: bool = False) -> None:
+        # Always flush at heading boundaries to preserve heading-only pages (e.g. dedication pages).
+        # At end of stream, skip empty chapters unless no chapters exist yet.
+        if current_blocks or not chapters or at_heading_boundary:
             chapters.append(Chapter(title=current_title, blocks=list(current_blocks)))
 
     for block in blocks:
         if isinstance(block, Heading) and block.level == 1:
-            flush()
+            flush(at_heading_boundary=True)
             current_title = block.text
             current_blocks = []
         else:
