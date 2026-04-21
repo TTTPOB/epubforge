@@ -7,6 +7,7 @@ import re
 import uuid
 from collections import defaultdict
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 
 from ebooklib import epub
 
@@ -275,7 +276,7 @@ def _render_chapter(
         elif isinstance(block, Figure):
             fname = figure_to_filename.get(id(block))
             if fname:
-                img_tag = f'<img src="images/{_esc(fname)}" alt="{_esc(block.caption)}"/>'
+                img_tag = f'<img src="images/{_url_quote(fname, safe="_-.")}" alt="{_esc(block.caption)}"/>'
             else:
                 img_tag = ""
             parts.append(

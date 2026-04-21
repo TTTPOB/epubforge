@@ -51,7 +51,7 @@ def _save_figure_crops(doc, images_dir: Path) -> None:
         pil_img = element.get_image(doc)
         if pil_img is None:
             continue
-        ref_id = element.self_ref.replace("/", "_").lstrip("_")
+        ref_id = element.self_ref.replace("/", "_").replace("#", "_").lstrip("_")
         page = element.prov[0].page_no if element.prov else 0
         img_path = images_dir / f"p{page:04d}_{ref_id}.png"
         pil_img.save(img_path, format="PNG")
