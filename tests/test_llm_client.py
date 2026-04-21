@@ -52,7 +52,7 @@ class TestTruncationRetry:
         with patch.object(client._client.chat.completions, "parse",
                           side_effect=[truncated, ok_completion]) as mock_parse:
             result = client._call_parsed(
-                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
 
         assert result.value == "done"
@@ -70,7 +70,7 @@ class TestTruncationRetry:
                           return_value=truncated):
             with pytest.raises(RuntimeError, match="truncated after 3 attempts"):
                 client._call_parsed(
-                    [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                    [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
                 )
 
     def test_truncation_warning_logged(self, tmp_path, caplog) -> None:
@@ -84,7 +84,7 @@ class TestTruncationRetry:
                           side_effect=[truncated, ok]):
             with caplog.at_level(logging.WARNING, logger="epubforge.llm.client"):
                 client._call_parsed(
-                    [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                    [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
                 )
 
         assert any("truncated" in r.message.lower() for r in caplog.records)
@@ -122,7 +122,7 @@ class TestJsonObjectFallback:
                          return_value=fallback_completion),
         ):
             result = client._call_parsed(
-                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
 
         assert result.value == "fallback"
@@ -145,7 +145,7 @@ class TestJsonObjectFallback:
             caplog.at_level(logging.WARNING, logger="epubforge.llm.client"),
         ):
             client._call_parsed(
-                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
 
         assert any("json_object" in r.message.lower() for r in caplog.records)
@@ -174,7 +174,7 @@ class TestJsonObjectFallback:
                          side_effect=[truncated, ok]),
         ):
             result = client._call_parsed(
-                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
         assert result.value == "ok"
 
@@ -194,7 +194,7 @@ class TestJsonObjectFallback:
                          side_effect=[truncated, ok]),
         ):
             result = client._call_parsed(
-                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0
+                [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
         assert result.value == "complete"
 

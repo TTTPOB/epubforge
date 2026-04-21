@@ -23,6 +23,17 @@ T = TypeVar("T", bound=BaseModel)
 log = logging.getLogger(__name__)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge override into base; override wins on conflicts."""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
 class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
@@ -49,14 +60,16 @@ class LLMClient:
         *,
         response_format: type[T],
         temperature: float | None = 0.0,
+        extra_body: dict[str, Any] | None = None,
     ) -> T:
-        cache_key = self._cache_key(messages, response_format, temperature)
+        merged_extra = _deep_merge(self.extra_body, extra_body or {})
+        cache_key = self._cache_key(messages, response_format, temperature, merged_extra)
         cache_path = self._cache_path(cache_key)
         if cache_path.exists():
             raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
             return response_format.model_validate_json(raw)
 
-        parsed = self._call_parsed(messages, response_format, temperature)
+        parsed = self._call_parsed(messages, response_format, temperature, merged_extra)
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
@@ -70,6 +83,7 @@ class LLMClient:
         messages: list[ChatCompletionMessageParam],
         response_format: type[T],
         temperature: float | None,
+        merged_extra: dict[str, Any],
     ) -> T:
         """Try OpenAI structured outputs; fall back to json_object mode on 400.
 
@@ -83,8 +97,8 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
-        if self.extra_body:
-            kwargs["extra_body"] = self.extra_body
+        if merged_extra:
+            kwargs["extra_body"] = merged_extra
 
         budget = self.max_tokens
         if budget is not None:
@@ -100,7 +114,7 @@ class LLMClient:
                     "endpoint rejected json_schema response_format (400); "
                     "falling back to json_object mode (no strict schema)"
                 )
-                return self._call_json_object_fallback(messages, response_format, temperature)
+                return self._call_json_object_fallback(messages, response_format, temperature, merged_extra)
 
             finish_reason = completion.choices[0].finish_reason
             message = completion.choices[0].message
@@ -131,6 +145,7 @@ class LLMClient:
         messages: list[ChatCompletionMessageParam],
         response_format: type[T],
         temperature: float | None,
+        merged_extra: dict[str, Any],
     ) -> T:
         """Fallback: json_object mode — model must emit valid JSON, parsed manually.
 
@@ -148,8 +163,8 @@ class LLMClient:
         }
         if temperature is not None:
             fallback_kwargs["temperature"] = temperature
-        if self.extra_body:
-            fallback_kwargs["extra_body"] = self.extra_body
+        if merged_extra:
+            fallback_kwargs["extra_body"] = merged_extra
 
         for _attempt in range(3):
             completion = cast(
@@ -192,6 +207,7 @@ class LLMClient:
         messages: list[ChatCompletionMessageParam],
         response_format: type[BaseModel],
         temperature: float | None,
+        merged_extra: dict[str, Any],
     ) -> str:
         key_obj: dict[str, Any] = {
             "base_url": self.base_url,
@@ -204,8 +220,8 @@ class LLMClient:
         }
         if temperature is not None:
             key_obj["temperature"] = temperature
-        if self.extra_body:
-            key_obj["extra_body"] = self.extra_body
+        if merged_extra:
+            key_obj["extra_body"] = merged_extra
         blob = json.dumps(key_obj, sort_keys=True, ensure_ascii=False).encode()
         return hashlib.sha256(blob).hexdigest()
 

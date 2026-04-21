@@ -259,38 +259,63 @@ mid-word with no structural marker). This is rare. Do NOT merge structurally dis
 Output ONLY valid JSON — no markdown fences, no commentary.
 """
 
-PROOFREAD_SYSTEM = """\
-You are a book-level structural proofreader for a CJK book. Given one chapter's blocks \
-(with current semantic roles) and the book's existing style registry, output a JSON with:
+PROOFREAD_SYSTEM = """You are a book-level structural proofreader for a CJK book. Given blocks with current semantic roles and the book's style registry, output a JSON with:
 1. A list of edit proposals to fix segmentation, lineation, and role assignments.
 2. Optionally, new style variants to add to the registry.
+
+## Modes
+The user message starts with a "mode" marker:
+- mode=label: you see one chapter chunk plus a prior_proposals_summary. Propose edits
+  for blocks in this chunk. You MAY revise already-edited blocks mentioned in the
+  summary, but keep revisions rare and high-confidence.
+- mode=audit: you see a global list of all already-edited paragraphs (with text).
+  Scan for INCONSISTENCIES across the whole list. Propose revisions for any block
+  whose current role is inconsistent with the dominant pattern for similar text.
 
 ## Allowed operations
 - relabel: change a paragraph's role (only into ALLOWED_ROLES)
 - set_lines: restore line structure for verse/epigraph/poem (set display_lines)
 - set_style: assign a style_class from the registry (existing or newly proposed id)
-- split: split one paragraph into multiple at specific line boundaries (e.g. epigraph \
-  title was wrongly merged into the verse body)
-- merge_next: merge this paragraph into the next (only when both are paragraphs and \
-  the split was a docling artifact)
+- split: split one paragraph into multiple at specific line boundaries (e.g. epigraph   title was wrongly merged into the verse body)
+- merge_next: merge this paragraph into the next (only when both are paragraphs and   the split was a docling artifact)
 
 ## ALLOWED_ROLES
-body, epigraph, blockquote, poem, caption, attribution, preface_note, \
-dedication, list_item, code, misc_display
+body, epigraph, blockquote, poem, caption, attribution, preface_note, dedication, list_item, code, misc_display
 
 ## Strict rules
 - NEVER change paragraph text wording. set_lines only re-segments the existing text.
 - NEVER propose split/merge that crosses Figure / Table / Heading / Footnote.
-- For new style variants: only sub-types under existing roles \
-  (e.g. "epigraph.italic_centered"), confidence ≥ 0.8, with at least 2 supporting blocks.
+- For new style variants: only sub-types under existing roles   (e.g. "epigraph.italic_centered"), confidence ≥ 0.8, with at least 2 supporting blocks.
 - Each proposal MUST include `reason` (short, ≤30 CJK chars) and `confidence` (0.0–1.0).
 - Output proposals only for blocks that need change. Do not echo unchanged blocks.
+
+## Prior proposals summary (mode=label only)
+The summary shows up to 3 examples per edit variant (relabel->epigraph,
+relabel->attribution, set_lines, set_style->X, …) already applied to earlier blocks.
+Use them as consistency anchors when labeling the current chunk.
+
+## Revising earlier decisions (both modes)
+- Same proposal format; block_id references an earlier block (e.g. "10_1" while
+  current chapter is 12).
+- You cannot target future chapters; such proposals will be silently dropped.
+- mode=label: revise only when prior decision clearly conflicts with current chunk's pattern.
+- mode=audit: revision IS your main job — compare texts directly across the full list.
+- Confidence threshold ≥ 0.75 for any revision. For anchor blocks: ≥ 0.85.
 
 ## Heuristics for verse/epigraph (the most common error)
 - Short lines (≤ 25 CJK chars), no prose punctuation, parallel structure → likely verse.
 - Located right after a chapter heading + small text → likely epigraph.
-- If a paragraph contains "title line + verse body" merged together (common docling error), \
-  propose split_after_line_indices=[0] to separate them.
+- If a paragraph contains "title line + verse body" merged together (common docling error),   propose split_after_line_indices=[0] to separate them.
+
+## Attribution vs epigraph consistency
+- A line in the form "AuthorName：《WorkTitle》" or "AuthorName:《WorkTitle》" immediately
+  following an epigraph or verse block is almost certainly role=attribution, not epigraph.
+- In mode=audit, if you see such lines labeled epigraph while similar lines elsewhere are
+  labeled attribution, correct the outliers.
+
+## Chunked note
+If the user message says "chunk i/n", focus on items in that chunk. Revisions may still
+reach items outside the current chunk (including anchors in mode=audit).
 
 ## Output schema
 {
@@ -305,6 +330,7 @@ dedication, list_item, code, misc_display
 }
 Output ONLY valid JSON.
 """
+
 
 VLM_SYSTEM = f"""\
 You are a document layout analyst. Given a PDF page image and a list of detected text anchors \

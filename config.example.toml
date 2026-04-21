@@ -20,3 +20,20 @@ concurrency = 4
 cache_dir   = "work/.cache"
 work_dir    = "work"
 out_dir     = "out"
+
+[proofread]
+# Reasoning tokens for Phase 1 (per-chapter labeling, rolling context).
+# Passed as extra_body.reasoning.max_tokens. Set to 0 to disable reasoning.
+phase1_thinking_budget_tokens = 2000
+
+# Reasoning tokens for Phase 2 (global consistency audit over all edited blocks).
+# Phase 2 does cross-book comparison, so a higher budget may help.
+phase2_thinking_budget_tokens = 2000
+
+# Maximum approximate token count per LLM call in the proofread stage.
+# Applies to both phases: when content exceeds this, it is split into chunks.
+max_chunk_tokens = 100000
+
+# Character-to-token estimation ratio for chunking. CJK/JSON mixed content
+# is roughly 3 chars/token. Adjust only if your model tokenizes differently.
+chars_per_token = 3.0

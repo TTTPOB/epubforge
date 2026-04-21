@@ -32,6 +32,10 @@ class Config:
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
     out_dir: Path = field(default_factory=lambda: Path("out"))
+    proofread_phase1_thinking_budget_tokens: int = 2000
+    proofread_phase2_thinking_budget_tokens: int = 2000
+    proofread_max_chunk_tokens: int = 100_000
+    proofread_chars_per_token: float = 3.0
 
     def require_llm(self) -> None:
         if not self.llm_api_key:
@@ -97,6 +101,17 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.work_dir = Path(str(rt["work_dir"]))
             if "out_dir" in rt:
                 cfg.out_dir = Path(str(rt["out_dir"]))
+
+        pr = data.get("proofread") or {}
+        if isinstance(pr, dict):
+            if "phase1_thinking_budget_tokens" in pr:
+                cfg.proofread_phase1_thinking_budget_tokens = int(pr["phase1_thinking_budget_tokens"])  # type: ignore[arg-type]
+            if "phase2_thinking_budget_tokens" in pr:
+                cfg.proofread_phase2_thinking_budget_tokens = int(pr["phase2_thinking_budget_tokens"])  # type: ignore[arg-type]
+            if "max_chunk_tokens" in pr:
+                cfg.proofread_max_chunk_tokens = int(pr["max_chunk_tokens"])  # type: ignore[arg-type]
+            if "chars_per_token" in pr:
+                cfg.proofread_chars_per_token = float(pr["chars_per_token"])  # type: ignore[arg-type]
 
     # Layer 4: environment variables (highest priority)
     if v := os.environ.get("EPUBFORGE_LLM_BASE_URL"):
