@@ -11,7 +11,7 @@ from docling_core.types.doc import DocItemLabel, DoclingDocument
 from docling_core.types.doc.base import BoundingBox, Size
 from docling_core.types.doc.document import PageItem, ProvenanceItem
 
-from epubforge.extract import _format_blocks_for_llm, _build_page_items, _build_units, LLMGroupUnit, VLMPageUnit
+from epubforge.extract import _format_blocks_for_llm, _build_page_items, _build_units, LLMGroupUnit, VLMGroupUnit
 from epubforge.config import Config
 from epubforge.ir.semantic import CleanOutput, CleanBlock
 
@@ -112,7 +112,7 @@ class TestBuildUnits:
         assert len(units) == 4
         assert isinstance(units[0], LLMGroupUnit) and units[0].pages == [1]
         assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [2]
-        assert isinstance(units[2], VLMPageUnit) and units[2].pages == [3]
+        assert isinstance(units[2], VLMGroupUnit) and units[2].pages == [3]
         assert isinstance(units[3], LLMGroupUnit) and units[3].pages == [4]
 
     def test_every_page_is_its_own_unit(self) -> None:
@@ -139,7 +139,7 @@ class TestBuildUnits:
         ]
         units = _build_units(pages_data, {}, pages_with_tables={10, 11})
         assert len(units) == 1
-        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10, 11]
+        assert isinstance(units[0], VLMGroupUnit) and units[0].pages == [10, 11]
 
     def test_adjacent_complex_only_one_with_table_not_grouped(self) -> None:
         pages_data = [
@@ -148,8 +148,8 @@ class TestBuildUnits:
         ]
         units = _build_units(pages_data, {}, pages_with_tables={10})
         assert len(units) == 2
-        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10]
-        assert isinstance(units[1], VLMPageUnit) and units[1].pages == [11]
+        assert isinstance(units[0], VLMGroupUnit) and units[0].pages == [10]
+        assert isinstance(units[1], VLMGroupUnit) and units[1].pages == [11]
 
     def test_complex_pages_separated_by_simple_not_grouped(self) -> None:
         pages_data = [
@@ -159,15 +159,15 @@ class TestBuildUnits:
         ]
         units = _build_units(pages_data, {}, pages_with_tables={10, 12})
         assert len(units) == 3
-        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10]
+        assert isinstance(units[0], VLMGroupUnit) and units[0].pages == [10]
         assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [11]
-        assert isinstance(units[2], VLMPageUnit) and units[2].pages == [12]
+        assert isinstance(units[2], VLMGroupUnit) and units[2].pages == [12]
 
     def test_four_adjacent_complex_all_with_tables_grouped(self) -> None:
         pages_data = [{"page": p, "kind": "complex"} for p in range(5, 9)]
         units = _build_units(pages_data, {}, pages_with_tables={5, 6, 7, 8})
         assert len(units) == 1
-        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [5, 6, 7, 8]
+        assert isinstance(units[0], VLMGroupUnit) and units[0].pages == [5, 6, 7, 8]
 
     def test_non_adjacent_complex_pages_not_grouped(self) -> None:
         pages_data = [

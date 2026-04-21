@@ -44,12 +44,12 @@ class LLMGroupUnit:
 
 
 @dataclass
-class VLMPageUnit:
-    kind: str = "vlm_page"
+class VLMGroupUnit:
+    kind: str = "vlm_group"
     pages: list[int] = field(default_factory=list)
 
 
-Unit = LLMGroupUnit | VLMPageUnit
+Unit = LLMGroupUnit | VLMGroupUnit
 
 
 def extract(
@@ -86,7 +86,7 @@ def extract(
     pending_footnote: dict[str, Any] | None = None
 
     n_llm = sum(1 for u in units if isinstance(u, LLMGroupUnit))
-    n_vlm = sum(1 for u in units if isinstance(u, VLMPageUnit))
+    n_vlm = sum(1 for u in units if isinstance(u, VLMGroupUnit))
     all_pages = sorted({p for u in units for p in u.pages})
     log.info(
         "extract: %d units (%d LLM + %d VLM), pages=%s",
@@ -144,14 +144,14 @@ def _build_units(
         if page_info["kind"] == "complex":
             if (
                 units
-                and isinstance(units[-1], VLMPageUnit)
+                and isinstance(units[-1], VLMGroupUnit)
                 and units[-1].pages[-1] + 1 == pno
                 and units[-1].pages[-1] in pages_with_tables
                 and pno in pages_with_tables
             ):
                 units[-1].pages.append(pno)
             else:
-                units.append(VLMPageUnit(pages=[pno]))
+                units.append(VLMGroupUnit(pages=[pno]))
         else:
             units.append(LLMGroupUnit(pages=[pno]))
     return units
@@ -181,7 +181,7 @@ def _process_llm_unit(
 
 
 def _process_vlm_unit(
-    unit: VLMPageUnit,
+    unit: VLMGroupUnit,
     fitz_doc: fitz.Document,
     anchors: dict[int, list[_AnchorItem]],
     pending_tail: dict[str, Any] | None,
