@@ -109,12 +109,13 @@ class TestBuildUnits:
             4: [{"label": DocItemLabel.TEXT, "text": "c", "page": 4}],
         }
         units = _build_units(pages_data, page_items)
-        assert len(units) == 3
-        assert isinstance(units[0], LLMGroupUnit) and units[0].pages == [1, 2]
-        assert isinstance(units[1], VLMPageUnit) and units[1].pages == [3]
-        assert isinstance(units[2], LLMGroupUnit) and units[2].pages == [4]
+        assert len(units) == 4
+        assert isinstance(units[0], LLMGroupUnit) and units[0].pages == [1]
+        assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [2]
+        assert isinstance(units[2], VLMPageUnit) and units[2].pages == [3]
+        assert isinstance(units[3], LLMGroupUnit) and units[3].pages == [4]
 
-    def test_section_header_cuts_llm_group(self) -> None:
+    def test_every_page_is_its_own_unit(self) -> None:
         pages_data = [
             {"page": 1, "kind": "simple"},
             {"page": 2, "kind": "simple"},
@@ -126,6 +127,7 @@ class TestBuildUnits:
             3: [{"label": DocItemLabel.TEXT, "text": "text", "page": 3}],
         }
         units = _build_units(pages_data, page_items)
-        assert len(units) == 2
+        assert len(units) == 3
         assert isinstance(units[0], LLMGroupUnit) and units[0].pages == [1]
-        assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [2, 3]
+        assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [2]
+        assert isinstance(units[2], LLMGroupUnit) and units[2].pages == [3]

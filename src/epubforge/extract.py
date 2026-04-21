@@ -105,28 +105,12 @@ def _build_units(
     page_items: dict[int, list[dict[str, Any]]],
 ) -> list[Unit]:
     units: list[Unit] = []
-    buf: list[int] = []
-
-    def flush_buf() -> None:
-        if buf:
-            units.append(LLMGroupUnit(pages=list(buf)))
-            buf.clear()
-
     for page_info in pages_data:
         pno = page_info["page"]
-        kind = page_info["kind"]
-
-        if kind == "complex":
-            flush_buf()
+        if page_info["kind"] == "complex":
             units.append(VLMPageUnit(pages=[pno]))
         else:
-            items = page_items.get(pno, [])
-            starts_with_header = bool(items) and items[0]["label"] in _HEADER_LABELS
-            if starts_with_header and buf:
-                flush_buf()
-            buf.append(pno)
-
-    flush_buf()
+            units.append(LLMGroupUnit(pages=[pno]))
     return units
 
 
@@ -263,7 +247,7 @@ def _build_anchors(doc: DoclingDocument) -> dict[int, list[_AnchorItem]]:
     for item in itertools.chain(
         doc.texts, doc.tables, doc.pictures, doc.key_value_items, doc.form_items
     ):
-        text = getattr(item, "text", "")[:200]
+        text = getattr(item, "text", "")
         for prov in item.prov:
             pno = prov.page_no
             anchors.setdefault(pno, []).append({
