@@ -27,7 +27,6 @@ _HEADER_LABELS = frozenset({DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE})
 _SKIP_LABELS = frozenset({
     DocItemLabel.PAGE_HEADER,
     DocItemLabel.PAGE_FOOTER,
-    DocItemLabel.DOCUMENT_INDEX,  # TOC tables — LLM would enumerate every entry causing output explosion
 })
 _DPI = 150
 
