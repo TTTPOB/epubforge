@@ -72,6 +72,7 @@ def extract(
         pages_data = [p for p in pages_data if p["page"] in page_filter]
 
     simple_set = {p["page"] for p in pages_data if p["kind"] == "simple"}
+    pages_data = [p for p in pages_data if p["kind"] != "toc"]
     page_items = _build_page_items(doc, simple_set)
     anchors = _build_anchors(doc)
 

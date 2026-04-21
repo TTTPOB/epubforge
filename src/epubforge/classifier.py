@@ -21,6 +21,8 @@ _COMPLEX_LABELS: frozenset[DocItemLabel] = frozenset({
     DocItemLabel.CHART,
 })
 
+_TOC_LABELS: frozenset[DocItemLabel] = frozenset({DocItemLabel.DOCUMENT_INDEX})
+
 _MULTICOLUMN_GAP_RATIO = 0.05  # x-gap > 5% of page width → multi-column
 
 
@@ -52,13 +54,15 @@ def classify_pages(raw_path: Path, out_path: Path) -> None:
             pno = prov.page_no
             info = page_info[pno]
             info["element_refs"].append(item.self_ref)
-            if item.label in _COMPLEX_LABELS:
+            if item.label in _TOC_LABELS:
+                info["kind"] = "toc"
+            elif item.label in _COMPLEX_LABELS and info["kind"] != "toc":
                 info["kind"] = "complex"
             if item.label == DocItemLabel.TEXT:
                 info["text_bboxes"].append((prov.bbox.l, prov.bbox.r))
 
     for pno, info in page_info.items():
-        if info["kind"] == "complex":
+        if info["kind"] in ("complex", "toc"):
             continue
         page_width = pages_meta.get(pno, 595.0)
         if _is_multicolumn(info["text_bboxes"], page_width):
