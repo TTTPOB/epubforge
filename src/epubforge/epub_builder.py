@@ -66,7 +66,7 @@ def build_epub(semantic_path: Path, out_path: Path, *, images_dir: Path | None =
     for i, chapter in enumerate(book_model.chapters):
         xhtml_name = f"chap{i:04d}.xhtml"
         ch_id = chapter.id or f"chap{i:04d}"
-        body_html, footnotes_html = _render_chapter(chapter, figure_to_filename)
+        body_html, footnotes_html = _render_chapter(chapter, ch_id, figure_to_filename)
         full_html = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             '<!DOCTYPE html>\n'
@@ -180,14 +180,31 @@ def _build_nested_toc(
     return result
 
 
-def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tuple[str, str]:
+def _render_chapter(
+    chapter: Chapter, chapter_id: str, figure_to_filename: dict[int, str]
+) -> tuple[str, str]:
     """Return (body_html, footnotes_html) for the chapter."""
+    # Pre-pass: assign sequential numbers to footnotes within this chapter.
+    fn_map: dict[tuple[int, str], tuple[int, str]] = {}
+    n = 0
+    for block in chapter.blocks:
+        if isinstance(block, Footnote):
+            key = (block.provenance.page, block.callout)
+            if key in fn_map:
+                log.warning(
+                    "duplicate footnote key (page=%d, callout=%r) in chapter %r",
+                    key[0], key[1], chapter_id,
+                )
+                continue
+            n += 1
+            fn_map[key] = (n, f"{chapter_id}-fn{n}")
+
     parts: list[str] = []
     footnotes: list[Footnote] = []
 
     for block in chapter.blocks:
         if isinstance(block, Paragraph):
-            parts.append(f"<p>{_render_inline(block.text)}</p>")
+            parts.append(f"<p>{_render_inline(block.text, fn_map)}</p>")
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
             id_attr = f' id="{_esc(block.id)}"' if block.id else ""
@@ -195,10 +212,13 @@ def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tup
         elif isinstance(block, Footnote):
             footnotes.append(block)
             if not block.paired:
-                # callout was not found in any paragraph — emit standalone fallback ref
-                parts.append(
-                    f'<sup epub:type="noteref"><a href="#{_fn_id(block)}">{_esc(block.callout)}</a></sup>'
-                )
+                key = (block.provenance.page, block.callout)
+                entry = fn_map.get(key)
+                if entry:
+                    n_val, fn_id = entry
+                    parts.append(
+                        f'<sup epub:type="noteref"><a href="#{fn_id}">{n_val}</a></sup>'
+                    )
         elif isinstance(block, Figure):
             fname = figure_to_filename.get(id(block))
             if fname:
@@ -212,7 +232,7 @@ def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tup
         elif isinstance(block, Table):
             title_html = f'<p class="table-title">{_esc(block.table_title)}</p>' if block.table_title else ""
             caption_html = f'<p class="table-caption">{_esc(block.caption)}</p>' if block.caption else ""
-            parts.append(f"{title_html}{_apply_fn_markers(block.html)}{caption_html}")
+            parts.append(f"{title_html}{_apply_fn_markers(block.html, fn_map)}{caption_html}")
         elif isinstance(block, Equation):
             parts.append(f'<p class="equation">{_esc(block.latex)}</p>')
 
@@ -222,9 +242,15 @@ def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tup
     if footnotes:
         fn_parts = ['<aside epub:type="footnotes">']
         for fn in footnotes:
+            key = (fn.provenance.page, fn.callout)
+            entry = fn_map.get(key)
+            if entry:
+                n_val, fn_id = entry
+            else:
+                n_val, fn_id = 0, f"{chapter_id}-fn0"
             fn_parts.append(
-                f'<aside epub:type="footnote" id="{_fn_id(fn)}">'
-                f'<p><sup>{_esc(fn.callout)}</sup> {_esc(fn.text)}</p></aside>'
+                f'<aside epub:type="footnote" id="{fn_id}">'
+                f'<p><sup>{n_val}</sup> {_esc(fn.text)}</p></aside>'
             )
         fn_parts.append("</aside>")
         footnotes_html = "\n".join(fn_parts)
@@ -232,23 +258,29 @@ def _render_chapter(chapter: Chapter, figure_to_filename: dict[int, str]) -> tup
     return body_html, footnotes_html
 
 
-def _apply_fn_markers(html: str) -> str:
-    """Replace \x02fn-PAGE-CALLOUT\x03 markers with noteref links (no HTML escaping)."""
+def _apply_fn_markers(html: str, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:
+    """Replace \x02fn-PAGE-CALLOUT\x03 markers with sequential noteref links."""
     def to_link(m: re.Match[str]) -> str:
-        fn_id = m.group(1)
-        callout = fn_id.split("-", 2)[2]
-        return f'<sup epub:type="noteref"><a href="#{fn_id}">{callout}</a></sup>'
+        raw = m.group(1)  # "fn-PAGE-CALLOUT"
+        parts = raw.split("-", 2)
+        try:
+            page = int(parts[1])
+            callout = parts[2]
+        except (IndexError, ValueError):
+            return m.group(0)
+        entry = fn_map.get((page, callout))
+        if entry is None:
+            log.warning("fn marker page=%d callout=%r has no fn_map entry", page, callout)
+            return m.group(0)
+        n_val, fn_id = entry
+        return f'<sup epub:type="noteref"><a href="#{fn_id}">{n_val}</a></sup>'
     return _FN_MARKER_RE.sub(to_link, html)
 
 
-def _render_inline(text: str) -> str:
-    """Escape HTML then convert fn markers to noteref links (for plain paragraph text)."""
+def _render_inline(text: str, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:
+    """Escape HTML then convert fn markers to sequential noteref links."""
     escaped = _esc(text).replace("\n", "<br/>")
-    return _apply_fn_markers(escaped)
-
-
-def _fn_id(fn: Footnote) -> str:
-    return f"fn-{fn.provenance.page}-{fn.callout}"
+    return _apply_fn_markers(escaped, fn_map)
 
 
 def _esc(text: str) -> str:

@@ -29,7 +29,7 @@ def test_render_chapter_figure_resolved() -> None:
     fig = _figure(5, "A chart")
     chapter = Chapter(title="Ch1", blocks=[fig])
     fname = "p0005_foo.png"
-    body_html, _ = _render_chapter(chapter, {id(fig): fname})
+    body_html, _ = _render_chapter(chapter, "chap0000", {id(fig): fname})
     assert f'<img src="images/{fname}"' in body_html
     assert "figcaption" in body_html
 
@@ -38,7 +38,7 @@ def test_render_chapter_figure_unresolved() -> None:
     """Figure with no disk match renders <figcaption> but no <img>."""
     fig = _figure(7, "A chart")
     chapter = Chapter(title="Ch1", blocks=[fig])
-    body_html, _ = _render_chapter(chapter, {})
+    body_html, _ = _render_chapter(chapter, "chap0000", {})
     assert "<img" not in body_html
     assert "figcaption" in body_html
 
@@ -69,6 +69,41 @@ def test_build_epub_includes_images(tmp_path: Path) -> None:
         assert xhtml_entries
         content = zf.read(xhtml_entries[0]).decode()
         assert content.count('<img src="images/') == 2
+
+
+# ---------------------------------------------------------------------------
+# Commit 3 — per-chapter footnote renumbering
+# ---------------------------------------------------------------------------
+
+
+def test_render_chapter_footnotes_numbered() -> None:
+    """Footnotes are numbered 1, 2, 3 per chapter regardless of original callout."""
+    prov = lambda page: _prov(page, "llm")
+
+    fn1 = Footnote(callout="①", text="Note 1", paired=True, provenance=prov(1))
+    fn2 = Footnote(callout="*", text="Note 2", paired=True, provenance=prov(2))
+    fn3 = Footnote(callout="②", text="Note 3", paired=True, provenance=prov(3))
+
+    p1 = Paragraph(text=f"Text \x02fn-1-①\x03 more", provenance=prov(1))
+    p2 = Paragraph(text=f"Text \x02fn-2-*\x03 more", provenance=prov(2))
+    p3 = Paragraph(text=f"Text \x02fn-3-②\x03 more", provenance=prov(3))
+
+    chapter = Chapter(title="Ch1", blocks=[p1, fn1, p2, fn2, p3, fn3])
+    body_html, fn_html = _render_chapter(chapter, "ch1", {})
+
+    # Inline noteref markers must use sequential numbers
+    assert ">1<" in body_html
+    assert ">2<" in body_html
+    assert ">3<" in body_html
+    # Original callouts must not appear as noteref labels
+    assert ">①<" not in body_html
+    assert ">*<" not in body_html
+    assert ">②<" not in body_html
+
+    # Footnote anchors must use per-chapter ids
+    assert 'id="ch1-fn1"' in fn_html
+    assert 'id="ch1-fn2"' in fn_html
+    assert 'id="ch1-fn3"' in fn_html
 
 
 def test_build_epub_no_images_dir(tmp_path: Path) -> None:
