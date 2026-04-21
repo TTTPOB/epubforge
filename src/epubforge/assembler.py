@@ -194,8 +194,11 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             continue
         callout = block.callout
         fn_marker = f"\x02fn-{block.provenance.page}-{callout}\x03"
-        for j in range(i - 1, max(i - 40, -1), -1):
+        fn_page = block.provenance.page
+        for j in range(i - 1, -1, -1):
             candidate = result[j]
+            if candidate.provenance.page != fn_page:
+                break
             if isinstance(candidate, Paragraph) and callout in candidate.text:
                 result[j] = candidate.model_copy(update={
                     "text": candidate.text.replace(callout, fn_marker, 1)
