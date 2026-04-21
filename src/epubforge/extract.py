@@ -75,7 +75,8 @@ def extract(
     page_items = _build_page_items(doc, simple_set)
     anchors = _build_anchors(doc)
 
-    units = _build_units(pages_data, page_items)
+    pages_with_tables = _pages_with_tables(doc)
+    units = _build_units(pages_data, page_items, pages_with_tables)
 
     llm_client = LLMClient(cfg, use_vlm=False)
     vlm_client = LLMClient(cfg, use_vlm=True)
@@ -105,15 +106,35 @@ def extract(
         fitz_doc.close()
 
 
+def _pages_with_tables(doc: DoclingDocument) -> set[int]:
+    page_nos: set[int] = set()
+    for table in doc.tables:
+        for prov in table.prov:
+            page_nos.add(prov.page_no)
+    return page_nos
+
+
 def _build_units(
     pages_data: list[dict[str, Any]],
     page_items: dict[int, list[dict[str, Any]]],
+    pages_with_tables: set[int] | None = None,
 ) -> list[Unit]:
+    if pages_with_tables is None:
+        pages_with_tables = set()
     units: list[Unit] = []
     for page_info in pages_data:
         pno = page_info["page"]
         if page_info["kind"] == "complex":
-            units.append(VLMPageUnit(pages=[pno]))
+            if (
+                units
+                and isinstance(units[-1], VLMPageUnit)
+                and units[-1].pages[-1] + 1 == pno
+                and units[-1].pages[-1] in pages_with_tables
+                and pno in pages_with_tables
+            ):
+                units[-1].pages.append(pno)
+            else:
+                units.append(VLMPageUnit(pages=[pno]))
         else:
             units.append(LLMGroupUnit(pages=[pno]))
     return units
@@ -150,18 +171,28 @@ def _process_vlm_unit(
     pending_footnote: dict[str, Any] | None,
     client: LLMClient,
 ) -> tuple[list[dict[str, Any]], bool, bool]:
-    pno = unit.pages[0]
-    anchor_text = _format_anchors(anchors.get(pno, []))
+    content: list[dict[str, Any]] = []
 
-    page_text = f"=== Page {pno} ===\nDetected text anchors:\n{anchor_text}"
-    page_text = _prepend_pending(page_text, pending_tail, pending_footnote)
+    for i, pno in enumerate(unit.pages):
+        anchor_text = _format_anchors(anchors.get(pno, []))
+        page_text = f"=== Page {pno} ===\nDetected text anchors:\n{anchor_text}"
+        if i == 0:
+            page_text = _prepend_pending(page_text, pending_tail, pending_footnote)
+        content.append({"type": "text", "text": page_text})
+        img_b64, mime = _render_page(fitz_doc, pno)
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
 
-    img_b64, mime = _render_page(fitz_doc, pno)
-    content: list[dict[str, Any]] = [
-        {"type": "text", "text": page_text},
-        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
-        {"type": "text", "text": f"Analyse page {pno} and return the structured JSON."},
-    ]
+    if len(unit.pages) > 1:
+        pages_str = " and ".join(str(p) for p in unit.pages)
+        final_instruction = (
+            f"Analyse pages {pages_str}. These pages may share a continuing table — "
+            f"if a table on page {unit.pages[1]} (or later) continues from the previous page, "
+            f"set continuation=true and omit the column header row. "
+            f"Return one VLMPageOutput per input page in order."
+        )
+    else:
+        final_instruction = f"Analyse page {unit.pages[0]} and return the structured JSON."
+    content.append({"type": "text", "text": final_instruction})
 
     messages: list[Message] = cast(list[Message], [
         {"role": "system", "content": VLM_SYSTEM},
@@ -171,15 +202,31 @@ def _process_vlm_unit(
     try:
         result = client.chat_parsed(messages, response_format=VLMGroupOutput, temperature=0)
     except Exception as exc:
-        log.warning("VLM call failed for page %d: %s", pno, exc)
+        log.warning("VLM call failed for pages %s: %s", unit.pages, exc)
         return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], False, False
 
     if not result.pages:
         return [], False, False
 
-    page_result = result.pages[0]
-    blocks = [b.model_dump(exclude_none=True) for b in page_result.blocks]
-    return blocks, page_result.first_block_continues_prev_tail, page_result.first_footnote_continues_prev_footnote
+    if len(result.pages) < len(unit.pages):
+        log.warning(
+            "VLM returned %d pages for %d-page unit %s",
+            len(result.pages), len(unit.pages), unit.pages,
+        )
+
+    first_page_result = result.pages[0]
+    flag = first_page_result.first_block_continues_prev_tail
+    fn_flag = first_page_result.first_footnote_continues_prev_footnote
+
+    blocks: list[dict[str, Any]] = []
+    for i, page_result in enumerate(result.pages):
+        pno = unit.pages[i] if i < len(unit.pages) else page_result.page
+        for b in page_result.blocks:
+            bd = b.model_dump(exclude_none=True)
+            bd["page"] = pno
+            blocks.append(bd)
+
+    return blocks, flag, fn_flag
 
 
 def _extract_pending_context(

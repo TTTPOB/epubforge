@@ -131,3 +131,50 @@ class TestBuildUnits:
         assert isinstance(units[0], LLMGroupUnit) and units[0].pages == [1]
         assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [2]
         assert isinstance(units[2], LLMGroupUnit) and units[2].pages == [3]
+
+    def test_adjacent_complex_both_with_tables_grouped(self) -> None:
+        pages_data = [
+            {"page": 10, "kind": "complex"},
+            {"page": 11, "kind": "complex"},
+        ]
+        units = _build_units(pages_data, {}, pages_with_tables={10, 11})
+        assert len(units) == 1
+        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10, 11]
+
+    def test_adjacent_complex_only_one_with_table_not_grouped(self) -> None:
+        pages_data = [
+            {"page": 10, "kind": "complex"},
+            {"page": 11, "kind": "complex"},
+        ]
+        units = _build_units(pages_data, {}, pages_with_tables={10})
+        assert len(units) == 2
+        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10]
+        assert isinstance(units[1], VLMPageUnit) and units[1].pages == [11]
+
+    def test_complex_pages_separated_by_simple_not_grouped(self) -> None:
+        pages_data = [
+            {"page": 10, "kind": "complex"},
+            {"page": 11, "kind": "simple"},
+            {"page": 12, "kind": "complex"},
+        ]
+        units = _build_units(pages_data, {}, pages_with_tables={10, 12})
+        assert len(units) == 3
+        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [10]
+        assert isinstance(units[1], LLMGroupUnit) and units[1].pages == [11]
+        assert isinstance(units[2], VLMPageUnit) and units[2].pages == [12]
+
+    def test_four_adjacent_complex_all_with_tables_grouped(self) -> None:
+        pages_data = [{"page": p, "kind": "complex"} for p in range(5, 9)]
+        units = _build_units(pages_data, {}, pages_with_tables={5, 6, 7, 8})
+        assert len(units) == 1
+        assert isinstance(units[0], VLMPageUnit) and units[0].pages == [5, 6, 7, 8]
+
+    def test_non_adjacent_complex_pages_not_grouped(self) -> None:
+        pages_data = [
+            {"page": 10, "kind": "complex"},
+            {"page": 12, "kind": "complex"},  # gap: page 11 missing
+        ]
+        units = _build_units(pages_data, {}, pages_with_tables={10, 12})
+        assert len(units) == 2
+        assert units[0].pages == [10]
+        assert units[1].pages == [12]
