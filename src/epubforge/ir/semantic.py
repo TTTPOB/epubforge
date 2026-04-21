@@ -109,6 +109,7 @@ class CleanBlock(BaseModel):
 class CleanOutput(BaseModel):
     blocks: list[CleanBlock]
     first_block_continues_prev_tail: bool = False
+    first_footnote_continues_prev_footnote: bool = False
 
 
 # --- VLM output schema (used as response_format) ---
@@ -163,6 +164,7 @@ class VLMPageOutput(BaseModel):
     page: int
     blocks: list[VLMBlock]
     first_block_continues_prev_tail: bool = False
+    first_footnote_continues_prev_footnote: bool = False
 
 
 # --- stage 4 (VLM) multi-page wrapper ---

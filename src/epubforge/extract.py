@@ -78,6 +78,7 @@ def extract(
     fitz_doc = fitz.open(str(pdf_path))
 
     pending_tail: dict[str, Any] | None = None
+    pending_footnote: dict[str, Any] | None = None
 
     try:
         for idx, unit in enumerate(units):
@@ -86,16 +87,16 @@ def extract(
             if out_path.exists() and not force:
                 data = json.loads(out_path.read_text(encoding="utf-8"))
                 blocks = data.get("blocks", [])
-                pending_tail = _extract_pending_tail(blocks, unit)
+                pending_tail, pending_footnote = _extract_pending_context(blocks, unit)
                 continue
 
             if isinstance(unit, LLMGroupUnit):
-                blocks, flag = _process_llm_unit(unit, page_items, pending_tail, llm_client)
+                blocks, flag, fn_flag = _process_llm_unit(unit, page_items, pending_tail, pending_footnote, llm_client)
             else:
-                blocks, flag = _process_vlm_unit(unit, fitz_doc, anchors, pending_tail, vlm_client)
+                blocks, flag, fn_flag = _process_vlm_unit(unit, fitz_doc, anchors, pending_tail, pending_footnote, vlm_client)
 
-            _write_unit(out_path, unit, blocks, flag)
-            pending_tail = _extract_pending_tail(blocks, unit)
+            _write_unit(out_path, unit, blocks, flag, fn_flag)
+            pending_tail, pending_footnote = _extract_pending_context(blocks, unit)
     finally:
         fitz_doc.close()
 
@@ -118,21 +119,15 @@ def _process_llm_unit(
     unit: LLMGroupUnit,
     page_items: dict[int, list[dict[str, Any]]],
     pending_tail: dict[str, Any] | None,
+    pending_footnote: dict[str, Any] | None,
     client: LLMClient,
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, bool]:
     items: list[dict[str, Any]] = []
     for pno in unit.pages:
         items.extend(page_items.get(pno, []))
 
     user_text = _format_blocks_for_llm(items)
-
-    if pending_tail:
-        prefix = (
-            f"[PENDING_TAIL page={pending_tail['source_page']}]\n"
-            f"{pending_tail['text']}\n"
-            f"[/PENDING_TAIL]\n\n"
-        )
-        user_text = prefix + user_text
+    user_text = _prepend_pending(user_text, pending_tail, pending_footnote)
 
     messages: list[Message] = [
         {"role": "system", "content": CLEAN_SYSTEM},
@@ -140,7 +135,7 @@ def _process_llm_unit(
     ]
     result = client.chat_parsed(messages, response_format=CleanOutput)
     blocks = [b.model_dump(exclude_none=True) for b in result.blocks]
-    return blocks, result.first_block_continues_prev_tail
+    return blocks, result.first_block_continues_prev_tail, result.first_footnote_continues_prev_footnote
 
 
 def _process_vlm_unit(
@@ -148,18 +143,14 @@ def _process_vlm_unit(
     fitz_doc: fitz.Document,
     anchors: dict[int, list[_AnchorItem]],
     pending_tail: dict[str, Any] | None,
+    pending_footnote: dict[str, Any] | None,
     client: LLMClient,
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, bool]:
     pno = unit.pages[0]
     anchor_text = _format_anchors(anchors.get(pno, []))
 
     page_text = f"=== Page {pno} ===\nDetected text anchors:\n{anchor_text}"
-    if pending_tail:
-        page_text = (
-            f"[PENDING_TAIL page={pending_tail['source_page']}]\n"
-            f"{pending_tail['text']}\n"
-            f"[/PENDING_TAIL]\n\n"
-        ) + page_text
+    page_text = _prepend_pending(page_text, pending_tail, pending_footnote)
 
     img_b64, mime = _render_page(fitz_doc, pno)
     content: list[dict[str, Any]] = [
@@ -177,30 +168,63 @@ def _process_vlm_unit(
         result = client.chat_parsed(messages, response_format=VLMGroupOutput, temperature=0)
     except Exception as exc:
         log.warning("VLM call failed for page %d: %s", pno, exc)
-        return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], False
+        return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], False, False
 
     if not result.pages:
-        return [], False
+        return [], False, False
 
     page_result = result.pages[0]
     blocks = [b.model_dump(exclude_none=True) for b in page_result.blocks]
-    return blocks, page_result.first_block_continues_prev_tail
+    return blocks, page_result.first_block_continues_prev_tail, page_result.first_footnote_continues_prev_footnote
 
 
-def _extract_pending_tail(
+def _extract_pending_context(
     blocks: list[dict[str, Any]],
     unit: Unit,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (pending_tail, pending_footnote) for the next unit."""
     last_page = unit.pages[-1]
+    pending_tail: dict[str, Any] | None = None
+    pending_footnote: dict[str, Any] | None = None
+
     for i in range(len(blocks) - 1, -1, -1):
         b = blocks[i]
         kind = b.get("kind", "")
         if kind == "footnote":
+            if pending_footnote is None:
+                pending_footnote = {
+                    "callout": b.get("callout", ""),
+                    "text": b.get("text", ""),
+                    "source_page": last_page,
+                }
             continue
         if kind == "paragraph":
-            return {"text": b.get("text", ""), "source_page": last_page}
-        return None  # heading/table/figure/equation → not continuable
-    return None
+            pending_tail = {"text": b.get("text", ""), "source_page": last_page}
+        break  # heading/table/figure/equation — stop scanning
+
+    return pending_tail, pending_footnote
+
+
+def _prepend_pending(
+    user_text: str,
+    pending_tail: dict[str, Any] | None,
+    pending_footnote: dict[str, Any] | None,
+) -> str:
+    prefix = ""
+    if pending_footnote:
+        callout = pending_footnote["callout"]
+        prefix += (
+            f"[PENDING_FOOTNOTE callout={callout} page={pending_footnote['source_page']}]\n"
+            f"{pending_footnote['text']}\n"
+            f"[/PENDING_FOOTNOTE]\n\n"
+        )
+    if pending_tail:
+        prefix += (
+            f"[PENDING_TAIL page={pending_tail['source_page']}]\n"
+            f"{pending_tail['text']}\n"
+            f"[/PENDING_TAIL]\n\n"
+        )
+    return prefix + user_text if prefix else user_text
 
 
 def _write_unit(
@@ -208,10 +232,12 @@ def _write_unit(
     unit: Unit,
     blocks: list[dict[str, Any]],
     flag: bool,
+    fn_flag: bool = False,
 ) -> None:
     data = {
         "unit": {"kind": unit.kind, "pages": unit.pages},
         "first_block_continues_prev_tail": flag,
+        "first_footnote_continues_prev_footnote": fn_flag,
         "blocks": blocks,
     }
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

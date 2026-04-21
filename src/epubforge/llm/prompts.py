@@ -94,6 +94,31 @@ _FOOTNOTE_CORE_RULES = """\
 - It is better to emit a footnote block with an empty body than to silently drop a callout.\
 """
 
+_PENDING_FOOTNOTE_RULES = """\
+## Pending footnote tail from previous page
+The user message MAY begin with a [PENDING_FOOTNOTE callout=X page=N] block. That is the
+last footnote of the previous page whose body text did NOT end with sentence-closing
+punctuation — meaning it continues on this page.
+
+Look at this page's very first footnote-like content (text with no leading callout marker
+that starts mid-sentence):
+
+- CONTINUE — ALL of:
+  - It has NO leading callout marker (no ①②③, [1], superscript digit, etc.).
+  - Its text reads as a natural mid-sentence continuation of the pending tail.
+  In that case:
+  - Set `first_footnote_continues_prev_footnote=true`.
+  - Emit that content as a `footnote` block with `"callout": ""` and `"text"` = ONLY the
+    continuation portion. The caller will append it to the pending footnote. Do NOT repeat
+    the pending tail text.
+
+- SEPARATE — any of the above fails:
+  - Set `first_footnote_continues_prev_footnote=false`.
+  - Process every footnote on this page normally (with their actual callout markers).
+
+Never emit any [PENDING_FOOTNOTE ...] marker in your output text.\
+"""
+
 _PENDING_TAIL_RULES = """\
 ## Pending tail from previous page
 The user message MAY begin with a [PENDING_TAIL page=N] block. That is the last paragraph of
@@ -159,6 +184,8 @@ MUST NOT appear in your output text.
 
 {_FOOTNOTE_CORE_RULES}
 
+{_PENDING_FOOTNOTE_RULES}
+
 {_PENDING_TAIL_RULES}
 
 ## ALLOWED operations
@@ -178,6 +205,7 @@ MUST NOT appear in your output text.
 ## Output schema
 {{
   "first_block_continues_prev_tail": false,
+  "first_footnote_continues_prev_footnote": false,
   "blocks": [
     {{"kind": "paragraph", "text": "…"}},
     {{"kind": "heading", "level": 1, "text": "…"}},
@@ -274,6 +302,8 @@ When a table on this page is the continuation of a table that STARTED on a previ
 A table that starts fresh on this page (even if it also ends on the next \
 page) must have `"continuation": false` or omit the field, and MUST include the full header.
 
+{_PENDING_FOOTNOTE_RULES}
+
 {_PENDING_TAIL_RULES}
 
 ## Strict prohibitions
@@ -308,6 +338,6 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
   ]
 }}
 Return one entry per input page, in order. For single-page requests return a 1-element "pages" array.
-Each page object includes `first_block_continues_prev_tail` (bool, default false).
+Each page object includes `first_block_continues_prev_tail` and `first_footnote_continues_prev_footnote` (both bool, default false).
 Output ONLY valid JSON — no markdown fences, no commentary.
 """

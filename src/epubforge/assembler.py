@@ -37,10 +37,24 @@ def assemble(work_dir: Path, out_path: Path) -> None:
         source = "llm" if unit_kind == "llm_group" else "vlm"
         default_page = data["unit"]["pages"][0]
         flag = data.get("first_block_continues_prev_tail", False)
+        fn_flag = data.get("first_footnote_continues_prev_footnote", False)
 
         raw_blocks = data.get("blocks", [])
         parsed = [_parse_block(b, default_page, source) for b in raw_blocks]
         parsed = [b for b in parsed if b is not None]
+
+        if fn_flag:
+            first_fn_idx = next((i for i, b in enumerate(parsed) if isinstance(b, Footnote)), None)
+            if first_fn_idx is not None:
+                fn_cont = parsed[first_fn_idx]
+                assert isinstance(fn_cont, Footnote)
+                _append_to_last_footnote(all_blocks, fn_cont.text)
+                parsed = [b for i, b in enumerate(parsed) if i != first_fn_idx]
+            else:
+                log.warning(
+                    "first_footnote_continues_prev_footnote=True but no Footnote in unit %s",
+                    uf.name,
+                )
 
         if flag and parsed:
             cont = parsed[0]
@@ -198,6 +212,16 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 log.debug("Paired footnote callout %r (page %d) into table block %d", callout, block.provenance.page, j)
                 break
     return result
+
+
+def _append_to_last_footnote(blocks: list[Block], cont_text: str) -> None:
+    """Append cont_text to the most recent Footnote in blocks."""
+    for i in range(len(blocks) - 1, -1, -1):
+        candidate = blocks[i]
+        if isinstance(candidate, Footnote):
+            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text)})
+            return
+    log.warning("first_footnote_continues_prev_footnote=True but no preceding Footnote found; dropping continuation")
 
 
 def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> None:
