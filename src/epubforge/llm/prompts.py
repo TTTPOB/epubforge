@@ -278,7 +278,7 @@ The user message starts with a "mode" marker:
 - relabel: change a paragraph's role (only into ALLOWED_ROLES)
 - set_lines: restore line structure for verse/epigraph/poem (set display_lines)
 - set_style: assign a style_class from the registry (existing or newly proposed id)
-- split: split one paragraph into multiple at specific line boundaries (e.g. epigraph   title was wrongly merged into the verse body)
+- split: split one paragraph into multiple at specific line boundaries (e.g. epigraph title was wrongly merged into the verse body). When the resulting segments should take different roles from the parent block, provide `new_roles` — a list of roles (one per segment, in order) drawn from ALLOWED_ROLES. Omit `new_roles` when all segments should inherit the parent's role.
 - merge_next: merge this paragraph into the next (only when both are paragraphs and   the split was a docling artifact)
 
 ## ALLOWED_ROLES

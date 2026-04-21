@@ -26,6 +26,7 @@ class EditOp(BaseModel):
     op: Literal["relabel", "set_lines", "set_style", "split", "merge_next"]
     block_id: str
     new_role: str | None = None
+    new_roles: list[str] | None = None  # only meaningful for op="split"
     lines: list[str] | None = None
     split_after_line_indices: list[int] | None = None
     style_id: str | None = None
@@ -148,7 +149,11 @@ def _build_descriptors_for_range(
 # Paragraph operations
 # ---------------------------------------------------------------------------
 
-def _split_paragraph(block: Paragraph, split_after_line_indices: list[int]) -> list[Paragraph]:
+def _split_paragraph(
+    block: Paragraph,
+    split_after_line_indices: list[int],
+    new_roles: list[str] | None = None,
+) -> list[Paragraph]:
     lines = block.text.split("\n") if "\n" in block.text else [block.text]
     if not split_after_line_indices:
         return [block]
@@ -166,9 +171,12 @@ def _split_paragraph(block: Paragraph, split_after_line_indices: list[int]) -> l
     if len(segments) <= 1:
         return [block]
     result = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         text = "\n".join(seg) if len(seg) > 1 else seg[0]
-        result.append(block.model_copy(update={"text": text, "display_lines": None, "style_class": None}))
+        update: dict = {"text": text, "display_lines": None, "style_class": None}
+        if new_roles and i < len(new_roles) and new_roles[i] in ALLOWED_ROLES:
+            update["role"] = new_roles[i]
+        result.append(block.model_copy(update=update))
     return result
 
 
@@ -231,7 +239,7 @@ def _apply_proposals(
             if _has_footnote_marker(block):
                 log.debug("proofreader: skip split on %r — has footnote markers", p.block_id)
                 continue
-            new_blocks = _split_paragraph(block, p.split_after_line_indices or [])
+            new_blocks = _split_paragraph(block, p.split_after_line_indices or [], new_roles=p.new_roles)
             blocks[idx : idx + 1] = new_blocks
 
         elif p.op == "merge_next":
