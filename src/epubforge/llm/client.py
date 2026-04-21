@@ -46,6 +46,46 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _apply_cache_control(
+    messages: list[ChatCompletionMessageParam],
+    *,
+    enabled: bool,
+) -> list[ChatCompletionMessageParam]:
+    """Attach cache_control: ephemeral to the system message (Anthropic-style).
+
+    Called AFTER cache-key computation so on-disk cache keys stay stable
+    when the flag is toggled.
+    """
+    if not enabled:
+        return messages
+    out: list[ChatCompletionMessageParam] = []
+    for msg in messages:
+        if msg.get("role") != "system":
+            out.append(msg)
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            blocks: list[dict[str, Any]] = [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]
+        elif isinstance(content, list) and content:
+            blocks = [dict(b) for b in content]
+            for b in reversed(blocks):
+                if b.get("type") == "text":
+                    b["cache_control"] = {"type": "ephemeral"}
+                    break
+            else:
+                out.append(msg)
+                continue
+        else:
+            out.append(msg)
+            continue
+        out.append(cast(ChatCompletionMessageParam, {**msg, "content": blocks}))
+    return out
+
+
 def _count_chars(messages: list[ChatCompletionMessageParam]) -> int:
     total = 0
     for msg in messages:
@@ -82,6 +122,7 @@ class LLMClient:
         if use_vlm and self.max_tokens is None:
             self.max_tokens = 16384
         self.extra_body: dict[str, Any] = (cfg.vlm_extra_body if use_vlm else cfg.llm_extra_body)
+        self.prompt_caching = cfg.vlm_prompt_caching if use_vlm else cfg.llm_prompt_caching
         self.cache_dir = cfg.cache_dir
         api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
         self._client = OpenAI(
@@ -119,7 +160,8 @@ class LLMClient:
             return response_format.model_validate_json(raw)
 
         t0 = time.perf_counter()
-        result = self._call_parsed(messages, response_format, temperature, merged_extra, req_id=req_id)
+        sdk_messages = _apply_cache_control(messages, enabled=self.prompt_caching)
+        result = self._call_parsed(sdk_messages, response_format, temperature, merged_extra, req_id=req_id)
         elapsed = time.perf_counter() - t0
 
         log.info(

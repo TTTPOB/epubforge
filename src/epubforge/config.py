@@ -28,6 +28,8 @@ class Config:
     vlm_max_tokens: int | None = None
     llm_extra_body: dict[str, Any] = field(default_factory=dict)
     vlm_extra_body: dict[str, Any] = field(default_factory=dict)
+    llm_prompt_caching: bool = True
+    vlm_prompt_caching: bool = True
     concurrency: int = 4
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
@@ -77,6 +79,8 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.llm_max_tokens = int(llm["max_tokens"])  # type: ignore[arg-type]
             if "extra_body" in llm and isinstance(llm["extra_body"], dict):
                 cfg.llm_extra_body = dict(llm["extra_body"])  # type: ignore[arg-type]
+            if "prompt_caching" in llm:
+                cfg.llm_prompt_caching = bool(llm["prompt_caching"])
 
         if isinstance(vlm, dict):
             if "base_url" in vlm:
@@ -91,6 +95,8 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.vlm_max_tokens = int(vlm["max_tokens"])  # type: ignore[arg-type]
             if "extra_body" in vlm and isinstance(vlm["extra_body"], dict):
                 cfg.vlm_extra_body = dict(vlm["extra_body"])  # type: ignore[arg-type]
+            if "prompt_caching" in vlm:
+                cfg.vlm_prompt_caching = bool(vlm["prompt_caching"])
 
         if isinstance(rt, dict):
             if "concurrency" in rt:
@@ -134,6 +140,10 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm_max_tokens = int(v)
     if v := os.environ.get("EPUBFORGE_VLM_MAX_TOKENS"):
         cfg.vlm_max_tokens = int(v)
+    if v := os.environ.get("EPUBFORGE_LLM_PROMPT_CACHING"):
+        cfg.llm_prompt_caching = v.lower() not in {"0", "false", "no"}
+    if v := os.environ.get("EPUBFORGE_VLM_PROMPT_CACHING"):
+        cfg.vlm_prompt_caching = v.lower() not in {"0", "false", "no"}
     if v := os.environ.get("EPUBFORGE_CONCURRENCY"):
         cfg.concurrency = int(v)
     if v := os.environ.get("EPUBFORGE_CACHE_DIR"):

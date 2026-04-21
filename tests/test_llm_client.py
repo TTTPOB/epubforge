@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch, call
 
 import pytest
 from openai import BadRequestError
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from epubforge.config import Config
-from epubforge.llm.client import LLMClient
+from epubforge.llm.client import LLMClient, _apply_cache_control
 from epubforge.observability import get_tracker
 
 
@@ -291,3 +292,55 @@ class TestCachedTokensExtraction:
             )
 
         assert tracker.cached_tokens - before == 0
+
+
+def _sys_user_msgs(sys_content: Any) -> list[ChatCompletionMessageParam]:
+    return cast(list[ChatCompletionMessageParam], [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": "hi"},
+    ])
+
+
+class TestPromptCaching:
+    def test_system_string_wrapped_with_cache_control(self) -> None:
+        msgs = _sys_user_msgs("You are helpful.")
+        out = _apply_cache_control(msgs, enabled=True)
+        sys_msg = next(m for m in out if m["role"] == "system")
+        content = sys_msg["content"]
+        assert isinstance(content, list)
+        blocks = cast(list[dict[str, Any]], content)
+        assert len(blocks) == 1
+        block = blocks[0]
+        assert block["type"] == "text"
+        assert block["text"] == "You are helpful."
+        assert block["cache_control"] == {"type": "ephemeral"}
+
+    def test_system_list_attaches_cache_control_to_last_text_block(self) -> None:
+        msgs = _sys_user_msgs([
+            {"type": "text", "text": "First block."},
+            {"type": "text", "text": "Second block."},
+        ])
+        out = _apply_cache_control(msgs, enabled=True)
+        sys_msg = next(m for m in out if m["role"] == "system")
+        blocks = cast(list[dict[str, Any]], sys_msg["content"])
+        assert "cache_control" not in blocks[0]
+        assert blocks[1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_flag_disabled_passthrough(self) -> None:
+        msgs = _sys_user_msgs("You are helpful.")
+        out = _apply_cache_control(msgs, enabled=False)
+        assert out is msgs
+
+    def test_cache_key_stable_across_flag_toggle(self, tmp_path) -> None:
+        msgs = _sys_user_msgs("You are helpful.")
+        cfg_on = Config(
+            llm_api_key="k", cache_dir=tmp_path / ".cache", llm_prompt_caching=True
+        )
+        cfg_off = Config(
+            llm_api_key="k", cache_dir=tmp_path / ".cache", llm_prompt_caching=False
+        )
+        client_on = LLMClient(cfg_on)
+        client_off = LLMClient(cfg_off)
+        key_on = client_on._cache_key(msgs, _DummyOutput, 0.0, {})
+        key_off = client_off._cache_key(msgs, _DummyOutput, 0.0, {})
+        assert key_on == key_off

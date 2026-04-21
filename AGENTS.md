@@ -37,6 +37,12 @@ cached input tokens, non-zero when prompt caching is active). Each stage emits a
 line on completion showing elapsed time, total requests, cache hit rate, tokens used,
 and `cache_read=<N>` (aggregate cached tokens for the stage, omitted when zero).
 
+System prompts are wrapped with `cache_control: ephemeral` on the wire for Anthropic
+prompt caching (OpenRouter/Anthropic direct). Gemini 2.5/3 and OpenAI use implicit
+caching and ignore the field. Disk cache keys hash the pre-transform messages, so
+toggling `prompt_caching` never invalidates `work/.cache/`. Disable per-model with
+`[llm] prompt_caching = false` or env `EPUBFORGE_LLM_PROMPT_CACHING=0`.
+
 ## Two-Layer IR
 
 - **Raw IR**: Docling `DoclingDocument` JSON (lossless, never modified)

@@ -6,6 +6,10 @@ base_url        = "https://openrouter.ai/api/v1"
 api_key         = ""  # required; or set EPUBFORGE_LLM_API_KEY
 model           = "anthropic/claude-haiku-4.5"
 timeout_seconds = 120
+# Wrap the system prompt with cache_control: ephemeral for Anthropic prompt caching.
+# Enabled by default. Safe on OpenRouter (works for Anthropic, ignored by Gemini & OpenAI
+# which use implicit caching). Disable only if a self-hosted gateway rejects the field.
+# prompt_caching = true
 
 [vlm]
 # Falls back to [llm] values if this section is omitted.
@@ -14,6 +18,10 @@ api_key         = ""  # or set EPUBFORGE_VLM_API_KEY
 model           = "google/gemini-flash-3"
 timeout_seconds = 300   # VLM calls with images can be slow; keep >= 300
 # max_tokens    = 16384  # default 16384; increase if complex pages are truncated
+# Wrap the system prompt with cache_control: ephemeral for Anthropic prompt caching.
+# Enabled by default. Safe on OpenRouter (works for Anthropic, ignored by Gemini & OpenAI
+# which use implicit caching). Disable only if a self-hosted gateway rejects the field.
+# prompt_caching = true
 
 [runtime]
 concurrency = 4
