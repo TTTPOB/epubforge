@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from epubforge.ir.book_memory import BookMemory
+
 
 class Provenance(BaseModel):
     page: int
@@ -163,14 +165,26 @@ VLMBlock = Annotated[
 ]
 
 
+class AuditNote(BaseModel):
+    page: int
+    block_index: int | None = None
+    kind: Literal[
+        "orphan_footnote", "suspect_attribution",
+        "punctuation_anomaly", "unknown_callout", "other"
+    ]
+    hint: str = Field(max_length=200)
+
+
 class VLMPageOutput(BaseModel):
     page: int
     blocks: list[VLMBlock]
     first_block_continues_prev_tail: bool = False
     first_footnote_continues_prev_footnote: bool = False
+    audit_notes: list[AuditNote] = Field(default_factory=list)
 
 
 # --- stage 4 (VLM) multi-page wrapper ---
 
 class VLMGroupOutput(BaseModel):
     pages: list[VLMPageOutput]
+    updated_book_memory: BookMemory = Field(default_factory=BookMemory)

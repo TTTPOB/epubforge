@@ -38,6 +38,10 @@ class Config:
     proofread_phase2_thinking_budget_tokens: int = 2000
     proofread_max_chunk_tokens: int = 100_000
     proofread_chars_per_token: float = 3.0
+    vlm_dpi: int = 200
+    max_simple_batch_pages: int = 8
+    max_complex_batch_pages: int = 12
+    enable_book_memory: bool = True
 
     def require_llm(self) -> None:
         if not self.llm_api_key:
@@ -119,6 +123,17 @@ def load_config(config_path: Path | None = None) -> Config:
             if "chars_per_token" in pr:
                 cfg.proofread_chars_per_token = float(pr["chars_per_token"])  # type: ignore[arg-type]
 
+        ex = data.get("extract") or {}
+        if isinstance(ex, dict):
+            if "vlm_dpi" in ex:
+                cfg.vlm_dpi = int(ex["vlm_dpi"])  # type: ignore[arg-type]
+            if "max_simple_batch_pages" in ex:
+                cfg.max_simple_batch_pages = int(ex["max_simple_batch_pages"])  # type: ignore[arg-type]
+            if "max_complex_batch_pages" in ex:
+                cfg.max_complex_batch_pages = int(ex["max_complex_batch_pages"])  # type: ignore[arg-type]
+            if "enable_book_memory" in ex:
+                cfg.enable_book_memory = bool(ex["enable_book_memory"])
+
     # Layer 4: environment variables (highest priority)
     if v := os.environ.get("EPUBFORGE_LLM_BASE_URL"):
         cfg.llm_base_url = v
@@ -148,6 +163,14 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.concurrency = int(v)
     if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
         cfg.cache_dir = Path(v)
+    if v := os.environ.get("EPUBFORGE_VLM_DPI"):
+        cfg.vlm_dpi = int(v)
+    if v := os.environ.get("EPUBFORGE_MAX_SIMPLE_BATCH_PAGES"):
+        cfg.max_simple_batch_pages = int(v)
+    if v := os.environ.get("EPUBFORGE_MAX_COMPLEX_BATCH_PAGES"):
+        cfg.max_complex_batch_pages = int(v)
+    if v := os.environ.get("EPUBFORGE_ENABLE_BOOK_MEMORY"):
+        cfg.enable_book_memory = v.lower() not in {"0", "false", "no"}
 
     # vlm falls back to llm when not explicitly set
     if not cfg.vlm_base_url:
