@@ -200,7 +200,8 @@ def _apply_fn_markers(html: str) -> str:
 
 def _render_inline(text: str) -> str:
     """Escape HTML then convert fn markers to noteref links (for plain paragraph text)."""
-    return _apply_fn_markers(_esc(text))
+    escaped = _esc(text).replace("\n", "<br/>")
+    return _apply_fn_markers(escaped)
 
 
 def _fn_id(fn: Footnote) -> str:
