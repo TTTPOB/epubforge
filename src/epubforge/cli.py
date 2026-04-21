@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
-from epubforge.config import load_config
+from epubforge.config import Config, load_config
 from epubforge import pipeline
+from epubforge.observability import get_tracker, log_path_for, setup_logging
 
 app = typer.Typer(
     name="epubforge",
@@ -16,6 +19,10 @@ app = typer.Typer(
 console = Console()
 
 _config_path: Path | None = None
+_log_level: str = "INFO"
+_log_file_override: Path | None = None
+
+log = logging.getLogger(__name__)
 
 
 @app.callback()
@@ -23,9 +30,35 @@ def _global_options(
     config: Path | None = typer.Option(
         None, "--config", "-c", help="Path to TOML config file (overrides config.toml / config.local.toml)"
     ),
+    log_level: str = typer.Option(
+        None, "--log-level", "-L",
+        help="Logging level (DEBUG/INFO/WARNING). Env: EPUBFORGE_LOG_LEVEL",
+    ),
+    log_file: Path | None = typer.Option(
+        None, "--log-file", help="Override log file path (default: work/<book>/logs/run-<ts>.log)"
+    ),
 ) -> None:
-    global _config_path
+    global _config_path, _log_level, _log_file_override
     _config_path = config
+    _log_level = log_level or os.environ.get("EPUBFORGE_LOG_LEVEL", "INFO")
+    _log_file_override = log_file
+
+
+def _init_logging(cfg: Config, pdf_path: Path) -> Path | None:
+    work_dir = cfg.book_work_dir(pdf_path)
+    log_path = _log_file_override or log_path_for(work_dir)
+    setup_logging(_log_level, log_path)
+    return log_path
+
+
+def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
+    ph1 = cfg.proofread_phase1_thinking_budget_tokens
+    ph2 = cfg.proofread_phase2_thinking_budget_tokens
+    log.info(
+        "epubforge startup: model=%s/%s cache_dir=%s thinking=ph1:%d/ph2:%d log=%s",
+        cfg.llm_model, cfg.vlm_model, cfg.cache_dir,
+        ph1, ph2, log_path or "(stderr only)",
+    )
 
 
 def _parse_pages(pages_str: str | None) -> set[int] | None:
@@ -54,6 +87,8 @@ def run(
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_all(pdf_path, cfg, force=force, from_stage=from_stage, pages=_parse_pages(pages))
 
 
@@ -64,6 +99,8 @@ def parse(
 ) -> None:
     """Stage 1 — Docling parse → work/<name>/01_raw.json."""
     cfg = load_config(_config_path)
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_parse(pdf_path, cfg, force=force)
 
 
@@ -74,6 +111,8 @@ def classify(
 ) -> None:
     """Stage 2 — classify pages as simple/complex → work/<name>/02_pages.json."""
     cfg = load_config(_config_path)
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_classify(pdf_path, cfg, force=force)
 
 
@@ -86,6 +125,8 @@ def extract(
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_extract(pdf_path, cfg, force=force)
 
 
@@ -96,6 +137,8 @@ def assemble(
 ) -> None:
     """Stage 4 — merge into Semantic IR → work/<name>/05_semantic_raw.json."""
     cfg = load_config(_config_path)
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_assemble(pdf_path, cfg, force=force)
 
 
@@ -107,6 +150,8 @@ def refine_toc(
     """Stage 5 — refine heading hierarchy with LLM → work/<name>/05_semantic.json."""
     cfg = load_config(_config_path)
     cfg.require_llm()
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_refine_toc(pdf_path, cfg, force=force)
 
 
@@ -119,6 +164,8 @@ def proofread(
     """Stage 6 — book-level proofread → work/<name>/06_proofread.json."""
     cfg = load_config(_config_path)
     cfg.require_llm()
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_proofread(pdf_path, cfg, force=force, pages=_parse_pages(pages))
 
 
@@ -129,4 +176,6 @@ def build(
 ) -> None:
     """Stage 7 — generate EPUB → out/<name>.epub."""
     cfg = load_config(_config_path)
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
     pipeline.run_build(pdf_path, cfg, force=force)
