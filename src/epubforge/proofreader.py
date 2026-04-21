@@ -243,11 +243,17 @@ def _apply_proposals(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _chapter_pages(chapter) -> set[int]:
+    return {b.provenance.page for b in chapter.blocks if hasattr(b, "provenance")}
+
+
 def proofread(
     semantic_path: Path,
     out_path: Path,
     registry_path: Path,
     cfg: Config,
+    *,
+    pages: set[int] | None = None,
 ) -> None:
     from epubforge.llm.client import LLMClient
 
@@ -256,6 +262,10 @@ def proofread(
     client = LLMClient(cfg, use_vlm=False)
 
     for ch_idx, chapter in enumerate(book.chapters):
+        if pages is not None and not (_chapter_pages(chapter) & pages):
+            log.debug("proofreader: chapter %d %r outside page filter — skip", ch_idx, chapter.title)
+            continue
+
         descriptors = _build_descriptors(chapter, ch_idx)
         has_paragraphs = any(d["kind"] == "paragraph" for d in descriptors)
         if not has_paragraphs:

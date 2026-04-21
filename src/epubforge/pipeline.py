@@ -44,7 +44,7 @@ def run_all(
         run_extract(pdf_path, cfg, force=_f(3), pages=pages)
     run_assemble(pdf_path, cfg, force=_f(4))
     run_refine_toc(pdf_path, cfg, force=_f(5))
-    run_proofread(pdf_path, cfg, force=_f(6))
+    run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
     run_build(pdf_path, cfg, force=_f(7))
 
 
@@ -136,7 +136,13 @@ def run_refine_toc(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     console.print(f"  → {out}")
 
 
-def run_proofread(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+def run_proofread(
+    pdf_path: Path,
+    cfg: Config,
+    *,
+    force: bool = False,
+    pages: set[int] | None = None,
+) -> None:
     from epubforge.proofreader import proofread
 
     work = cfg.book_work_dir(pdf_path)
@@ -146,7 +152,7 @@ def run_proofread(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "proofread"):
         return
     console.print("[bold]Stage 6:[/bold] book-level proofreading…")
-    proofread(src, out, registry, cfg)
+    proofread(src, out, registry, cfg, pages=pages)
     console.print(f"  → {out}")
 
 

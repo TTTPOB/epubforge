@@ -114,11 +114,12 @@ def refine_toc(
 def proofread(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force", "-f"),
+    pages: str | None = typer.Option(None, "--pages", help="Limit to chapters covering these pages, e.g. '1-44'"),
 ) -> None:
     """Stage 6 — book-level proofread → work/<name>/06_proofread.json."""
     cfg = load_config(_config_path)
     cfg.require_llm()
-    pipeline.run_proofread(pdf_path, cfg, force=force)
+    pipeline.run_proofread(pdf_path, cfg, force=force, pages=_parse_pages(pages))
 
 
 @app.command()
