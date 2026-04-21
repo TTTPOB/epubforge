@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from epubforge.config import Config
 from epubforge.llm.client import LLMClient
+from epubforge.observability import get_tracker
 
 
 class _DummyOutput(BaseModel):
@@ -237,3 +238,56 @@ class TestVlmDefaultMaxTokens:
         )
         client = LLMClient(cfg, use_vlm=False)
         assert client.max_tokens is None
+
+
+def _make_usage_with_cached(prompt: int = 100, completion: int = 20, cached: int = 0) -> MagicMock:
+    details = MagicMock()
+    details.cached_tokens = cached
+    usage = MagicMock()
+    usage.prompt_tokens = prompt
+    usage.completion_tokens = completion
+    usage.prompt_tokens_details = details
+    return usage
+
+
+class TestCachedTokensExtraction:
+    def test_cached_tokens_extracted_from_usage(self, tmp_path, caplog) -> None:
+        tracker = get_tracker()
+        before = tracker.cached_tokens
+
+        client = _make_client(tmp_path)
+        completion = _make_completion(_DummyOutput(value="ok"), finish_reason="stop")
+        completion.usage = _make_usage_with_cached(prompt=200, completion=30, cached=1500)
+
+        with (
+            patch.object(client._client.chat.completions, "parse", return_value=completion),
+            caplog.at_level(logging.INFO, logger="epubforge.llm.client"),
+        ):
+            client.chat_parsed(
+                [{"role": "user", "content": "hi"}],
+                response_format=_DummyOutput,
+            )
+
+        assert tracker.cached_tokens - before >= 1500
+        assert any("cached=1500" in r.message for r in caplog.records)
+
+    def test_missing_prompt_tokens_details_is_zero(self, tmp_path) -> None:
+        tracker = get_tracker()
+        before = tracker.cached_tokens
+
+        client = _make_client(tmp_path)
+        completion = _make_completion(_DummyOutput(value="ok"), finish_reason="stop")
+        usage = MagicMock()
+        usage.prompt_tokens = 50
+        usage.completion_tokens = 10
+        # No prompt_tokens_details attribute at all
+        del usage.prompt_tokens_details
+        completion.usage = usage
+
+        with patch.object(client._client.chat.completions, "parse", return_value=completion):
+            client.chat_parsed(
+                [{"role": "user", "content": "no-cache-details"}],
+                response_format=_DummyOutput,
+            )
+
+        assert tracker.cached_tokens - before == 0

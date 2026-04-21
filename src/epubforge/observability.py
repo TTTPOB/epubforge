@@ -56,18 +56,20 @@ class UsageTracker:
     completion_tokens: int = 0
     total_tokens: int = 0
     elapsed_s: float = 0.0
+    cached_tokens: int = 0
 
     def record_hit(self) -> None:
         self.requests += 1
         self.cache_hits += 1
 
-    def record_miss(self, *, prompt: int, completion: int, elapsed: float) -> None:
+    def record_miss(self, *, prompt: int, completion: int, elapsed: float, cached: int = 0) -> None:
         self.requests += 1
         self.cache_misses += 1
         self.prompt_tokens += prompt
         self.completion_tokens += completion
         self.total_tokens += prompt + completion
         self.elapsed_s += elapsed
+        self.cached_tokens += cached
 
     def snapshot(self) -> "UsageTracker":
         return UsageTracker(**self.__dict__)
@@ -77,12 +79,15 @@ class UsageTracker:
 
     def summary_line(self) -> str:
         hit_rate = (self.cache_hits / self.requests * 100) if self.requests else 0.0
-        return (
+        line = (
             f"requests={self.requests} "
             f"cache_hit={self.cache_hits}/{self.requests} ({hit_rate:.0f}%) "
             f"tokens={self.prompt_tokens}p+{self.completion_tokens}c={self.total_tokens} "
             f"elapsed={self.elapsed_s:.1f}s"
         )
+        if self.cached_tokens:
+            line += f" cache_read={self.cached_tokens}"
+        return line
 
 
 _tracker = UsageTracker()

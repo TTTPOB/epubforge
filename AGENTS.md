@@ -32,8 +32,10 @@ CLI flags:
 
 Per-request log lines include: kind (LLM/VLM), req_id (first 8 chars of cache key),
 model, format name, message count, char count, image count, cache HIT/MISS, elapsed
-time, finish reason, and prompt+completion token counts. Each stage emits a summary
-line on completion showing elapsed time, total requests, cache hit rate, and tokens used.
+time, finish reason, prompt+completion token counts, and `cached=<N>` (provider-side
+cached input tokens, non-zero when prompt caching is active). Each stage emits a summary
+line on completion showing elapsed time, total requests, cache hit rate, tokens used,
+and `cache_read=<N>` (aggregate cached tokens for the stage, omitted when zero).
 
 ## Two-Layer IR
 

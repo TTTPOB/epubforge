@@ -32,6 +32,7 @@ class _CallResult:
     prompt_tokens: int
     completion_tokens: int
     finish_reason: str
+    cached_tokens: int = 0
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -122,14 +123,15 @@ class LLMClient:
         elapsed = time.perf_counter() - t0
 
         log.info(
-            "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc",
+            "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc cached=%d",
             self._kind, req_id, elapsed, result.finish_reason,
-            result.prompt_tokens, result.completion_tokens,
+            result.prompt_tokens, result.completion_tokens, result.cached_tokens,
         )
         get_tracker().record_miss(
             prompt=result.prompt_tokens,
             completion=result.completion_tokens,
             elapsed=elapsed,
+            cached=result.cached_tokens,
         )
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,11 +207,14 @@ class LLMClient:
 
             prompt_tokens = usage.prompt_tokens if usage else 0
             completion_tokens = usage.completion_tokens if usage else 0
+            details = getattr(usage, "prompt_tokens_details", None) if usage else None
+            cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
             return _CallResult(
                 parsed=parsed,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 finish_reason=finish_reason or "stop",
+                cached_tokens=cached_tokens,
             )
 
         raise RuntimeError(
@@ -268,11 +273,14 @@ class LLMClient:
                 parsed = response_format.model_validate_json(content)
                 prompt_tokens = usage.prompt_tokens if usage else 0
                 completion_tokens = usage.completion_tokens if usage else 0
+                details = getattr(usage, "prompt_tokens_details", None) if usage else None
+                cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
                 return _CallResult(
                     parsed=parsed,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     finish_reason=finish_reason or "stop",
+                    cached_tokens=cached_tokens,
                 )
             except PydanticValidationError as exc:
                 if "EOF" in str(exc) and attempt < 2:
