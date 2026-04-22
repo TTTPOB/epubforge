@@ -85,6 +85,34 @@ if not any_unpaired:
     output.append('(none found)')
 output.append('')
 
+# --- Step 2b: Orphan callout scan (raw callout symbols with no marker nearby) ---
+output.append('=== ORPHAN CALLOUTS (raw callout with no marker in block) ===')
+CALLOUT_RE = re.compile(r'[①②③④⑤⑥⑦⑧⑨⑩*]')
+orphan_callout_found = False
+for ci, ch in enumerate(book.chapters):
+    for bi, b in enumerate(ch.blocks):
+        if isinstance(b, Footnote):
+            continue
+        txt = get_text(b)
+        if not txt:
+            continue
+        # Remove all marker spans, then check for remaining raw callouts
+        stripped = MARKER_RE.sub('', txt)
+        stripped_html = re.sub(r'<[^>]+>', '', stripped)
+        for m in CALLOUT_RE.finditer(stripped_html):
+            sym = m.group()
+            pg = get_page(b)
+            ctx_start = max(0, m.start() - 40)
+            ctx_end = min(len(stripped_html), m.end() + 40)
+            ctx = stripped_html[ctx_start:ctx_end].replace(sym, f'[RAW {sym}]')
+            ctx = re.sub(r'\s+', ' ', ctx).strip()
+            kind = 'paragraph' if isinstance(b, Paragraph) else 'table'
+            output.append(f'ch{ci} b{bi} p{pg} ({kind}): ...{ctx}...')
+            orphan_callout_found = True
+if not orphan_callout_found:
+    output.append('(none found)')
+output.append('')
+
 # Build marker -> source block lookup
 marker_to_blocks = {}
 for ci, ch in enumerate(book.chapters):
@@ -181,6 +209,25 @@ Each entry shows: chapter, block index, page, callout symbol, first 60 chars of 
 **Action required**: locate the correct source paragraph (search for the raw callout symbol on the
 same page) and manually insert the marker + set `paired=True`.
 
+### 2.2b `=== ORPHAN CALLOUTS ===`
+
+A raw callout symbol (e.g., `①`) appears in a paragraph's text but has no corresponding
+`\x02fn-PAGE-CALLOUT\x03` marker at that position. This means the symbol is a bare Unicode
+character in the exported EPUB — visible to the reader but not linked to any footnote.
+
+Orphan callouts arise in two ways:
+- A duplicate marker was removed (fix 1c), leaving the symbol raw in the source block.
+- A cross-page pairing was corrected (relink), leaving the original source without a marker.
+- A genuine book-printing error where the callout exists in text but no FN body was printed.
+
+**Action required (loop until clean)**:
+1. For each orphan callout, identify which FN body it logically belongs to.
+2. If a matching FN body exists (even in an adjacent page or chapter), relink it.
+3. Only accept the callout as truly orphaned (no fix possible) if the book itself contains
+   no plausible FN body — i.e., it is a verified printing error in the original source.
+4. After each round of fixes, **re-run the scan** and repeat until no orphan callouts remain
+   or all remaining orphans are confirmed book errors.
+
 ### 2.3 `=== PAIRED FN CONTEXT (all, for manual review) ===`
 
 All 146 paired footnotes listed with:
@@ -275,7 +322,42 @@ paired after the fix; only the source block changes.
 
 ---
 
-## 4. How to Re-run Stage 7 After Manual Fixes
+## 4. Loop-Until-Clean Protocol (Required for Subagents)
+
+When a subagent applies footnote fixes, it **must** iterate until the book is clean. Leaving
+orphan callouts or unpaired FNs without explicit confirmation is not acceptable.
+
+### Required loop for any subagent doing footnote work:
+
+```
+while True:
+    1. Run the full audit (Sections 1–2b above)
+    2. For each DUPLICATE MARKER → fix (remove spurious copy)
+    3. For each ORPHAN CALLOUT:
+       a. Search nearby pages/chapters for a plausible unpaired FN body
+       b. If found → relink (relink existing paired FN or pair the unpaired one)
+       c. If no match found after exhaustive search → document as confirmed book error
+    4. For each UNPAIRED FN (not orphan):
+       a. Search for a raw callout on the same page ±1
+       b. If found → pair it
+       c. If no match → mark orphan=True only after confirming book error
+    5. For each PAIRED FN with NO SOURCE BLOCK → set paired=False and handle as unpaired
+    6. If no changes were made in this iteration → STOP
+    7. Else → go to step 1
+```
+
+**Only mark `orphan=True` when**:
+- The raw callout appears in body text but no FN body was printed in the original PDF
+  (common in tables, headers, or running text where the callout is clearly a typo or
+  carryover from another edition)
+- Cross-referenced with the PDF image if available
+
+**Never silently leave** a raw callout in a paragraph or a `paired=False` FN without either
+fixing it or marking it as a confirmed error with a note.
+
+---
+
+## 5. How to Re-run Stage 7 After Manual Fixes
 
 Stage 7 (`build`) reads `06_proofread.json` and produces the EPUB. The footnote pairing step is
 actually embedded inside the assembler (stage 4) and the `verify` sub-step that produces
@@ -303,7 +385,7 @@ use `--force-rerun` if the assembler supports it, or delete `05_semantic_raw.jso
 
 ---
 
-## 5. Known Assembler Bug Patterns
+## 6. Known Assembler Bug Patterns
 
 The pairing algorithm in `src/epubforge/assembler.py` uses a four-priority stack (P0–P3).
 The following structural patterns are known to cause incorrect pairings:
