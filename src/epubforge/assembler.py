@@ -259,8 +259,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
     Pass 1 collects all callout symbols from unpaired Footnote blocks.
     Pass 2 forward-scans:
-      - Heading level=1: clear non-multi_page entries; preserve multi_page so cross-page
-        sources can pair with footnotes in the next chapter.
+      - Heading level=1: clear entries that are neither multi_page nor on the same physical
+        page as the heading; preserves multi_page (cross-page spans) and same-page sources
+        (cross-chapter callouts sharing a physical page with their FN body).
       - Paragraph/Table containing raw callout C: push (block_idx, eff_page, is_multi).
         For cross_page paragraphs: eff_page = src_page + 1 (callout is in the continuation
         portion, logically on the next page). For Tables: eff_page = src_page.
@@ -298,11 +299,13 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
     for i, block in enumerate(result):
         if isinstance(block, Heading) and block.level == 1:
-            # At chapter boundaries clear only non-multi_page entries.
-            # multi_page sources (cross-page paragraphs, merged tables) may have
-            # callouts from the continuation portion that belong to the next chapter.
+            # At chapter boundaries clear only non-same-page, non-multi_page entries.
+            # multi_page sources may pair with next-chapter FN bodies (cross-page spans).
+            # Same-page entries survive too: a callout before this heading may share a
+            # physical page with the heading and its FN body (cross-chapter same-page layout).
+            h_page = block.provenance.page
             for c in list(stacks.keys()):
-                stacks[c] = [(j, ep, mp) for j, ep, mp in stacks[c] if mp]
+                stacks[c] = [(j, ep, mp) for j, ep, mp in stacks[c] if mp or ep == h_page]
                 if not stacks[c]:
                     del stacks[c]
 
@@ -353,6 +356,8 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 elif is_multi:
                     priority = 1  # P1: earlier effective-page, multi (cross-page continuation)
                 else:
+                    if fn_page - eff_page > 1:
+                        continue  # P0 only fires for adjacent pages (layout anomaly)
                     priority = 0  # P0: earlier effective-page, regular (layout anomaly fallback)
 
                 if priority > best_priority:
@@ -408,6 +413,40 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 )
             result[i] = block.model_copy(update={"paired": True})
             stack.pop(best_k)
+
+    # Salvage pass: same-page raw callouts that match an already-paired FN get the same
+    # marker. Handles book typos where a page has multiple identical callouts but only one
+    # FN body (e.g. p34 has ① in both a para and a table header, but FN body is unique).
+    paired_markers: dict[tuple[str, int], str] = {}
+    for blk in result:
+        if isinstance(blk, Footnote) and blk.paired and blk.callout:
+            key = (blk.callout, blk.provenance.page)
+            paired_markers[key] = f"\x02fn-{blk.provenance.page}-{blk.callout}\x03"
+
+    if paired_markers:
+        for i, blk in enumerate(result):
+            if isinstance(blk, Paragraph):
+                page = blk.provenance.page
+                eff_pages = {page, page + 1} if blk.cross_page else {page}
+                new_text = blk.text
+                for (c, fn_page), marker in paired_markers.items():
+                    if fn_page in eff_pages and _has_raw_callout(new_text, c):
+                        new_text = _replace_all_raw(new_text, c, marker)
+                if new_text != blk.text:
+                    result[i] = blk.model_copy(update={"text": new_text})
+            elif isinstance(blk, Table):
+                page = blk.provenance.page
+                new_html = blk.html
+                new_title = blk.table_title
+                for (c, fn_page), marker in paired_markers.items():
+                    if fn_page != page:
+                        continue
+                    if _has_raw_callout(new_html, c):
+                        new_html = _replace_all_raw(new_html, c, marker)
+                    if _has_raw_callout(new_title, c):
+                        new_title = _replace_all_raw(new_title, c, marker)
+                if new_html != blk.html or new_title != blk.table_title:
+                    result[i] = blk.model_copy(update={"html": new_html, "table_title": new_title})
 
     return result
 
