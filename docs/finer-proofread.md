@@ -83,6 +83,22 @@ This is different from a legitimate 3-page table span (which should match freely
 
 ---
 
+## Pattern 7 — Cross-Page Paragraph Steals FN via Wrong Source Portion
+
+**Symptom**: A footnote body is marked `paired=True`, but it is linked to the wrong source block. The *correct* source paragraph has a raw callout symbol left over (no `\x02fn-...\x03` marker). The pairing rate looks healthy but the EPUB link points to the wrong paragraph.
+
+**Root cause**: Cross-page paragraphs span pages P and P+1. The assembler pushes them with `eff_page = src_page + 1` (callout assumed to be in the continuation portion). If the callout is actually in the **source portion** (page P), and there is also a cross-page paragraph from page P−1 (whose eff_page = P) competing for the same FN body, the P−1 paragraph wins — stealing the match before the correct P paragraph is considered.
+
+This is subtly different from Patterns 3/4: here the *pairing count is unchanged* (no new orphan is reported), so the 97%-threshold check passes silently.
+
+**Affected cases (zxgb)**: p74 ③, p92 ②, p168 ① — all were cross-page paragraphs whose source-portion callout was skipped by the eff_page filter, leaving the correct block with a raw callout while the FN was consumed by an earlier cross-page block.
+
+**Fix (implemented)**: Added a second-chance scan in `_pair_footnotes`. When the first priority pass (using eff_page) yields no candidate, the algorithm retries multi_page Paragraphs using `provenance.page` (src_page). This rescues source-portion callouts without disturbing first-pass P3 winners.
+
+**Detection method**: Search for raw callout symbols in all blocks — if a raw callout exists *and* the corresponding FN is already `paired=True`, a wrong pairing has occurred (see Step 2b in the checklist below).
+
+---
+
 ## Pattern 6 — VLM Omits Footnote Body Entirely
 
 **Symptom**: A callout `①` appears in a paragraph, but no `Footnote` block with that callout ever appears in the IR. The callout marker is embedded in the text but the footnote detail is lost.
@@ -101,15 +117,17 @@ This is different from a legitimate 3-page table span (which should match freely
 | # | Pattern | Cases in zxgb | Status |
 |---|---------|---------------|--------|
 | 1 | H1 misclassification clears stack | 4 (p63, p74, p81, p161) | **Fixed** — re-run `_pair_footnotes` in `toc_refiner` |
-| 2 | False-positive `first_footnote_continues_prev_footnote` | 4 (unit_0013/0024/0055/0065) | **Fixed** — hard filter (callout mismatch) + prompt update |
-| 3 | Cross-page para steals earlier FN | 2 (p64, p149) | **Fixed** — 4-level priority; P3 beats P2 |
+| 2 | False-positive `first_footnote_continues_prev_footnote` | 4 (unit_0013/0024/0055/0065) + 1 auto (unit_0048) | **Fixed** — hard filter (callout mismatch) + prompt update |
+| 3 | Cross-page para steals earlier FN | 2 (p64, p149/p150) | **Fixed** — 4-level priority; P3 beats P2 |
 | 4 | Merged continuation table steals FN | 2 (p83, p119) | **Fixed** — `Table.multi_page=True`; P3 beats P2 |
 | 5 | Book layout: callout precedes FN by 1 page | 1 (p89) | **Fixed** — P0 fallback when no same-page candidate |
 | 6 | VLM omits footnote body | varies | **Mitigated** by DPI=200 + audit_notes |
+| 7 | Cross-page para source-portion callout skipped | 3 (p74 ③, p92 ②, p168 ①) | **Fixed** — second-chance scan using src_page |
 
 Pairing rate history:
 - After Pattern 1 fix: **145/154 = 94.2%**
-- After Patterns 2–5 fixes (algorithmic): target **≥ 150/154 = 97.4%**
+- After Patterns 2–5 fixes (algorithmic): **148/154 = 96.1%**
+- After Patterns 7 + cross-chapter borrowed FN: **153/153 = 100%**
 
 Remaining unfixed: p34 (book mis-print: two orphan ① in prose, table FN takes the ① correctly, expected behaviour).
 
@@ -146,7 +164,41 @@ for ci, ch in enumerate(data['chapters']):
 "
 ```
 
-For each orphan: look up the page in the original PDF and classify by pattern (1–6 above).
+For each orphan: look up the page in the original PDF and classify by pattern (1–7 above).
+
+### Step 2b — Scan for raw callout symbols (detects wrong pairings / Pattern 7)
+
+The pairing-rate check only counts `paired=False` footnotes. A *wrong pairing* (FN body linked to the wrong paragraph) shows as `paired=True` but leaves a raw callout symbol in the correct source block — it is invisible to Step 1. Use the callout list from `book_memory.json` to know which symbols to look for.
+
+```bash
+uv run python -c "
+import json, re
+
+# Load callout list from book memory
+mem = json.loads(open('work/zxgb/03_extract/book_memory.json').read())
+callouts = mem.get('footnote_callouts', [])
+
+FN_MARKER = re.compile(r'\x02[^\x03]*\x03')
+data = json.loads(open('work/zxgb/06_proofread.json').read())
+
+for ci, ch in enumerate(data['chapters']):
+    for bi, b in enumerate(ch['blocks']):
+        if b['kind'] not in ('paragraph', 'table'):
+            continue
+        raw_text = FN_MARKER.sub('', b.get('text') or b.get('html') or '')
+        found = [c for c in callouts if c in raw_text]
+        if found:
+            page = b['provenance']['page']
+            snippet = raw_text[:80].replace('\n', ' ')
+            print(f'ch{ci} b{bi} p{page} {b[\"kind\"]:10} raw callouts={found!r}  {snippet!r}')
+"
+```
+
+**Interpreting results**:
+- Raw callout in a block + matching FN is **unpaired** → ordinary orphan (Patterns 1–6).
+- Raw callout in a block + matching FN is **paired** → the FN was consumed by a *different* block (Pattern 7 / wrong pairing). Identify which block has the `\x02fn-PAGE-CALLOUT\x03` marker and compare against the PDF.
+
+Expected output for a fully-fixed book: only p34-style book mis-prints (where the table correctly owns the `①` and the paragraph's raw `①①` is intentional).
 
 ### Step 3 — Classify each orphan and decide action
 
@@ -163,6 +215,7 @@ Expected answers and actions:
 | Pattern 3/4 (cross-page steal) | These should now be fixed algorithmically. If still occurring, check `cross_page` and `multi_page` flags on the suspect block in the IR. |
 | Pattern 5 (layout anomaly) | Verify via P0 fallback. If still unpaired, the paragraph may be on a page even further back — check ±2 pages. |
 | Pattern 6 (VLM omission) | Accept or manually add a footnote block to the unit JSON. |
+| Pattern 7 (wrong pairing, detected via Step 2b) | The FN was stolen by an earlier cross-page paragraph. Check `cross_page` flags and eff_page priority. If algorithmic fix doesn't apply, set `first_footnote_continues_prev_footnote: false` in the suspect unit JSON and re-run `assemble --force-rerun`. |
 | Book mis-print | Document as expected behaviour; accept orphan. |
 
 ### Step 4 — Verify specific problem pages
