@@ -44,7 +44,8 @@ def run_all(
         run_assemble(pdf_path, cfg, force=_f(4))
         run_refine_toc(pdf_path, cfg, force=_f(5))
         run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
-        run_build(pdf_path, cfg, force=_f(7))
+        run_footnote_verify(pdf_path, cfg, force=_f(7), pages=pages)
+        run_build(pdf_path, cfg, force=_f(8))
 
     log.info("pipeline total: %s", get_tracker().summary_line())
 
@@ -151,20 +152,50 @@ def run_proofread(
     console.print(f"  → {out}")
 
 
+def run_footnote_verify(
+    pdf_path: Path,
+    cfg: Config,
+    *,
+    force: bool = False,
+    pages: set[int] | None = None,
+) -> None:
+    from epubforge.footnote_verifier import verify_footnotes
+
+    work = cfg.book_work_dir(pdf_path)
+    src = _stage_path(work, "06_proofread.json")
+    if not src.exists():
+        console.print("[dim]skip footnote-verify — 06_proofread.json not found[/dim]")
+        return
+    out = _stage_path(work, "07_footnote_verified.json")
+    report = _stage_path(work, "07_footnote_verify_report.json")
+    if _skip(out, force, "footnote-verify"):
+        return
+    console.print("[bold]Stage 7:[/bold] LLM footnote verification…")
+    with stage_timer(log, "7 footnote-verify"):
+        verify_footnotes(src, out, cfg, pages=pages, report_path=report)
+    console.print(f"  → {out}")
+
+
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     from epubforge.epub_builder import build_epub
 
     work = cfg.book_work_dir(pdf_path)
+    fn_verified = _stage_path(work, "07_footnote_verified.json")
     proofread_out = _stage_path(work, "06_proofread.json")
     refined = _stage_path(work, "05_semantic.json")
-    semantic = proofread_out if proofread_out.exists() else refined
+    if fn_verified.exists():
+        semantic = fn_verified
+    elif proofread_out.exists():
+        semantic = proofread_out
+    else:
+        semantic = refined
     registry = _stage_path(work, "style_registry.json")
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.book_out_path(pdf_path)
     if _skip(out, force, "build"):
         return
-    console.print("[bold]Stage 7:[/bold] building EPUB…")
-    with stage_timer(log, "7 build"):
+    console.print("[bold]Stage 8:[/bold] building EPUB…")
+    with stage_timer(log, "8 build"):
         build_epub(
             semantic,
             out,

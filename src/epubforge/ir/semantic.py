@@ -39,6 +39,7 @@ class Footnote(BaseModel):
     callout: str
     text: str
     paired: bool = False  # True when callout was found and marked in a preceding paragraph
+    orphan: bool = False  # True when LLM stage 7 confirms no matching callout exists in the book
     ref_bbox: list[float] | None = None
     provenance: Provenance
 

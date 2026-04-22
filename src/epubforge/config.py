@@ -38,6 +38,11 @@ class Config:
     proofread_phase2_thinking_budget_tokens: int = 2000
     proofread_max_chunk_tokens: int = 100_000
     proofread_chars_per_token: float = 3.0
+    footnote_verify_thinking_budget_tokens: int = 2000
+    footnote_verify_max_chapter_tokens: int = 100_000
+    footnote_verify_chars_per_token: float = 3.0
+    footnote_verify_model: str = ""  # empty = use cfg.llm_model
+    footnote_verify_providers: list[str] = field(default_factory=list)  # OpenRouter provider order
     vlm_dpi: int = 200
     max_simple_batch_pages: int = 8
     max_complex_batch_pages: int = 12
@@ -122,6 +127,19 @@ def load_config(config_path: Path | None = None) -> Config:
                 cfg.proofread_max_chunk_tokens = int(pr["max_chunk_tokens"])  # type: ignore[arg-type]
             if "chars_per_token" in pr:
                 cfg.proofread_chars_per_token = float(pr["chars_per_token"])  # type: ignore[arg-type]
+
+        fv = data.get("footnote_verify") or {}
+        if isinstance(fv, dict):
+            if "thinking_budget_tokens" in fv:
+                cfg.footnote_verify_thinking_budget_tokens = int(fv["thinking_budget_tokens"])  # type: ignore[arg-type]
+            if "max_chapter_tokens" in fv:
+                cfg.footnote_verify_max_chapter_tokens = int(fv["max_chapter_tokens"])  # type: ignore[arg-type]
+            if "chars_per_token" in fv:
+                cfg.footnote_verify_chars_per_token = float(fv["chars_per_token"])  # type: ignore[arg-type]
+            if "model" in fv:
+                cfg.footnote_verify_model = str(fv["model"])
+            if "providers" in fv:
+                cfg.footnote_verify_providers = [str(p) for p in fv["providers"]]  # type: ignore[union-attr]
 
         ex = data.get("extract") or {}
         if isinstance(ex, dict):

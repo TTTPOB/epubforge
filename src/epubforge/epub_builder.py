@@ -338,8 +338,9 @@ def _render_chapter(
             key = (block.provenance.page, block.callout)
             if borrowed_keys and key in borrowed_keys:
                 continue  # suppressed — body is in the borrowing chapter
-            footnotes.append(block)
-            if not block.paired:
+            if not block.orphan:
+                footnotes.append(block)
+            if not block.paired and not block.orphan:
                 entry = fn_map.get(key)
                 if entry:
                     n_val, fn_id = entry

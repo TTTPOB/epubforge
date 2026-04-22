@@ -80,10 +80,10 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
 def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f", help="Re-run stages even if outputs exist"),
-    from_stage: int = typer.Option(1, "--from", min=1, max=7, help="Start from stage N (1–7); existing outputs are reused unless --force-rerun"),
+    from_stage: int = typer.Option(1, "--from", min=1, max=8, help="Start from stage N (1–8); existing outputs are reused unless --force-rerun"),
     pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
 ) -> None:
-    """Run the full pipeline (parse → classify → extract → assemble → refine-toc → proofread → build)."""
+    """Run the full pipeline (parse → classify → extract → assemble → refine-toc → proofread → footnote-verify → build)."""
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
@@ -170,11 +170,25 @@ def proofread(
 
 
 @app.command()
+def footnote_verify(
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force-rerun", "-f"),
+    pages: str | None = typer.Option(None, "--pages", help="Limit to chapters covering these pages, e.g. '1-44'"),
+) -> None:
+    """Stage 7 — LLM footnote pairing verification → work/<name>/07_footnote_verified.json."""
+    cfg = load_config(_config_path)
+    cfg.require_llm()
+    log_path = _init_logging(cfg, pdf_path)
+    _log_startup_banner(cfg, log_path)
+    pipeline.run_footnote_verify(pdf_path, cfg, force=force, pages=_parse_pages(pages))
+
+
+@app.command()
 def build(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
-    """Stage 7 — generate EPUB → out/<name>.epub."""
+    """Stage 8 — generate EPUB → out/<name>.epub."""
     cfg = load_config(_config_path)
     log_path = _init_logging(cfg, pdf_path)
     _log_startup_banner(cfg, log_path)

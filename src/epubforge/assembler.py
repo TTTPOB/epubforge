@@ -246,6 +246,20 @@ def _replace_all_raw(text: str, callout: str, replacement: str) -> str:
     return pattern.sub(_sub, text)
 
 
+def _replace_nth_raw(text: str, callout: str, replacement: str, n: int) -> str:
+    """Replace the n-th (0-based) raw occurrence of callout outside \\x02...\\x03 markers."""
+    counter = [-1]
+    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
+
+    def _sub(m: re.Match[str]) -> str:
+        if m.group() != callout:
+            return m.group()
+        counter[0] += 1
+        return replacement if counter[0] == n else m.group()
+
+    return pattern.sub(_sub, text)
+
+
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     """Find each Footnote's callout char in preceding paragraphs/tables and embed a marker.
 
