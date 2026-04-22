@@ -7,7 +7,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from epubforge.assembler import _BookMeta, _build_book_from_stream
+from epubforge.assembler import _BookMeta, _build_book_from_stream, _pair_footnotes
 from epubforge.config import Config
 from epubforge.ir.semantic import (
     Block,
@@ -119,6 +119,10 @@ def refine_toc(raw_path: Path, out_path: Path, cfg: Config) -> None:
 
     # Remove merged headings
     clean_stream = [b for i, b in enumerate(stream) if i not in to_delete]
+
+    # Re-run footnote pairing now that heading levels are corrected.  This is
+    # idempotent: already-paired footnotes and already-embedded markers are skipped.
+    clean_stream = _pair_footnotes(clean_stream)
 
     # Rebuild book using the refined stream
     meta = _BookMeta(

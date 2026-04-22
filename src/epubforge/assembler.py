@@ -201,6 +201,38 @@ def _absorb_table_text(blocks: list[Block]) -> list[Block]:
     return result
 
 
+_FN_MARKER_RE = re.compile(r"\x02[^\x03]*\x03")
+
+
+def _has_raw_callout(text: str, callout: str) -> bool:
+    """Return True if callout appears in text outside any existing \\x02...\\x03 marker."""
+    return callout in _FN_MARKER_RE.sub("", text)
+
+
+def _replace_first_raw(text: str, callout: str, replacement: str) -> str:
+    """Replace the first occurrence of callout in text that is not inside a \\x02...\\x03 marker."""
+    done = [False]
+    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
+
+    def _sub(m: re.Match[str]) -> str:
+        if done[0] or m.group() != callout:
+            return m.group()
+        done[0] = True
+        return replacement
+
+    return pattern.sub(_sub, text)
+
+
+def _replace_all_raw(text: str, callout: str, replacement: str) -> str:
+    """Replace all occurrences of callout in text that are not inside a \\x02...\\x03 marker."""
+    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
+
+    def _sub(m: re.Match[str]) -> str:
+        return replacement if m.group() == callout else m.group()
+
+    return pattern.sub(_sub, text)
+
+
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     """Find each Footnote's callout char in preceding paragraphs/tables and embed a marker.
 
@@ -208,18 +240,21 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     epub_builder. Footnotes whose callout cannot be located are left unpaired (epub_builder
     falls back to a standalone superscript reference).
 
-    Algorithm: two-pass, LIFO stack per callout symbol.
+    Algorithm: two-pass, LIFO stack per callout symbol.  Safe to call multiple times on the
+    same block stream (already-embedded markers are skipped; already-paired footnotes are
+    not re-paired).
 
-    Pass 1 collects all callout symbols from Footnote blocks.
+    Pass 1 collects all callout symbols from unpaired Footnote blocks.
     Pass 2 forward-scans:
       - Heading level=1: clear all stacks (callouts restart at chapter boundaries only;
         subsection headings do NOT reset, because a footnote body can follow a subsection
         heading whose section intro paragraph carries the callout).
-      - Paragraph containing callout C: push (block_idx, is_table=False) onto stack[C].
-      - Table containing callout C: push (block_idx, is_table=True) onto stack[C].
+      - Paragraph containing raw callout C (outside an existing marker): push
+        (block_idx, is_table=False) onto stack[C].
+      - Table containing raw callout C: push (block_idx, is_table=True) onto stack[C].
         Tables may span multiple pages after _merge_continued_tables, so they carry no
         page constraint.
-      - Footnote with callout C: pop from stack[C] (LIFO — most recent first).
+      - Footnote with callout C (unpaired): pop from stack[C] (LIFO — most recent first).
         Paragraphs are only paired when on the same page as the footnote body; tables
         are paired regardless of page distance.
 
@@ -227,14 +262,18 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
       - cross-page table spans (N-page tables, any N);
       - multiple same-callout occurrences per section (LIFO gives nearest-first);
       - paragraph callouts staying same-page (prevents false cross-page matches);
-      - callout in chapter-intro paragraph before first subsection heading.
+      - callout in chapter-intro paragraph before first subsection heading;
+      - re-running after heading level corrections (idempotent).
     """
     from collections import defaultdict
 
     result = list(blocks)
 
-    # Pass 1: collect all callout symbols used in this block sequence.
-    callout_symbols = sorted({b.callout for b in result if isinstance(b, Footnote) and b.callout})
+    # Pass 1: collect callout symbols from UNPAIRED footnotes only.
+    callout_symbols = sorted({
+        b.callout for b in result
+        if isinstance(b, Footnote) and b.callout and not b.paired
+    })
     if not callout_symbols:
         return result
 
@@ -248,15 +287,15 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
         elif isinstance(block, Paragraph):
             for c in callout_symbols:
-                if c in block.text:
+                if _has_raw_callout(block.text, c):
                     stacks[c].append((i, block.cross_page))
 
         elif isinstance(block, Table):
             for c in callout_symbols:
-                if c in block.html:
+                if _has_raw_callout(block.html, c):
                     stacks[c].append((i, True))
 
-        elif isinstance(block, Footnote):
+        elif isinstance(block, Footnote) and not block.paired:
             callout = block.callout
             fn_page = block.provenance.page
             fn_marker = f"\x02fn-{fn_page}-{callout}\x03"
@@ -272,9 +311,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 # Paragraphs: same-page constraint; Tables: no page constraint
                 if not is_table and source.provenance.page != fn_page:
                     continue
-                if isinstance(source, Paragraph) and callout in source.text:
+                if isinstance(source, Paragraph) and _has_raw_callout(source.text, callout):
                     result[j] = source.model_copy(update={
-                        "text": source.text.replace(callout, fn_marker, 1)
+                        "text": _replace_first_raw(source.text, callout, fn_marker)
                     })
                     result[i] = block.model_copy(update={"paired": True})
                     log.debug(
@@ -283,9 +322,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                     )
                     stack.pop(k)
                     break
-                if isinstance(source, Table) and callout in source.html:
+                if isinstance(source, Table) and _has_raw_callout(source.html, callout):
                     result[j] = source.model_copy(update={
-                        "html": source.html.replace(callout, fn_marker)
+                        "html": _replace_all_raw(source.html, callout, fn_marker)
                     })
                     result[i] = block.model_copy(update={"paired": True})
                     log.debug(
