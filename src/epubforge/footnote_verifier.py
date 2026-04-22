@@ -17,6 +17,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, create_model
 
 from epubforge.config import Config
+from epubforge.editor.apply import ApplyError, BlockRef, FootnoteMutation, apply_footnote_mutation
 from epubforge.fields import iter_block_text_fields
 from epubforge.ir.semantic import Book, Footnote, Paragraph, Table
 from epubforge.markers import (
@@ -67,6 +68,15 @@ def _parse_bid(bid: str) -> tuple[int, int] | None:
         return int(parts[0]), int(parts[1])
     except ValueError:
         return None
+
+
+def _is_valid_bid_loc(book: Book, loc: tuple[int, int] | None) -> bool:
+    if loc is None:
+        return False
+    ch_idx, b_idx = loc
+    if ch_idx < 0 or b_idx < 0 or ch_idx >= len(book.chapters):
+        return False
+    return b_idx < len(book.chapters[ch_idx].blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -341,10 +351,6 @@ def _make_constrained_verify_cls(fn_bids: list[str], all_bids: list[str]) -> typ
     return create_model("FootnoteVerifyOutput", ops=(list[DynEditOp], ...))  # type: ignore[return-value]
 
 
-# ---------------------------------------------------------------------------
-# Apply ops
-# ---------------------------------------------------------------------------
-
 def _apply_fn_ops(
     book: Book,
     ops: list[FootnoteEditOp],
@@ -393,173 +399,61 @@ def _apply_fn_ops(
                 fn_bid, op.callout, fn_block.callout,
             )
             continue
+        if op.op == "pair" and fn_block.paired:
+            log.debug("footnote-verify: pair on already-paired %r — skip", fn_bid)
+            continue
+        if op.op == "unpair" and not fn_block.paired:
+            log.debug("footnote-verify: unpair on already-unpaired %r — skip", fn_bid)
+            continue
 
-        marker = make_fn_marker(fn_block.provenance.page, fn_block.callout)
+        source_loc = _parse_bid(op.source_block_id or "") if op.source_block_id else None
+        new_source_loc = _parse_bid(op.new_source_block_id or "") if op.new_source_block_id else None
+        if op.source_block_id is not None and not _is_valid_bid_loc(book, source_loc):
+            log.warning("footnote-verify: source %r out of range", op.source_block_id)
+            source_loc = None
+        if op.new_source_block_id is not None and not _is_valid_bid_loc(book, new_source_loc):
+            log.warning("footnote-verify: relink new_source %r out of range", op.new_source_block_id)
+            new_source_loc = None
 
-        if op.op == "pair":
-            if fn_block.paired:
-                log.debug("footnote-verify: pair on already-paired %r — skip", fn_bid)
-                continue
-            src_loc = _parse_bid(op.source_block_id or "")
-            if src_loc is None:
-                log.warning("footnote-verify: pair missing source_block_id for %r", fn_bid)
-                continue
-            src_ch, src_b = src_loc
-            if src_ch >= len(book.chapters) or src_b >= len(book.chapters[src_ch].blocks):
-                log.warning("footnote-verify: source %r out of range", op.source_block_id)
-                continue
-            src_block = book.chapters[src_ch].blocks[src_b]
-            updated = False
-            for text in _block_texts(src_block):
-                if _has_raw_callout(text, fn_block.callout):
-                    new_text = _replace_nth_raw(text, fn_block.callout, marker, op.occurrence_index)
-                    src_block = _update_block_text(src_block, text, new_text)
-                    updated = True
-                    break
-            if updated:
-                book.chapters[src_ch].blocks[src_b] = src_block
-                book.chapters[fn_ch].blocks[fn_b] = fn_block.model_copy(update={"paired": True})
-                applied += 1
-                report.append({"op": "pair", "fn_block_id": fn_bid,
-                                "source_block_id": op.source_block_id,
-                                "reason": op.reason, "confidence": op.confidence})
-            else:
-                log.warning("footnote-verify: pair — raw callout %r not found in %r",
-                            fn_block.callout, op.source_block_id)
+        if op.op == "pair" and source_loc is None:
+            log.warning("footnote-verify: pair missing/invalid source_block_id for %r", fn_bid)
+            continue
+        if op.op == "relink" and (source_loc is None or new_source_loc is None):
+            log.warning("footnote-verify: relink missing/invalid source/new_source for %r", fn_bid)
+            continue
 
-        elif op.op == "unpair":
-            if not fn_block.paired:
-                log.debug("footnote-verify: unpair on already-unpaired %r — skip", fn_bid)
-                continue
-            # Find the marker in source block specified or search all
-            removed = False
-            candidate = op.source_block_id
-            if candidate:
-                loc = _parse_bid(candidate)
-                if loc:
-                    src_ch, src_b = loc
-                    if src_ch < len(book.chapters) and src_b < len(book.chapters[src_ch].blocks):
-                        src_block = book.chapters[src_ch].blocks[src_b]
-                        for text in _block_texts(src_block):
-                            if marker in text:
-                                new_text = text.replace(marker, fn_block.callout)
-                                src_block = _update_block_text(src_block, text, new_text)
-                                book.chapters[src_ch].blocks[src_b] = src_block
-                                removed = True
-                                break
-            if not removed:
-                # Search entire book
-                loc = _find_marker_source(book, fn_block)
-                if loc:
-                    src_ch, src_b = loc
-                    src_block = book.chapters[src_ch].blocks[src_b]
-                    for text in _block_texts(src_block):
-                        if marker in text:
-                            new_text = text.replace(marker, fn_block.callout)
-                            src_block = _update_block_text(src_block, text, new_text)
-                            book.chapters[src_ch].blocks[src_b] = src_block
-                            removed = True
-                            break
-            if removed:
-                book.chapters[fn_ch].blocks[fn_b] = fn_block.model_copy(update={"paired": False})
-                applied += 1
-                report.append({"op": "unpair", "fn_block_id": fn_bid,
-                                "reason": op.reason, "confidence": op.confidence})
-            else:
-                log.warning("footnote-verify: unpair — marker not found for %r", fn_bid)
+        if op.op == "relink" and source_loc == new_source_loc and source_loc is not None:
+            log.debug("footnote-verify: relink same-src skip (confirmation) %r", fn_bid)
+            continue
 
-        elif op.op == "relink":
-            old_loc = _parse_bid(op.source_block_id or "")
-            new_loc = _parse_bid(op.new_source_block_id or "")
-            if old_loc is None or new_loc is None:
-                log.warning("footnote-verify: relink missing source/new_source for %r", fn_bid)
-                continue
-            old_ch, old_b = old_loc
-            new_ch, new_b = new_loc
-
-            # Same-source confirmation: LLM confirmed current pairing is correct — skip
-            if (old_ch, old_b) == (new_ch, new_b):
-                log.debug("footnote-verify: relink same-src skip (confirmation) %r", fn_bid)
-                continue
-
-            # Validate new source exists
-            if new_ch >= len(book.chapters) or new_b >= len(book.chapters[new_ch].blocks):
-                log.warning("footnote-verify: relink new_source %r out of range", op.new_source_block_id)
-                continue
-
-            # Pre-check: new source must have raw callout BEFORE touching anything
-            new_block = book.chapters[new_ch].blocks[new_b]
-            new_has_raw = any(
-                _has_raw_callout(t, fn_block.callout) for t in _block_texts(new_block)
+        try:
+            apply_footnote_mutation(
+                book,
+                FootnoteMutation(
+                    op_name=typing.cast(Literal["pair_footnote", "unpair_footnote", "relink_footnote", "mark_orphan"], {
+                        "pair": "pair_footnote",
+                        "unpair": "unpair_footnote",
+                        "relink": "relink_footnote",
+                        "mark_orphan": "mark_orphan",
+                    }[op.op]),
+                    fn_ref=BlockRef(fn_ch, fn_b),
+                    source_ref=BlockRef(*source_loc) if source_loc is not None else None,
+                    new_source_ref=BlockRef(*new_source_loc) if new_source_loc is not None else None,
+                    occurrence_index=op.occurrence_index,
+                ),
+                op_id=f"footnote-verify:{fn_bid}",
             )
-            if not new_has_raw:
-                log.warning(
-                    "footnote-verify: relink — raw callout %r not found in new source %r — skip (no changes made)",
-                    fn_block.callout, op.new_source_block_id,
-                )
-                continue
+        except ApplyError as exc:
+            log.warning("footnote-verify: %s for %r", exc.reason, fn_bid)
+            continue
 
-            # Remove old marker
-            if old_ch < len(book.chapters) and old_b < len(book.chapters[old_ch].blocks):
-                old_block = book.chapters[old_ch].blocks[old_b]
-                for text in _block_texts(old_block):
-                    if marker in text:
-                        new_text = text.replace(marker, fn_block.callout)
-                        old_block = _update_block_text(old_block, text, new_text)
-                        book.chapters[old_ch].blocks[old_b] = old_block
-                        break
-
-            # Embed marker in new source (re-fetch in case old==new after same-src guard)
-            new_block = book.chapters[new_ch].blocks[new_b]
-            updated = False
-            for text in _block_texts(new_block):
-                if _has_raw_callout(text, fn_block.callout):
-                    new_text = _replace_nth_raw(text, fn_block.callout, marker, op.occurrence_index)
-                    new_block = _update_block_text(new_block, text, new_text)
-                    updated = True
-                    break
-            if updated:
-                book.chapters[new_ch].blocks[new_b] = new_block
-                book.chapters[fn_ch].blocks[fn_b] = fn_block.model_copy(update={"paired": True})
-                applied += 1
-                report.append({"op": "relink", "fn_block_id": fn_bid,
-                                "source_block_id": op.source_block_id,
-                                "new_source_block_id": op.new_source_block_id,
-                                "reason": op.reason, "confidence": op.confidence})
-            else:
-                # Restore old marker since new embed failed
-                log.warning(
-                    "footnote-verify: relink embed failed for %r after removing old marker — restoring",
-                    fn_bid,
-                )
-                if old_ch < len(book.chapters) and old_b < len(book.chapters[old_ch].blocks):
-                    old_block = book.chapters[old_ch].blocks[old_b]
-                    for text in _block_texts(old_block):
-                        if fn_block.callout in _strip_markers(text):
-                            new_text = _replace_first_raw(text, fn_block.callout, marker)
-                            old_block = _update_block_text(old_block, text, new_text)
-                            book.chapters[old_ch].blocks[old_b] = old_block
-                            book.chapters[fn_ch].blocks[fn_b] = fn_block.model_copy(update={"paired": True})
-                            break
-
-        elif op.op == "mark_orphan":
-            # Also remove the source marker so no dangling noteref links in EPUB
-            src_loc = _find_marker_source(book, fn_block)
-            if src_loc:
-                src_ch, src_b = src_loc
-                src_block = book.chapters[src_ch].blocks[src_b]
-                for text in _block_texts(src_block):
-                    if marker in text:
-                        new_text = text.replace(marker, fn_block.callout)
-                        src_block = _update_block_text(src_block, text, new_text)
-                        book.chapters[src_ch].blocks[src_b] = src_block
-                        break
-            book.chapters[fn_ch].blocks[fn_b] = fn_block.model_copy(
-                update={"orphan": True, "paired": False}
-            )
-            applied += 1
-            report.append({"op": "mark_orphan", "fn_block_id": fn_bid,
-                            "reason": op.reason, "confidence": op.confidence})
+        applied += 1
+        entry = {"op": op.op, "fn_block_id": fn_bid, "reason": op.reason, "confidence": op.confidence}
+        if op.source_block_id is not None:
+            entry["source_block_id"] = op.source_block_id
+        if op.new_source_block_id is not None:
+            entry["new_source_block_id"] = op.new_source_block_id
+        report.append(entry)
 
     return applied
 

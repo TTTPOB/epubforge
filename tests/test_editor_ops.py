@@ -298,7 +298,7 @@ class TestValidators:
                 )
             )
 
-    def test_irreversible_flag_is_derived_for_topology_and_unrevertible_merge(self) -> None:
+    def test_irreversible_flag_is_derived_for_topology_and_all_merge_blocks(self) -> None:
         relocate_env = OpEnvelope.model_validate(
             _base_envelope(
                 {
@@ -319,9 +319,36 @@ class TestValidators:
                 }
             )
         )
+        merge_with_snapshot_env = OpEnvelope.model_validate(
+            _base_envelope(
+                {
+                    "op": "merge_blocks",
+                    "block_uids": ["blk-1", "blk-2"],
+                    "join": "cjk",
+                    "target_field": "text",
+                    "original_blocks": [
+                        {
+                            "kind": "paragraph",
+                            "uid": "blk-1",
+                            "text": "First",
+                            "role": "body",
+                            "provenance": _prov(),
+                        },
+                        {
+                            "kind": "paragraph",
+                            "uid": "blk-2",
+                            "text": "Second",
+                            "role": "body",
+                            "provenance": _prov(),
+                        },
+                    ],
+                }
+            )
+        )
 
         assert relocate_env.irreversible is True
         assert merge_env.irreversible is True
+        assert merge_with_snapshot_env.irreversible is True
 
     def test_merge_blocks_snapshot_must_align_with_source_uids(self) -> None:
         with pytest.raises(ValidationError):

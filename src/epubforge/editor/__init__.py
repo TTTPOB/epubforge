@@ -1,5 +1,6 @@
 """Editor package."""
 
+from epubforge.editor.apply import ApplyError, ApplyResult, apply_envelope, apply_log
 from epubforge.editor.ops import (
     BlockSnapshot,
     CompactMarker,
@@ -31,6 +32,8 @@ __all__ = [
     "DeleteBlock",
     "EditOp",
     "FootnoteOp",
+    "ApplyError",
+    "ApplyResult",
     "HeadingSpec",
     "InsertBlock",
     "MergeBlocks",
@@ -48,4 +51,6 @@ __all__ = [
     "SetText",
     "SplitBlock",
     "SplitChapter",
+    "apply_envelope",
+    "apply_log",
 ]

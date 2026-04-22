@@ -115,6 +115,25 @@ def test_pair_callout_mismatch_skipped() -> None:
     assert isinstance(fn, Footnote) and fn.paired is False
 
 
+def test_pair_invalid_source_block_id_skipped() -> None:
+    book = _book(_chapter(
+        "ch0",
+        _para("text ①", page=1),
+        _fn("①", page=1, paired=False),
+    ))
+    report: list = []
+    applied = _apply_fn_ops(
+        book,
+        [_op(op="pair", fn_block_id="0_1", source_block_id="9_0", callout="①")],
+        ch_idx=0,
+        report=report,
+    )
+    assert applied == 0
+    fn = book.chapters[0].blocks[1]
+    assert isinstance(fn, Footnote) and fn.paired is False
+    assert report == []
+
+
 def test_pair_low_confidence_skipped() -> None:
     book = _book(_chapter(
         "ch0",
@@ -188,6 +207,30 @@ def test_relink_basic() -> None:
     fn = book.chapters[0].blocks[2]
     assert isinstance(fn, Footnote) and fn.paired is True
     assert report[0]["op"] == "relink"
+
+
+def test_relink_invalid_new_source_skipped() -> None:
+    marker = "\x02fn-3-①\x03"
+    book = _book(_chapter(
+        "ch0",
+        _para(f"wrong {marker} context", page=3),
+        _para("correct ① context", page=3),
+        _fn("①", page=3, paired=True),
+    ))
+    report: list = []
+    applied = _apply_fn_ops(
+        book,
+        [_op(op="relink", fn_block_id="0_2", source_block_id="0_0",
+             new_source_block_id="9_1", callout="①")],
+        ch_idx=0,
+        report=report,
+    )
+    assert applied == 0
+    old_para = book.chapters[0].blocks[0]
+    assert isinstance(old_para, Paragraph) and marker in old_para.text
+    fn = book.chapters[0].blocks[2]
+    assert isinstance(fn, Footnote) and fn.paired is True
+    assert report == []
 
 
 # ---------------------------------------------------------------------------

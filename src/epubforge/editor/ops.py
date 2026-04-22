@@ -795,9 +795,7 @@ class OpEnvelope(EditorModel):
         if (self.applied_version is None) != (self.applied_at is None):
             raise ValueError("applied_version and applied_at must both be set or both be omitted")
 
-        if isinstance(self.op, (MergeChapters, SplitChapter, RelocateBlock)):
-            self.irreversible = True
-        elif isinstance(self.op, MergeBlocks) and self.op.original_blocks is None:
+        if isinstance(self.op, (MergeBlocks, MergeChapters, SplitChapter, RelocateBlock)):
             self.irreversible = True
 
         if self.applied_version is not None:
