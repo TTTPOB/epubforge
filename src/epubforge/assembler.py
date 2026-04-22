@@ -414,6 +414,14 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             result[i] = block.model_copy(update={"paired": True})
             stack.pop(best_k)
 
+            # After a P3 win (non-multi, same-page), retire any remaining same-page multi
+            # entries (P2 candidates). Without this they linger and get grabbed by a distant
+            # FN via P1, preventing the salvage pass from re-linking them correctly.
+            if best_priority == 3 and callout in stacks:
+                stacks[callout] = [(j2, ep2, mp2) for j2, ep2, mp2 in stacks[callout] if ep2 != fn_page]
+                if not stacks[callout]:
+                    del stacks[callout]
+
     # Salvage pass: same-page raw callouts that match an already-paired FN get the same
     # marker. Handles book typos where a page has multiple identical callouts but only one
     # FN body (e.g. p34 has ① in both a para and a table header, but FN body is unique).
