@@ -205,7 +205,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
     Pass 1 collects all callout symbols from Footnote blocks.
     Pass 2 forward-scans:
-      - Heading: clear all stacks (callouts restart per section).
+      - Heading level=1: clear all stacks (callouts restart at chapter boundaries only;
+        subsection headings do NOT reset, because a footnote body can follow a subsection
+        heading whose section intro paragraph carries the callout).
       - Paragraph containing callout C: push (block_idx, is_table=False) onto stack[C].
       - Table containing callout C: push (block_idx, is_table=True) onto stack[C].
         Tables may span multiple pages after _merge_continued_tables, so they carry no
@@ -217,7 +219,8 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     This correctly handles:
       - cross-page table spans (N-page tables, any N);
       - multiple same-callout occurrences per section (LIFO gives nearest-first);
-      - paragraph callouts staying same-page (prevents false cross-page matches).
+      - paragraph callouts staying same-page (prevents false cross-page matches);
+      - callout in chapter-intro paragraph before first subsection heading.
     """
     from collections import defaultdict
 
@@ -233,7 +236,7 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     stacks: dict[str, list[tuple[int, bool]]] = defaultdict(list)
 
     for i, block in enumerate(result):
-        if isinstance(block, Heading):
+        if isinstance(block, Heading) and block.level == 1:
             stacks.clear()
 
         elif isinstance(block, Paragraph):

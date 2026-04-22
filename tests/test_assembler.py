@@ -57,16 +57,33 @@ def test_no_pairing_paragraph_prev_page() -> None:
 
 
 def test_no_pairing_across_heading_boundary() -> None:
-    """Footnote on page N must not pair past a heading boundary."""
+    """Footnote must not pair past a level-1 chapter heading boundary."""
     blocks: list[Block] = [
         _table("<table><td>cell①</td></table>", page=4),
-        _heading("New Section", page=4),
+        _heading("New Section", page=4, level=1),
         _fn("①", page=4),
     ]
     result = _pair_footnotes(blocks)
     fn = result[2]
     assert isinstance(fn, Footnote)
     assert not fn.paired
+
+
+def test_pairing_past_subsection_heading() -> None:
+    """Callout in chapter-intro paragraph pairs with footnote even when subsection headings intervene."""
+    blocks: list[Block] = [
+        _para("chapter intro with callout ①", page=5),
+        _heading("第一节", page=5, level=2),
+        _heading("一、子节", page=5, level=3),
+        _fn("①", page=5),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[3]
+    assert isinstance(fn, Footnote)
+    assert fn.paired
+    para = result[0]
+    assert isinstance(para, Paragraph)
+    assert "\x02fn-5-①\x03" in para.text
 
 
 def test_pairing_same_page() -> None:
