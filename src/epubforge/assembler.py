@@ -242,7 +242,7 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
         elif isinstance(block, Paragraph):
             for c in callout_symbols:
                 if c in block.text:
-                    stacks[c].append((i, False))
+                    stacks[c].append((i, block.cross_page))
 
         elif isinstance(block, Table):
             for c in callout_symbols:
@@ -308,7 +308,7 @@ def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> None:
         if isinstance(candidate, Footnote):
             continue
         if isinstance(candidate, Paragraph):
-            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text)})
+            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text), "cross_page": True})
             return
         break
     log.warning("first_block_continues_prev_tail=True but no anchor Paragraph found; dropping continuation")

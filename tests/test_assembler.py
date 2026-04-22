@@ -98,6 +98,29 @@ def test_pairing_same_page() -> None:
     assert "\x02fn-4-①\x03" in para.text
 
 
+def _cross_page_para(text: str, page: int) -> Paragraph:
+    return Paragraph(text=text, cross_page=True, provenance=Provenance(page=page, source="llm"))
+
+
+def test_cross_page_paragraph_pairs_across_page() -> None:
+    """Cross-page paragraph (started on p14, merged into p14) pairs with footnote on p15."""
+    blocks: list[Block] = [_cross_page_para("text spanning pages ①", page=14), _fn("①", page=15)]
+    result = _pair_footnotes(blocks)
+    fn = result[1]
+    assert isinstance(fn, Footnote)
+    assert fn.paired
+    para = result[0]
+    assert isinstance(para, Paragraph)
+    assert "\x02fn-15-①\x03" in para.text
+
+
+def test_normal_paragraph_still_requires_same_page() -> None:
+    """Non-cross-page paragraph must not pair with footnote on a different page."""
+    blocks: list[Block] = [_para("text ①", page=14), _fn("①", page=15)]
+    result = _pair_footnotes(blocks)
+    assert not result[1].paired  # type: ignore[union-attr]
+
+
 def test_lifo_two_tables_same_callout() -> None:
     """LIFO: two tables both containing ① — footnote pairs with the most recent one."""
     blocks: list[Block] = [

@@ -22,6 +22,7 @@ class Paragraph(BaseModel):
     role: str = "body"
     display_lines: list[str] | None = None
     style_class: str | None = None
+    cross_page: bool = False  # True when paragraph spans a page break (assembled from continuation)
     provenance: Provenance
 
 
