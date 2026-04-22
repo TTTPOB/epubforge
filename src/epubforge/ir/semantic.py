@@ -1,12 +1,71 @@
-"""Semantic IR — Pydantic v2 models. Implement fully in epubforge-7yd."""
+"""Semantic IR — Pydantic v2 models."""
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
 
 from epubforge.ir.book_memory import BookMemory
+
+
+BLOCK_INIT_NAMESPACE = "block-init"
+BLOCK_RUNTIME_NAMESPACE = "block-runtime"
+CHAPTER_INIT_NAMESPACE = "chapter-init"
+CHAPTER_RUNTIME_NAMESPACE = "chapter-runtime"
+
+
+def compute_uid(seed: str, *components: object) -> str:
+    """Compute a short deterministic uid in a namespace-scoped hash domain."""
+    payload = "\x1f".join([seed, *(str(component) for component in components)])
+    return hashlib.sha256(payload.encode("utf-8")).digest()[:6].hex()
+
+
+def compute_block_uid_init(
+    seed: str,
+    ch_pos: int,
+    block_pos: int,
+    kind: str,
+    text_head: str,
+    page: int | str,
+) -> str:
+    return compute_uid(
+        seed,
+        BLOCK_INIT_NAMESPACE,
+        ch_pos,
+        block_pos,
+        kind,
+        text_head[:32],
+        page,
+    )
+
+
+def compute_chapter_uid_init(seed: str, ch_pos: int, title: str) -> str:
+    return compute_uid(seed, CHAPTER_INIT_NAMESPACE, ch_pos, title[:64])
+
+
+def compute_block_uid_runtime(
+    seed: str,
+    chapter_uid: str,
+    after_uid: str | None,
+    kind: str,
+    text_head: str,
+    op_id: str,
+) -> str:
+    return compute_uid(
+        seed,
+        BLOCK_RUNTIME_NAMESPACE,
+        chapter_uid,
+        after_uid or "HEAD",
+        kind,
+        text_head[:32],
+        op_id,
+    )
+
+
+def compute_chapter_uid_runtime(seed: str, op_id: str, new_title: str) -> str:
+    return compute_uid(seed, CHAPTER_RUNTIME_NAMESPACE, op_id, new_title[:64])
 
 
 class Provenance(BaseModel):
@@ -16,7 +75,11 @@ class Provenance(BaseModel):
     raw_ref: str | None = None
 
 
-class Paragraph(BaseModel):
+class _UidMixin(BaseModel):
+    uid: str | None = None
+
+
+class Paragraph(_UidMixin):
     kind: Literal["paragraph"] = "paragraph"
     text: str
     role: str = "body"
@@ -26,7 +89,7 @@ class Paragraph(BaseModel):
     provenance: Provenance
 
 
-class Heading(BaseModel):
+class Heading(_UidMixin):
     kind: Literal["heading"] = "heading"
     level: int = 1
     text: str
@@ -35,7 +98,7 @@ class Heading(BaseModel):
     provenance: Provenance
 
 
-class Footnote(BaseModel):
+class Footnote(_UidMixin):
     kind: Literal["footnote"] = "footnote"
     callout: str
     text: str
@@ -45,7 +108,7 @@ class Footnote(BaseModel):
     provenance: Provenance
 
 
-class Figure(BaseModel):
+class Figure(_UidMixin):
     kind: Literal["figure"] = "figure"
     caption: str = ""
     image_ref: str | None = None
@@ -53,7 +116,7 @@ class Figure(BaseModel):
     provenance: Provenance
 
 
-class Table(BaseModel):
+class Table(_UidMixin):
     kind: Literal["table"] = "table"
     html: str
     table_title: str = ""
@@ -64,7 +127,7 @@ class Table(BaseModel):
     provenance: Provenance
 
 
-class Equation(BaseModel):
+class Equation(_UidMixin):
     kind: Literal["equation"] = "equation"
     latex: str = ""
     image_ref: str | None = None
@@ -79,6 +142,7 @@ Block = Annotated[
 
 
 class Chapter(BaseModel):
+    uid: str | None = None
     title: str
     level: int = 1
     id: str | None = None
@@ -86,6 +150,9 @@ class Chapter(BaseModel):
 
 
 class Book(BaseModel):
+    version: int = 0
+    initialized_at: str = ""
+    uid_seed: str = ""
     title: str
     authors: list[str] = Field(default_factory=list)
     language: str = "en"

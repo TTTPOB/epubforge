@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import typing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -18,12 +17,19 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, create_model
 
 from epubforge.config import Config
+from epubforge.fields import iter_block_text_fields
 from epubforge.ir.semantic import Book, Footnote, Paragraph, Table
+from epubforge.markers import (
+    FN_MARKER_FULL_RE as _FN_MARKER_FULL_RE,
+    has_raw_callout as _has_raw_callout,
+    make_fn_marker,
+    replace_first_raw as _replace_first_raw,
+    replace_nth_raw as _replace_nth_raw,
+    strip_markers as _shared_strip_markers,
+)
+from epubforge.query import find_marker_source as _query_find_marker_source
 
 log = logging.getLogger(__name__)
-
-_FN_MARKER_RE = re.compile(r"\x02[^\x03]*\x03")
-_FN_MARKER_FULL_RE = re.compile(r"\x02fn-(\d+)-([^\x03]*)\x03")
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +74,7 @@ def _parse_bid(bid: str) -> tuple[int, int] | None:
 # ---------------------------------------------------------------------------
 
 def _strip_markers(text: str) -> str:
-    return _FN_MARKER_RE.sub("", text)
-
-
-def _has_raw_callout(text: str, callout: str) -> bool:
-    return callout in _strip_markers(text)
+    return _shared_strip_markers(text)
 
 
 def _count_raw_callout(text: str, callout: str) -> int:
@@ -84,7 +86,7 @@ def _block_texts(block) -> list[str]:
     if isinstance(block, Paragraph):
         return [block.text]
     if isinstance(block, Table):
-        return [block.html, block.table_title]
+        return [value for field, value in iter_block_text_fields(block) if field in {"html", "table_title"}]
     return []
 
 
@@ -107,13 +109,10 @@ def _update_block_text(block, old_text: str, new_text: str):
 
 def _find_marker_source(book: Book, fn: Footnote) -> tuple[int, int] | None:
     """Return (ch_idx, b_idx) of block containing this FN's marker, or None."""
-    marker = f"\x02fn-{fn.provenance.page}-{fn.callout}\x03"
-    for ch_idx, chapter in enumerate(book.chapters):
-        for b_idx, block in enumerate(chapter.blocks):
-            for text in _block_texts(block):
-                if marker in text:
-                    return ch_idx, b_idx
-    return None
+    match = _query_find_marker_source(book, fn)
+    if match is None:
+        return None
+    return match.chapter_idx, match.block_idx
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +134,13 @@ def _build_fn_descriptor(fn: Footnote, ch_idx: int, b_idx: int, book: Book) -> d
         d["current_source_block_id"] = _bid(src_ch, src_b)
         # Include the marker's context so LLM can verify the pairing semantically
         src_block = book.chapters[src_ch].blocks[src_b]
-        marker = f"\x02fn-{fn.provenance.page}-{fn.callout}\x03"
+        marker = make_fn_marker(fn.provenance.page, fn.callout)
         for text in _block_texts(src_block):
             if marker in text:
                 idx = text.find(marker)
                 # Strip ALL markers for readability, replace ours with [★callout]
-                clean = _FN_MARKER_RE.sub("", text[:idx]) + f"[★{fn.callout}]" + _FN_MARKER_RE.sub("", text[idx + len(marker):])
-                start = max(0, len(_FN_MARKER_RE.sub("", text[:idx])) - 100)
+                clean = _strip_markers(text[:idx]) + f"[★{fn.callout}]" + _strip_markers(text[idx + len(marker):])
+                start = max(0, len(_strip_markers(text[:idx])) - 100)
                 end = start + 100 + len(fn.callout) + 4 + 100
                 d["current_source_context"] = clean[start:end]
                 break
@@ -352,8 +351,6 @@ def _apply_fn_ops(
     ch_idx: int,
     report: list[dict],
 ) -> int:
-    from epubforge.assembler import _replace_nth_raw, _replace_first_raw
-
     applied = 0
     chapter = book.chapters[ch_idx]
 
@@ -397,7 +394,7 @@ def _apply_fn_ops(
             )
             continue
 
-        marker = f"\x02fn-{fn_block.provenance.page}-{fn_block.callout}\x03"
+        marker = make_fn_marker(fn_block.provenance.page, fn_block.callout)
 
         if op.op == "pair":
             if fn_block.paired:

@@ -20,6 +20,11 @@ from epubforge.ir.semantic import (
     Provenance,
     Table,
 )
+from epubforge.markers import (
+    has_raw_callout as _has_raw_callout,
+    replace_all_raw as _replace_all_raw,
+    replace_first_raw as _replace_first_raw,
+)
 
 log = logging.getLogger(__name__)
 
@@ -212,52 +217,6 @@ def _absorb_table_text(blocks: list[Block]) -> list[Block]:
             continue
         i += 1
     return result
-
-
-_FN_MARKER_RE = re.compile(r"\x02[^\x03]*\x03")
-
-
-def _has_raw_callout(text: str, callout: str) -> bool:
-    """Return True if callout appears in text outside any existing \\x02...\\x03 marker."""
-    return callout in _FN_MARKER_RE.sub("", text)
-
-
-def _replace_first_raw(text: str, callout: str, replacement: str) -> str:
-    """Replace the first occurrence of callout in text that is not inside a \\x02...\\x03 marker."""
-    done = [False]
-    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
-
-    def _sub(m: re.Match[str]) -> str:
-        if done[0] or m.group() != callout:
-            return m.group()
-        done[0] = True
-        return replacement
-
-    return pattern.sub(_sub, text)
-
-
-def _replace_all_raw(text: str, callout: str, replacement: str) -> str:
-    """Replace all occurrences of callout in text that are not inside a \\x02...\\x03 marker."""
-    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
-
-    def _sub(m: re.Match[str]) -> str:
-        return replacement if m.group() == callout else m.group()
-
-    return pattern.sub(_sub, text)
-
-
-def _replace_nth_raw(text: str, callout: str, replacement: str, n: int) -> str:
-    """Replace the n-th (0-based) raw occurrence of callout outside \\x02...\\x03 markers."""
-    counter = [-1]
-    pattern = re.compile(r"\x02[^\x03]*\x03|" + re.escape(callout))
-
-    def _sub(m: re.Match[str]) -> str:
-        if m.group() != callout:
-            return m.group()
-        counter[0] += 1
-        return replacement if counter[0] == n else m.group()
-
-    return pattern.sub(_sub, text)
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:

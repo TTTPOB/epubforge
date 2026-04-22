@@ -19,9 +19,14 @@ from epubforge.ir.semantic import (
     Provenance,
     Table,
     VLMPageOutput,
+    VLMFootnote,
     VLMParagraph,
     VLMTable,
-    VLMFootnote,
+    compute_block_uid_init,
+    compute_block_uid_runtime,
+    compute_chapter_uid_init,
+    compute_chapter_uid_runtime,
+    compute_uid,
 )
 
 
@@ -90,6 +95,8 @@ class TestBook:
         restored = Book.model_validate_json(b.model_dump_json())
         assert restored.chapters[0].title == "Ch1"
         assert restored.chapters[0].blocks[0].provenance.source == "llm"
+        assert restored.version == 0
+        assert restored.uid_seed == ""
 
     def test_block_discriminator(self) -> None:
         data = {
@@ -167,6 +174,40 @@ class TestVLMPageOutput:
         }
         out = VLMPageOutput.model_validate(raw)
         assert isinstance(out.blocks[0], VLMFootnote)
+
+
+class TestUidHelpers:
+    def test_compute_uid_is_deterministic(self) -> None:
+        first = compute_uid("seed", "a", 1, "b")
+        second = compute_uid("seed", "a", 1, "b")
+        assert first == second
+        assert len(first) == 12
+
+    def test_init_and_runtime_namespaces_do_not_overlap(self) -> None:
+        block_init = compute_block_uid_init("seed", 0, 1, "paragraph", "hello", 3)
+        block_runtime = compute_block_uid_runtime("seed", "ch-1", "blk-1", "paragraph", "hello", "op-1")
+        chapter_init = compute_chapter_uid_init("seed", 0, "Intro")
+        chapter_runtime = compute_chapter_uid_runtime("seed", "op-1", "Intro")
+
+        assert block_init != block_runtime
+        assert chapter_init != chapter_runtime
+
+    def test_models_accept_uid_fields(self) -> None:
+        chapter = Chapter(
+            uid="ch-1",
+            title="Intro",
+            blocks=[Paragraph(uid="p-1", text="Hello", provenance=_prov())],
+        )
+        book = Book(
+            title="Book",
+            version=2,
+            initialized_at="2026-04-23T00:00:00Z",
+            uid_seed="seed-1",
+            chapters=[chapter],
+        )
+        assert book.chapters[0].uid == "ch-1"
+        assert book.chapters[0].blocks[0].uid == "p-1"
+        assert book.version == 2
 
 
 class TestAssemblerPagePropagation:
