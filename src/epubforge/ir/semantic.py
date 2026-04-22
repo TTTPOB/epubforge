@@ -31,6 +31,7 @@ class Heading(BaseModel):
     level: int = 1
     text: str
     id: str | None = None
+    style_class: str | None = None
     provenance: Provenance
 
 

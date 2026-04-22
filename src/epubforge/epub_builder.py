@@ -31,6 +31,7 @@ _CSS_BASE = """
 body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
 h1 { font-size: 1.8em; margin-top: 2em; }
 h2 { font-size: 1.4em; margin-top: 1.5em; }
+h2.centered { text-align: center; }
 h3 { font-size: 1.2em; margin-top: 1.2em; }
 p { margin: 0.5em 0; text-indent: 1.5em; }
 figure { margin: 1em 0; text-align: center; }
@@ -47,6 +48,7 @@ p.poem { white-space: pre-wrap; text-indent: 0; text-align: center; margin: 1em 
 p.caption { font-size: 0.88em; color: #555; text-indent: 0; }
 p.attribution { text-align: right; font-style: italic; text-indent: 0; }
 p.dedication { text-align: center; font-style: italic; margin: 2em 0; }
+p.centered-bold { text-align: center; font-weight: bold; text-indent: 0; }
 p.preface-note { font-size: 0.9em; margin: 0.5em 1em; text-indent: 0; }
 """
 
@@ -333,7 +335,8 @@ def _render_chapter(
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
             id_attr = f' id="{_esc(block.id)}"' if block.id else ""
-            parts.append(f"<{tag}{id_attr}>{_esc(block.text)}</{tag}>")
+            cls_attr = f' class="{_esc(block.style_class)}"' if block.style_class else ""
+            parts.append(f"<{tag}{id_attr}{cls_attr}>{_esc(block.text)}</{tag}>")
         elif isinstance(block, Footnote):
             key = (block.provenance.page, block.callout)
             if borrowed_keys and key in borrowed_keys:
