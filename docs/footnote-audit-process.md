@@ -437,6 +437,58 @@ when the same callout symbol appears in a table header and a body paragraph on t
 **Fix**: Identify which occurrence is the true callout position (usually the prose paragraph, not
 the table header). Remove the marker from the table HTML.
 
+### Pattern F: Dual-callout — same footnote referenced in both paragraph and table
+
+**Trigger**: A footnote on page N is referenced twice on the same page: once in the body paragraph
+text, and once in a table cell or column header on the same page. This is valid book typography —
+the same footnote can be called out at multiple positions (e.g., the paragraph defines the term,
+and the table column header also marks it with the same symbol).
+
+The assembler correctly inserts `fn-PAGE-CALLOUT` markers in **both** blocks. The duplicate-marker
+detection code then (incorrectly) treats this as an assembler bug and removes the table's marker.
+
+**Symptom**: After the "duplicate marker" fix, the table cell still has a raw `①` that appears in
+the orphan callout scan. The paragraph block correctly has the marker. The footnote itself is
+`paired=True` (because at least one marker survives).
+
+**How to distinguish from Pattern D (table column label)**:
+- **Dual-callout (this pattern)**: The ① appears in a data cell or column-definition header where
+  it acts as an editorial footnote explaining that column/value. The FN body is meaningful and
+  directly explains the column or term.
+- **Column label (Pattern D)**: The callout symbols `①②③` appear as sequential labels across
+  multiple adjacent columns (e.g., ① ② ③ as column A, B, C labels with no meaningful FN body
+  per symbol). The same symbol might appear multiple times in the table as a structural label.
+
+**Fix**: Do NOT remove the marker from the table block. Restore it if it was incorrectly removed:
+```python
+b_table.html = b_table.html.replace('①', '\x02fn-PAGE-①\x03', 1)
+```
+
+**Lesson**: When the duplicate-marker scan shows a paragraph + table sharing the same marker,
+always verify semantics before removing. If the table cell containing the callout has meaningful
+content that corresponds to the FN body, keep both markers.
+
+### Pattern G: Cross-page continuation paragraph with delayed callout
+
+**Trigger**: A paragraph spans two physical pages (p92→p93, i.e., `cross_page=True`). The callout
+symbol `①` appears in the p93 portion of the text, but the IR records the block's page as p92
+(the page where the paragraph begins). The assembler uses the block's page number to match
+callouts, so it looks for FN bodies on page 92 but the relevant FN body is on page 93.
+
+**Symptom**: The orphan callout scan reports a raw `①` in a paragraph on page N, but the only
+plausible FN body with callout `①` is on page N+1. No pairing is found.
+
+**Fix**: The marker for a FN body on page N+1 is `fn-(N+1)-①`. Insert this marker at the raw
+callout position and set `Footnote.paired = True`:
+```python
+b_para.text = b_para.text.replace('①', '\x02fn-93-①\x03', 1)
+fn_body.paired = True
+```
+
+**Key distinction**: The marker page number comes from the **FN body's page**, not from the
+callout's block page. A cross-page continuation block on page 92 can legitimately hold a
+`fn-93-①` marker.
+
 ### Pattern E: Marker missing despite `paired=True`
 
 **Trigger**: The assembler sets `paired=True` on the Footnote but the source block's text was
