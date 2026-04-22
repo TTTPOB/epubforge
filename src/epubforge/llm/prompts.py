@@ -112,9 +112,16 @@ that starts mid-sentence):
     continuation portion. The caller will append it to the pending footnote. Do NOT repeat
     the pending tail text.
 
-- SEPARATE — any of the above fails:
-  - Set `first_footnote_continues_prev_footnote=false`.
-  - Process every footnote on this page normally (with their actual callout markers).
+- SEPARATE — set first_footnote_continues_prev_footnote=false when ANY of:
+  - This page's first footnote has its OWN callout marker (①, ②, [1], *, etc.)
+    AND that callout differs from the pending tail's callout. A new callout cannot
+    continue a previous footnote.
+  - The [PENDING_FOOTNOTE] text already reads as a complete, self-contained sentence
+    (ends with terminal punctuation and no dangling clause). A complete note cannot
+    continue. Judge this by reading the tail, not by punctuation alone — some real
+    continuations can start mid-clause after an abbreviation period (e.g. "Dr.", "U.S.").
+  - The content on this page clearly starts a new topic unrelated to the pending tail.
+  In that case, process every footnote on this page normally (with their actual callout markers).
 
 Never emit any [PENDING_FOOTNOTE ...] marker in your output text.\
 """

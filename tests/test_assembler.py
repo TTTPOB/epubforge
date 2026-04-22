@@ -1,6 +1,6 @@
 """Tests for assembler._pair_footnotes page-scoped pairing."""
 
-from epubforge.assembler import _pair_footnotes
+from epubforge.assembler import _is_continuation_plausible, _pair_footnotes
 from epubforge.ir.semantic import Block, Footnote, Heading, Paragraph, Provenance, Table
 
 
@@ -12,28 +12,39 @@ def _fn(callout: str, page: int) -> Footnote:
     return Footnote(callout=callout, text="note text", provenance=Provenance(page=page, source="llm"))
 
 
-def test_no_pairing_across_pages() -> None:
-    """Footnote on page N must not pair with paragraph on page N-1."""
-    blocks: list[Block] = [_para("Some text ①", page=3), _fn("①", page=4)]
-    result = _pair_footnotes(blocks)
-    fn = result[1]
-    assert isinstance(fn, Footnote)
-    assert not fn.paired
-    para = result[0]
-    assert isinstance(para, Paragraph)
-    assert "\x02fn-" not in para.text
-
-
 def _table(html: str, page: int) -> Table:
     return Table(html=html, provenance=Provenance(page=page, source="vlm"))
+
+
+def _merged_table(html: str, page: int) -> Table:
+    """Simulate a table merged by _merge_continued_tables (multi_page=True)."""
+    return Table(html=html, multi_page=True, provenance=Provenance(page=page, source="vlm"))
 
 
 def _heading(text: str, page: int, level: int = 1) -> Heading:
     return Heading(text=text, level=level, provenance=Provenance(page=page, source="vlm"))
 
 
+def _cross_page_para(text: str, page: int) -> Paragraph:
+    return Paragraph(text=text, cross_page=True, provenance=Provenance(page=page, source="llm"))
+
+
+# --- same-page pairing ---
+
+def test_pairing_same_page() -> None:
+    """Footnote on page N pairs with paragraph on page N."""
+    blocks: list[Block] = [_para("Some text ①", page=4), _fn("①", page=4)]
+    result = _pair_footnotes(blocks)
+    fn = result[1]
+    assert isinstance(fn, Footnote)
+    assert fn.paired
+    para = result[0]
+    assert isinstance(para, Paragraph)
+    assert "\x02fn-4-①\x03" in para.text
+
+
 def test_pairing_table_prev_page() -> None:
-    """Footnote on page N pairs with a table on page N-1 (cross-page table spans)."""
+    """Regular table on page N-1 pairs with footnote on page N via P0 fallback."""
     blocks: list[Block] = [
         _table("<table><td>cell①</td></table>", page=3),
         _fn("①", page=4),
@@ -45,15 +56,6 @@ def test_pairing_table_prev_page() -> None:
     tbl = result[0]
     assert isinstance(tbl, Table)
     assert "\x02fn-4-①\x03" in tbl.html
-
-
-def test_no_pairing_paragraph_prev_page() -> None:
-    """Footnote on page N must not pair with a paragraph on page N-1."""
-    blocks: list[Block] = [_para("Some text ①", page=3), _fn("①", page=4)]
-    result = _pair_footnotes(blocks)
-    fn = result[1]
-    assert isinstance(fn, Footnote)
-    assert not fn.paired
 
 
 def test_no_pairing_across_heading_boundary() -> None:
@@ -86,24 +88,41 @@ def test_pairing_past_subsection_heading() -> None:
     assert "\x02fn-5-①\x03" in para.text
 
 
-def test_pairing_same_page() -> None:
-    """Footnote on page N pairs with paragraph on page N."""
-    blocks: list[Block] = [_para("Some text ①", page=4), _fn("①", page=4)]
+# --- cross-page pairing ---
+
+def test_same_page_wins_over_prev_page_fallback() -> None:
+    """Same-page paragraph (P3) beats prev-page paragraph (P0) for LIFO selection."""
+    blocks: list[Block] = [
+        _para("Some text ①", page=3),
+        _para("Also text ①", page=4),
+        _fn("①", page=4),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[2]
+    assert isinstance(fn, Footnote) and fn.paired
+    # p4 paragraph (P3) wins
+    para_p4 = result[1]
+    assert isinstance(para_p4, Paragraph)
+    assert "\x02fn-4-①\x03" in para_p4.text
+    # p3 paragraph (P0 candidate, not selected) keeps raw callout
+    para_p3 = result[0]
+    assert isinstance(para_p3, Paragraph)
+    assert "\x02fn-" not in para_p3.text
+
+
+def test_prev_page_fallback_when_no_same_page() -> None:
+    """When no same-page candidate exists, paragraph on prev page is matched via P0 fallback."""
+    blocks: list[Block] = [_para("text ①", page=14), _fn("①", page=15)]
     result = _pair_footnotes(blocks)
     fn = result[1]
-    assert isinstance(fn, Footnote)
-    assert fn.paired
+    assert isinstance(fn, Footnote) and fn.paired
     para = result[0]
     assert isinstance(para, Paragraph)
-    assert "\x02fn-4-①\x03" in para.text
-
-
-def _cross_page_para(text: str, page: int) -> Paragraph:
-    return Paragraph(text=text, cross_page=True, provenance=Provenance(page=page, source="llm"))
+    assert "\x02fn-15-①\x03" in para.text
 
 
 def test_cross_page_paragraph_pairs_across_page() -> None:
-    """Cross-page paragraph (started on p14, merged into p14) pairs with footnote on p15."""
+    """Cross-page paragraph (P1) pairs with footnote on next page."""
     blocks: list[Block] = [_cross_page_para("text spanning pages ①", page=14), _fn("①", page=15)]
     result = _pair_footnotes(blocks)
     fn = result[1]
@@ -114,12 +133,58 @@ def test_cross_page_paragraph_pairs_across_page() -> None:
     assert "\x02fn-15-①\x03" in para.text
 
 
-def test_normal_paragraph_still_requires_same_page() -> None:
-    """Non-cross-page paragraph must not pair with footnote on a different page."""
-    blocks: list[Block] = [_para("text ①", page=14), _fn("①", page=15)]
+def test_cross_page_paragraph_does_not_steal_same_page_fn() -> None:
+    """Regular same-page paragraph (P3) beats cross-page paragraph (P2) for same-page FN."""
+    blocks: list[Block] = [
+        _para("regular p64 ①", page=64),
+        _cross_page_para("continuation p64 ①", page=64),
+        _fn("①", page=64),
+    ]
     result = _pair_footnotes(blocks)
-    assert not result[1].paired  # type: ignore[union-attr]
+    fn = result[2]
+    assert isinstance(fn, Footnote) and fn.paired
+    # Regular para (P3) gets marker
+    assert "\x02fn-64-①\x03" in result[0].text  # type: ignore[union-attr]
+    # Cross-page para keeps raw callout
+    assert "\x02fn-" not in result[1].text  # type: ignore[union-attr]
 
+
+def test_cross_page_paragraph_pairs_with_next_page_fn() -> None:
+    """Cross-page paragraph (P1) pairs with next-page FN after regular para consumed same-page FN."""
+    blocks: list[Block] = [
+        _para("regular p64 ①", page=64),
+        _cross_page_para("continuation p64 ①", page=64),
+        _fn("①", page=64),
+        _fn("①", page=65),
+    ]
+    result = _pair_footnotes(blocks)
+    fn64 = result[2]
+    fn65 = result[3]
+    assert isinstance(fn64, Footnote) and fn64.paired
+    assert isinstance(fn65, Footnote) and fn65.paired
+    # Regular para → fn64 (P3)
+    assert "\x02fn-64-①\x03" in result[0].text  # type: ignore[union-attr]
+    # Cross-page para → fn65 (P1)
+    assert "\x02fn-65-①\x03" in result[1].text  # type: ignore[union-attr]
+
+
+def test_merged_table_does_not_steal_same_page_paragraph() -> None:
+    """Regular paragraph (P3) beats merged multi-page table (P2) for same-page FN."""
+    blocks: list[Block] = [
+        _para("regular p83 ①", page=83),
+        _merged_table("<table><td>cell①</td></table>", page=83),
+        _fn("①", page=83),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[2]
+    assert isinstance(fn, Footnote) and fn.paired
+    # Regular para (P3) gets marker
+    assert "\x02fn-83-①\x03" in result[0].text  # type: ignore[union-attr]
+    # Merged table keeps raw ①
+    assert "\x02fn-" not in result[1].html  # type: ignore[union-attr]
+
+
+# --- LIFO and multi-callout ---
 
 def test_lifo_two_tables_same_callout() -> None:
     """LIFO: two tables both containing ① — footnote pairs with the most recent one."""
@@ -144,10 +209,6 @@ def test_lifo_two_tables_same_callout() -> None:
 
 def test_three_page_spanning_table() -> None:
     """Table merged across pages 3-5 pairs with footnote on page 5 (large page gap)."""
-    # After _merge_continued_tables the merged table has provenance.page = 3
-    # but the callout ① was in the continuation rows (page 5 data).
-    # The LIFO stack must ignore page distance for tables.
-    from epubforge.ir.semantic import Provenance
     merged_table = Table(
         html="<table><td>row①</td></table>",
         provenance=Provenance(page=3, source="vlm"),
@@ -167,14 +228,67 @@ def test_lifo_multiple_footnote_bodies_same_callout() -> None:
     blocks: list[Block] = [
         _para("text ① more", page=5),
         _para("also ① here", page=6),
-        _fn("①", page=5),  # pairs with page-5 paragraph (same-page)
-        _fn("①", page=6),  # pairs with page-6 paragraph (same-page)
+        _fn("①", page=5),  # pairs with page-5 paragraph (same-page P3)
+        _fn("①", page=6),  # pairs with page-6 paragraph (same-page P3)
     ]
     result = _pair_footnotes(blocks)
     fn5 = result[2]
     fn6 = result[3]
     assert isinstance(fn5, Footnote) and fn5.paired
     assert isinstance(fn6, Footnote) and fn6.paired
-    # Each paragraph got its own marker
     assert "\x02fn-5-①\x03" in result[0].text  # type: ignore[union-attr]
     assert "\x02fn-6-①\x03" in result[1].text  # type: ignore[union-attr]
+
+
+def test_regular_table_wins_tie_with_orphan_paragraph() -> None:
+    """Regular table (LIFO tie-break over para) wins ① FN; para gets ② FN. Para ①s stay raw."""
+    blocks: list[Block] = [
+        _para("text ①①②", page=34),
+        _table("<table><td>①</td></table>", page=34),
+        _fn("①", page=34),
+        _fn("②", page=34),
+    ]
+    result = _pair_footnotes(blocks)
+    fn1 = result[2]
+    fn2 = result[3]
+    assert isinstance(fn1, Footnote) and fn1.paired
+    assert isinstance(fn2, Footnote) and fn2.paired
+    # Table gets fn(①) (LIFO: table pushed after para, scanned first at same P3 priority)
+    tbl = result[1]
+    assert isinstance(tbl, Table)
+    assert "\x02fn-34-①\x03" in tbl.html
+    # Para gets fn(②)
+    para = result[0]
+    assert isinstance(para, Paragraph)
+    assert "\x02fn-34-②\x03" in para.text
+    # Para's two ① remain raw (FN was consumed by table)
+    assert "①①" in para.text
+
+
+# --- first_footnote_continues_prev_footnote hard filter ---
+
+def test_fn_continuation_rejected_on_callout_mismatch() -> None:
+    """_is_continuation_plausible rejects when callouts differ (VLM self-contradiction)."""
+    prev = Footnote(callout="⑧", text="some text.", provenance=Provenance(page=10, source="vlm"))
+    cont = Footnote(callout="①", text="new fn.", provenance=Provenance(page=11, source="vlm"))
+    assert not _is_continuation_plausible(prev, cont)
+
+
+def test_fn_continuation_accepted_when_callout_empty() -> None:
+    """_is_continuation_plausible accepts when cont callout is empty (VLM prompt contract)."""
+    prev = Footnote(callout="⑧", text="text without end", provenance=Provenance(page=10, source="vlm"))
+    cont = Footnote(callout="", text="continuation.", provenance=Provenance(page=11, source="vlm"))
+    assert _is_continuation_plausible(prev, cont)
+
+
+def test_fn_continuation_accepted_when_prev_ends_with_period() -> None:
+    """_is_continuation_plausible does not reject based on trailing period (e.g. 'Dr.' abbreviation)."""
+    prev = Footnote(callout="⑧", text="See Dr.", provenance=Provenance(page=10, source="vlm"))
+    cont = Footnote(callout="", text="Smith's findings.", provenance=Provenance(page=11, source="vlm"))
+    assert _is_continuation_plausible(prev, cont)
+
+
+def test_fn_continuation_rejected_when_prev_is_none() -> None:
+    """_is_continuation_plausible rejects when there is no preceding footnote."""
+    cont = Footnote(callout="", text="continuation.", provenance=Provenance(page=1, source="vlm"))
+    assert not _is_continuation_plausible(None, cont)

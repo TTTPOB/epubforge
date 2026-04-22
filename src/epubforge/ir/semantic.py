@@ -57,6 +57,7 @@ class Table(BaseModel):
     table_title: str = ""
     caption: str = ""
     continuation: bool = False
+    multi_page: bool = False  # True when this table was merged from cross-page continuations
     bbox: list[float] | None = None
     provenance: Provenance
 

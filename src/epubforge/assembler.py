@@ -49,8 +49,18 @@ def assemble(work_dir: Path, out_path: Path) -> None:
             if first_fn_idx is not None:
                 fn_cont = parsed[first_fn_idx]
                 assert isinstance(fn_cont, Footnote)
-                _append_to_last_footnote(all_blocks, fn_cont.text)
-                parsed = [b for i, b in enumerate(parsed) if i != first_fn_idx]
+                prev_fn = _find_last_footnote(all_blocks)
+                if _is_continuation_plausible(prev_fn, fn_cont):
+                    _append_to_last_footnote(all_blocks, fn_cont.text)
+                    parsed = [b for i, b in enumerate(parsed) if i != first_fn_idx]
+                else:
+                    log.warning(
+                        "refusing first_footnote_continues_prev_footnote for %s: "
+                        "prev callout=%r cont callout=%r (callout mismatch)",
+                        uf.name,
+                        prev_fn.callout if prev_fn else None,
+                        fn_cont.callout,
+                    )
             else:
                 log.warning(
                     "first_footnote_continues_prev_footnote=True but no Footnote in unit %s",
@@ -152,6 +162,7 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
                     "html": _splice_table_html(prev_tbl.html, block.html),
                     "table_title": prev_tbl.table_title or block.table_title,
                     "caption": prev_tbl.caption or block.caption,
+                    "multi_page": True,
                 })
                 log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev_tbl.provenance.page)
                 continue
@@ -246,24 +257,20 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
     Pass 1 collects all callout symbols from unpaired Footnote blocks.
     Pass 2 forward-scans:
-      - Heading level=1: clear all stacks (callouts restart at chapter boundaries only;
-        subsection headings do NOT reset, because a footnote body can follow a subsection
-        heading whose section intro paragraph carries the callout).
-      - Paragraph containing raw callout C (outside an existing marker): push
-        (block_idx, is_table=False) onto stack[C].
-      - Table containing raw callout C: push (block_idx, is_table=True) onto stack[C].
-        Tables may span multiple pages after _merge_continued_tables, so they carry no
-        page constraint.
-      - Footnote with callout C (unpaired): pop from stack[C] (LIFO — most recent first).
-        Paragraphs are only paired when on the same page as the footnote body; tables
-        are paired regardless of page distance.
+      - Heading level=1: clear all stacks (callouts restart at chapter boundaries only).
+      - Paragraph/Table containing raw callout C: push (block_idx, multi_page) onto stack[C].
+        multi_page=True for cross-page paragraphs and cross-page merged tables.
+      - Footnote with callout C (unpaired): select best source by 4-level priority (LIFO
+        within each priority tier):
+          P3 — same-page, not multi_page (regular paragraph or single-page table)
+          P2 — same-page, multi_page (cross-page paragraph or merged table)
+          P1 — prev-page, multi_page (cross-page continuation scenario)
+          P0 — prev-page, not multi_page (book layout anomaly fallback)
 
-    This correctly handles:
-      - cross-page table spans (N-page tables, any N);
-      - multiple same-callout occurrences per section (LIFO gives nearest-first);
-      - paragraph callouts staying same-page (prevents false cross-page matches);
-      - callout in chapter-intro paragraph before first subsection heading;
-      - re-running after heading level corrections (idempotent).
+    Priority P3 is the strongest: once found, search stops immediately (LIFO within P3
+    selects the most recent same-page source). P0 is only reached when P3/P2/P1 all
+    have no candidate, enabling cross-page pairing when the book has layout anomalies
+    (e.g. callout on page N, footnote body on page N+1 with no cross-page flag).
     """
     from collections import defaultdict
 
@@ -278,7 +285,7 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
         return result
 
     # Pass 2: forward scan with per-callout LIFO stacks.
-    # stack entry: (block_index, is_table)
+    # stack entry: (block_index, multi_page)
     stacks: dict[str, list[tuple[int, bool]]] = defaultdict(list)
 
     for i, block in enumerate(result):
@@ -293,7 +300,7 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
         elif isinstance(block, Table):
             for c in callout_symbols:
                 if _has_raw_callout(block.html, c):
-                    stacks[c].append((i, True))
+                    stacks[c].append((i, block.multi_page))
 
         elif isinstance(block, Footnote) and not block.paired:
             callout = block.callout
@@ -304,37 +311,89 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             if not stack:
                 continue
 
-            # LIFO: try from most-recent to oldest
+            # Priority-based LIFO: scan all entries, select the highest-priority source.
+            # Within the same priority, LIFO gives the most-recent entry (scan newest first).
+            best_k, best_priority = None, -1
             for k in range(len(stack) - 1, -1, -1):
-                j, is_table = stack[k]
+                j, multi_page = stack[k]
                 source = result[j]
-                # Paragraphs: same-page constraint; Tables: no page constraint
-                if not is_table and source.provenance.page != fn_page:
+                src_page = source.provenance.page
+
+                # Only check sources with the callout still present
+                if isinstance(source, Paragraph):
+                    if not _has_raw_callout(source.text, callout):
+                        continue
+                elif isinstance(source, Table):
+                    if not _has_raw_callout(source.html, callout):
+                        continue
+                else:
                     continue
-                if isinstance(source, Paragraph) and _has_raw_callout(source.text, callout):
-                    result[j] = source.model_copy(update={
-                        "text": _replace_first_raw(source.text, callout, fn_marker)
-                    })
-                    result[i] = block.model_copy(update={"paired": True})
-                    log.debug(
-                        "Paired footnote callout %r (page %d) into paragraph block %d",
-                        callout, fn_page, j,
-                    )
-                    stack.pop(k)
-                    break
-                if isinstance(source, Table) and _has_raw_callout(source.html, callout):
-                    result[j] = source.model_copy(update={
-                        "html": _replace_all_raw(source.html, callout, fn_marker)
-                    })
-                    result[i] = block.model_copy(update={"paired": True})
-                    log.debug(
-                        "Paired footnote callout %r (page %d) into table block %d (page %d)",
-                        callout, fn_page, j, source.provenance.page,
-                    )
-                    stack.pop(k)
-                    break
+
+                if src_page == fn_page and not multi_page:
+                    priority = 3  # P3: same-page regular source
+                elif src_page == fn_page:
+                    priority = 2  # P2: same-page multi_page source
+                elif src_page < fn_page and multi_page:
+                    priority = 1  # P1: prev-page multi_page (cross-page continuation)
+                elif src_page < fn_page:
+                    priority = 0  # P0: prev-page fallback (book layout anomaly)
+                else:
+                    continue  # future page — not applicable
+
+                if priority > best_priority:
+                    best_priority, best_k = priority, k
+                    if priority == 3:
+                        break  # P3 is maximum; no need to scan further
+
+            if best_k is None:
+                continue
+
+            j, _ = stack[best_k]
+            source = result[j]
+            if isinstance(source, Paragraph):
+                result[j] = source.model_copy(update={
+                    "text": _replace_first_raw(source.text, callout, fn_marker)
+                })
+                log.debug(
+                    "Paired footnote callout %r (page %d) into paragraph block %d (P%d)",
+                    callout, fn_page, j, best_priority,
+                )
+            elif isinstance(source, Table):
+                result[j] = source.model_copy(update={
+                    "html": _replace_all_raw(source.html, callout, fn_marker)
+                })
+                log.debug(
+                    "Paired footnote callout %r (page %d) into table block %d page %d (P%d)",
+                    callout, fn_page, j, source.provenance.page, best_priority,
+                )
+            result[i] = block.model_copy(update={"paired": True})
+            stack.pop(best_k)
 
     return result
+
+
+def _find_last_footnote(blocks: list[Block]) -> Footnote | None:
+    """Return the most recent Footnote in blocks, skipping non-Footnote blocks."""
+    for i in range(len(blocks) - 1, -1, -1):
+        b = blocks[i]
+        if isinstance(b, Footnote):
+            return b
+    return None
+
+
+def _is_continuation_plausible(prev_fn: Footnote | None, cont_fn: Footnote) -> bool:
+    """Hard filter: reject continuation only when callouts explicitly conflict.
+
+    Per VLM prompt contract, a true continuation footnote must have callout="".
+    If both prev and cont have non-empty callouts that differ, the VLM is
+    self-contradicting — reject. All other cases (including semantic completeness)
+    are left to the VLM prompt rather than code heuristics.
+    """
+    if prev_fn is None:
+        return False
+    if cont_fn.callout and prev_fn.callout and cont_fn.callout != prev_fn.callout:
+        return False
+    return True
 
 
 def _append_to_last_footnote(blocks: list[Block], cont_text: str) -> None:
