@@ -210,8 +210,15 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
         fn_page = block.provenance.page
         for j in range(i - 1, -1, -1):
             candidate = result[j]
-            if candidate.provenance.page != fn_page:
+            if candidate.provenance.page < fn_page - 1:
                 break
+            if isinstance(candidate, Heading):
+                break
+            # For non-table blocks from the previous page, skip (don't pair, don't break).
+            # A table on page N-1 may contain the callout for a footnote on page N when the
+            # table spans pages; a paragraph on page N-1 would be a false positive.
+            if candidate.provenance.page < fn_page and not isinstance(candidate, Table):
+                continue
             if isinstance(candidate, Paragraph) and callout in candidate.text:
                 result[j] = candidate.model_copy(update={
                     "text": candidate.text.replace(callout, fn_marker, 1)

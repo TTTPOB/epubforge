@@ -1,7 +1,7 @@
 """Tests for assembler._pair_footnotes page-scoped pairing."""
 
 from epubforge.assembler import _pair_footnotes
-from epubforge.ir.semantic import Block, Footnote, Paragraph, Provenance
+from epubforge.ir.semantic import Block, Footnote, Heading, Paragraph, Provenance, Table
 
 
 def _para(text: str, page: int) -> Paragraph:
@@ -22,6 +22,51 @@ def test_no_pairing_across_pages() -> None:
     para = result[0]
     assert isinstance(para, Paragraph)
     assert "\x02fn-" not in para.text
+
+
+def _table(html: str, page: int) -> Table:
+    return Table(html=html, provenance=Provenance(page=page, source="vlm"))
+
+
+def _heading(text: str, page: int, level: int = 1) -> Heading:
+    return Heading(text=text, level=level, provenance=Provenance(page=page, source="vlm"))
+
+
+def test_pairing_table_prev_page() -> None:
+    """Footnote on page N pairs with a table on page N-1 (cross-page table spans)."""
+    blocks: list[Block] = [
+        _table("<table><td>cell①</td></table>", page=3),
+        _fn("①", page=4),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[1]
+    assert isinstance(fn, Footnote)
+    assert fn.paired
+    tbl = result[0]
+    assert isinstance(tbl, Table)
+    assert "\x02fn-4-①\x03" in tbl.html
+
+
+def test_no_pairing_paragraph_prev_page() -> None:
+    """Footnote on page N must not pair with a paragraph on page N-1."""
+    blocks: list[Block] = [_para("Some text ①", page=3), _fn("①", page=4)]
+    result = _pair_footnotes(blocks)
+    fn = result[1]
+    assert isinstance(fn, Footnote)
+    assert not fn.paired
+
+
+def test_no_pairing_across_heading_boundary() -> None:
+    """Footnote on page N must not pair past a heading boundary."""
+    blocks: list[Block] = [
+        _table("<table><td>cell①</td></table>", page=4),
+        _heading("New Section", page=4),
+        _fn("①", page=4),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[2]
+    assert isinstance(fn, Footnote)
+    assert not fn.paired
 
 
 def test_pairing_same_page() -> None:
