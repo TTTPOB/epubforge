@@ -195,45 +195,96 @@ def _absorb_table_text(blocks: list[Block]) -> list[Block]:
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
-    """Find each Footnote's callout char in preceding paragraphs and embed an inline marker.
+    """Find each Footnote's callout char in preceding paragraphs/tables and embed a marker.
 
-    The marker \x02fn-PAGE-CALLOUT\x03 is later converted to a <sup><a href=...> link by
+    The marker \\x02fn-PAGE-CALLOUT\\x03 is later converted to a <sup><a href=...> link by
     epub_builder. Footnotes whose callout cannot be located are left unpaired (epub_builder
     falls back to a standalone superscript reference).
+
+    Algorithm: two-pass, LIFO stack per callout symbol.
+
+    Pass 1 collects all callout symbols from Footnote blocks.
+    Pass 2 forward-scans:
+      - Heading: clear all stacks (callouts restart per section).
+      - Paragraph containing callout C: push (block_idx, is_table=False) onto stack[C].
+      - Table containing callout C: push (block_idx, is_table=True) onto stack[C].
+        Tables may span multiple pages after _merge_continued_tables, so they carry no
+        page constraint.
+      - Footnote with callout C: pop from stack[C] (LIFO — most recent first).
+        Paragraphs are only paired when on the same page as the footnote body; tables
+        are paired regardless of page distance.
+
+    This correctly handles:
+      - cross-page table spans (N-page tables, any N);
+      - multiple same-callout occurrences per section (LIFO gives nearest-first);
+      - paragraph callouts staying same-page (prevents false cross-page matches).
     """
+    from collections import defaultdict
+
     result = list(blocks)
+
+    # Pass 1: collect all callout symbols used in this block sequence.
+    callout_symbols = sorted({b.callout for b in result if isinstance(b, Footnote) and b.callout})
+    if not callout_symbols:
+        return result
+
+    # Pass 2: forward scan with per-callout LIFO stacks.
+    # stack entry: (block_index, is_table)
+    stacks: dict[str, list[tuple[int, bool]]] = defaultdict(list)
+
     for i, block in enumerate(result):
-        if not isinstance(block, Footnote):
-            continue
-        callout = block.callout
-        fn_marker = f"\x02fn-{block.provenance.page}-{callout}\x03"
-        fn_page = block.provenance.page
-        for j in range(i - 1, -1, -1):
-            candidate = result[j]
-            if candidate.provenance.page < fn_page - 1:
-                break
-            if isinstance(candidate, Heading):
-                break
-            # For non-table blocks from the previous page, skip (don't pair, don't break).
-            # A table on page N-1 may contain the callout for a footnote on page N when the
-            # table spans pages; a paragraph on page N-1 would be a false positive.
-            if candidate.provenance.page < fn_page and not isinstance(candidate, Table):
+        if isinstance(block, Heading):
+            stacks.clear()
+
+        elif isinstance(block, Paragraph):
+            for c in callout_symbols:
+                if c in block.text:
+                    stacks[c].append((i, False))
+
+        elif isinstance(block, Table):
+            for c in callout_symbols:
+                if c in block.html:
+                    stacks[c].append((i, True))
+
+        elif isinstance(block, Footnote):
+            callout = block.callout
+            fn_page = block.provenance.page
+            fn_marker = f"\x02fn-{fn_page}-{callout}\x03"
+
+            stack = stacks.get(callout)
+            if not stack:
                 continue
-            if isinstance(candidate, Paragraph) and callout in candidate.text:
-                result[j] = candidate.model_copy(update={
-                    "text": candidate.text.replace(callout, fn_marker, 1)
-                })
-                result[i] = block.model_copy(update={"paired": True})
-                log.debug("Paired footnote callout %r (page %d) into paragraph block %d", callout, block.provenance.page, j)
-                break
-            if isinstance(candidate, Table) and callout in candidate.html:
-                # Replace all occurrences — same callout may appear in multiple cells
-                result[j] = candidate.model_copy(update={
-                    "html": candidate.html.replace(callout, fn_marker)
-                })
-                result[i] = block.model_copy(update={"paired": True})
-                log.debug("Paired footnote callout %r (page %d) into table block %d", callout, block.provenance.page, j)
-                break
+
+            # LIFO: try from most-recent to oldest
+            for k in range(len(stack) - 1, -1, -1):
+                j, is_table = stack[k]
+                source = result[j]
+                # Paragraphs: same-page constraint; Tables: no page constraint
+                if not is_table and source.provenance.page != fn_page:
+                    continue
+                if isinstance(source, Paragraph) and callout in source.text:
+                    result[j] = source.model_copy(update={
+                        "text": source.text.replace(callout, fn_marker, 1)
+                    })
+                    result[i] = block.model_copy(update={"paired": True})
+                    log.debug(
+                        "Paired footnote callout %r (page %d) into paragraph block %d",
+                        callout, fn_page, j,
+                    )
+                    stack.pop(k)
+                    break
+                if isinstance(source, Table) and callout in source.html:
+                    result[j] = source.model_copy(update={
+                        "html": source.html.replace(callout, fn_marker)
+                    })
+                    result[i] = block.model_copy(update={"paired": True})
+                    log.debug(
+                        "Paired footnote callout %r (page %d) into table block %d (page %d)",
+                        callout, fn_page, j, source.provenance.page,
+                    )
+                    stack.pop(k)
+                    break
+
     return result
 
 
