@@ -499,3 +499,38 @@ number differs from the block's actual page in the IR.
 paired FN context section.
 
 **Fix**: Treat as an unpaired FN (section 3.2) and re-insert the marker manually.
+
+**Reverse variant — marker present but `paired=False`**: `_validate_paired_invariants` only
+enforces `paired=True → marker exists`, not the converse. A FN can therefore have `paired=False`
+while a correct `fn-PAGE-CALLOUT` marker already exists (e.g., in a `table_title` field or a
+paragraph that was patched manually). These FNs surface in the "UNPAIRED FNs" scan.
+
+**Fix for reverse variant**: confirm the marker genuinely exists in the book, then simply set
+`paired=True` on the Footnote block — no text change required:
+```python
+fn_block['paired'] = True
+```
+
+### Pattern H: Table with multiple rows sharing the same callout symbol across different pages
+
+**Trigger**: A statistics table spans pages N and N+1. Multiple rows in the table carry the same
+callout symbol `①` (e.g., one row's note is on page N and another row's note is on page N+1).
+The assembler inserts a single marker `fn-N-①` for the first match it finds, but rows whose
+callout should point to the FN body on page N+1 end up with the wrong page number in the marker.
+
+**Symptom**: The FN body on page N+1 appears in the "UNPAIRED FNs" scan. The table HTML contains
+`fn-N-①` in a cell that semantically belongs to a different footnote than the one on page N.
+Cross-checking the row content against the two FN bodies reveals the mismatch.
+
+**Example**: Table row `张忠杰①` had `fn-119-①` inserted (FN body "副主任 农业局局长"), but
+the matching FN body ("在其任上，秘书改为办公室主任") is on page 120 → should be `fn-120-①`.
+
+**Fix**: Replace the wrong marker in the table HTML and set `paired=True` on the correct FN body:
+```python
+b_table['html'] = b_table['html'].replace('\x02fn-119-①\x03', '\x02fn-120-①\x03', 1)
+fn_body_p120['paired'] = True
+```
+
+**How to identify**: when a table row's callout context (the name/value in that cell) clearly
+matches one FN body but the marker page points to a different FN body on an adjacent page, the
+marker page is wrong. Always verify by reading both FN bodies and both row contexts.
