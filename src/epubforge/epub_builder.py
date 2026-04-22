@@ -32,6 +32,7 @@ body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
 h1 { font-size: 1.8em; margin-top: 2em; }
 h2 { font-size: 1.4em; margin-top: 1.5em; }
 h2.centered { text-align: center; }
+h2.centered-section { text-align: center; break-before: page; page-break-before: always; }
 h3 { font-size: 1.2em; margin-top: 1.2em; }
 p { margin: 0.5em 0; text-indent: 1.5em; }
 figure { margin: 1em 0; text-align: center; }
@@ -192,7 +193,7 @@ def build_epub(
         for block in chapter.blocks:
             if isinstance(block, Heading) and block.id:
                 href = f"{xhtml_name}#{block.id}"
-                lvl = min(block.level, 6)
+                lvl = min(block.level + 1, 6)  # +1: headings are always children of their chapter
                 toc_entries.append((lvl, href, block.text, block.id))
 
     ebook.toc = _build_nested_toc(toc_entries)
