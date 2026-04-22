@@ -60,7 +60,14 @@ def assemble(work_dir: Path, out_path: Path) -> None:
         if flag and parsed:
             cont = parsed[0]
             if isinstance(cont, Paragraph):
-                _append_to_last_paragraph(all_blocks, cont.text)
+                if not _append_to_last_paragraph(all_blocks, cont.text):
+                    # Tail of previous unit is a non-Paragraph (e.g. Heading) — keep
+                    # the continuation as a new cross-page paragraph rather than drop it.
+                    log.warning(
+                        "first_block_continues_prev_tail=True but tail is not Paragraph "
+                        "(unit=%s) — keeping as new paragraph", uf.name
+                    )
+                    all_blocks.append(cont.model_copy(update={"cross_page": True}))
                 all_blocks.extend(parsed[1:])
             else:
                 log.warning(
@@ -301,17 +308,22 @@ def _append_to_last_footnote(blocks: list[Block], cont_text: str) -> None:
     log.warning("first_footnote_continues_prev_footnote=True but no preceding Footnote found; dropping continuation")
 
 
-def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> None:
-    """Append cont_text to the last Paragraph in blocks, skipping trailing Footnotes."""
+def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> bool:
+    """Append cont_text to the last Paragraph in blocks, skipping trailing Footnotes.
+
+    Returns True on success.  Returns False when the tail is a non-Paragraph
+    block (e.g. a Heading that immediately precedes the page break), so the
+    caller can fall back to keeping the continuation as a new paragraph.
+    """
     for i in range(len(blocks) - 1, -1, -1):
         candidate = blocks[i]
         if isinstance(candidate, Footnote):
             continue
         if isinstance(candidate, Paragraph):
             blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text), "cross_page": True})
-            return
+            return True
         break
-    log.warning("first_block_continues_prev_tail=True but no anchor Paragraph found; dropping continuation")
+    return False
 
 
 def _cjk_join(prev: str, cont: str) -> str:
