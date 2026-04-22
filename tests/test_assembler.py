@@ -133,6 +133,33 @@ def test_cross_page_paragraph_pairs_across_page() -> None:
     assert "\x02fn-15-①\x03" in para.text
 
 
+def test_cross_page_paragraph_source_portion_callout() -> None:
+    """Cross-page paragraph whose callout is in its SOURCE portion matches FN on source page."""
+    blocks: list[Block] = [_cross_page_para("text ①", page=74), _fn("①", page=74)]
+    result = _pair_footnotes(blocks)
+    fn = result[1]
+    assert isinstance(fn, Footnote) and fn.paired
+    para = result[0]
+    assert isinstance(para, Paragraph)
+    assert "\x02fn-74-①\x03" in para.text
+
+
+def test_cross_page_paragraph_source_portion_loses_to_p3() -> None:
+    """Source-portion fallback (P2) never fires when a regular P3 para already wins."""
+    blocks: list[Block] = [
+        _cross_page_para("cross-page text ①", page=5),
+        _para("regular text ①", page=5),
+        _fn("①", page=5),
+    ]
+    result = _pair_footnotes(blocks)
+    fn = result[2]
+    assert isinstance(fn, Footnote) and fn.paired
+    # Regular para (P3) wins
+    assert "\x02fn-5-①\x03" in result[1].text  # type: ignore[union-attr]
+    # Cross-page para keeps raw callout (fallback was not triggered)
+    assert "\x02fn-" not in result[0].text  # type: ignore[union-attr]
+
+
 def test_cross_page_paragraph_does_not_steal_same_page_fn() -> None:
     """Regular same-page paragraph (P3) beats cross-page paragraph (P2) for same-page FN."""
     blocks: list[Block] = [

@@ -104,6 +104,55 @@ def build_epub(
 
     figure_to_filename = _map_figures_to_images(book_model, images_dir, ebook)
 
+    # Pre-pass 1: index all Footnote objects by (page, callout).
+    all_footnotes_by_key: dict[tuple[int, str], Footnote] = {}
+    for chapter in book_model.chapters:
+        for block in chapter.blocks:
+            if isinstance(block, Footnote):
+                key = (block.provenance.page, block.callout)
+                if key not in all_footnotes_by_key:
+                    all_footnotes_by_key[key] = block
+
+    # Pre-pass 2: find cross-chapter markers and compute "borrowed" footnotes.
+    # A footnote is "borrowed" when a marker \x02fn-PAGE-CALLOUT\x03 appears in
+    # chapter A but the matching Footnote block lives in chapter B.  The footnote
+    # body is rendered in chapter A (the callout's home) and suppressed in B.
+    borrowed_by: dict[int, list[Footnote]] = {}   # ch_idx → borrowed Footnotes
+    borrowed_keys: set[tuple[int, str]] = set()    # keys removed from source chapter
+
+    for i, chapter in enumerate(book_model.chapters):
+        local_keys: set[tuple[int, str]] = {
+            (b.provenance.page, b.callout)
+            for b in chapter.blocks if isinstance(b, Footnote)
+        }
+        ch_borrowed: list[Footnote] = []
+        seen: set[tuple[int, str]] = set()
+        for block in chapter.blocks:
+            if isinstance(block, Paragraph):
+                texts_to_scan = [block.text]
+            elif isinstance(block, Table):
+                texts_to_scan = [block.html, block.table_title]
+            else:
+                continue
+            for text in texts_to_scan:
+                for m in _FN_MARKER_RE.finditer(text):
+                    raw = m.group(1)
+                    ps = raw.split("-", 2)
+                    if len(ps) < 3:
+                        continue
+                    try:
+                        page = int(ps[1])
+                        callout = ps[2]
+                    except ValueError:
+                        continue
+                    key = (page, callout)
+                    if key not in local_keys and key in all_footnotes_by_key and key not in seen:
+                        ch_borrowed.append(all_footnotes_by_key[key])
+                        borrowed_keys.add(key)
+                        seen.add(key)
+        if ch_borrowed:
+            borrowed_by[i] = ch_borrowed
+
     spine: list[str | epub.EpubHtml] = ["nav"]
     # entries: (level, href, title, uid)
     toc_entries: list[tuple[int, str, str, str]] = []
@@ -111,7 +160,10 @@ def build_epub(
     for i, chapter in enumerate(book_model.chapters):
         xhtml_name = f"chap{i:04d}.xhtml"
         ch_id = chapter.id or f"chap{i:04d}"
-        body_html, footnotes_html = _render_chapter(chapter, ch_id, figure_to_filename)
+        body_html, footnotes_html = _render_chapter(
+            chapter, ch_id, figure_to_filename,
+            borrowed_by.get(i), borrowed_keys or None,
+        )
         full_html = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             '<!DOCTYPE html>\n'
@@ -235,21 +287,40 @@ def _build_nested_toc(
 
 
 def _render_chapter(
-    chapter: Chapter, chapter_id: str, figure_to_filename: dict[int, str]
+    chapter: Chapter,
+    chapter_id: str,
+    figure_to_filename: dict[int, str],
+    borrowed_footnotes: list[Footnote] | None = None,
+    borrowed_keys: set[tuple[int, str]] | None = None,
 ) -> tuple[str, str]:
-    """Return (body_html, footnotes_html) for the chapter."""
-    # Pre-pass: assign sequential numbers to footnotes within this chapter.
+    """Return (body_html, footnotes_html) for the chapter.
+
+    borrowed_footnotes: Footnote objects whose bodies belong here (callout is in this
+    chapter but the Footnote block lives in the next chapter).
+    borrowed_keys: (page, callout) pairs borrowed away by a previous chapter — skip
+    rendering these when encountered in this chapter's block list.
+    """
+    # Pre-pass: assign sequential numbers to footnotes.
+    # 1) Local footnotes (excluding keys borrowed away to another chapter).
     fn_map: dict[tuple[int, str], tuple[int, str]] = {}
     n = 0
     for block in chapter.blocks:
         if isinstance(block, Footnote):
             key = (block.provenance.page, block.callout)
+            if borrowed_keys and key in borrowed_keys:
+                continue  # body rendered in the chapter that holds the callout
             if key in fn_map:
                 log.warning(
                     "duplicate footnote key (page=%d, callout=%r) in chapter %r",
                     key[0], key[1], chapter_id,
                 )
                 continue
+            n += 1
+            fn_map[key] = (n, f"{chapter_id}-fn{n}")
+    # 2) Borrowed footnotes from next chapter(s).
+    for fn in (borrowed_footnotes or []):
+        key = (fn.provenance.page, fn.callout)
+        if key not in fn_map:
             n += 1
             fn_map[key] = (n, f"{chapter_id}-fn{n}")
 
@@ -264,9 +335,11 @@ def _render_chapter(
             id_attr = f' id="{_esc(block.id)}"' if block.id else ""
             parts.append(f"<{tag}{id_attr}>{_esc(block.text)}</{tag}>")
         elif isinstance(block, Footnote):
+            key = (block.provenance.page, block.callout)
+            if borrowed_keys and key in borrowed_keys:
+                continue  # suppressed — body is in the borrowing chapter
             footnotes.append(block)
             if not block.paired:
-                key = (block.provenance.page, block.callout)
                 entry = fn_map.get(key)
                 if entry:
                     n_val, fn_id = entry
@@ -284,7 +357,7 @@ def _render_chapter(
                 f'<figcaption>{_esc(block.caption)}</figcaption></figure>'
             )
         elif isinstance(block, Table):
-            title_html = f'<p class="table-title">{_esc(block.table_title)}</p>' if block.table_title else ""
+            title_html = f'<p class="table-title">{_render_inline(block.table_title, fn_map)}</p>' if block.table_title else ""
             caption_html = f'<p class="table-caption">{_esc(block.caption)}</p>' if block.caption else ""
             parts.append(f"{title_html}{_apply_fn_markers(block.html, fn_map)}{caption_html}")
         elif isinstance(block, Equation):
@@ -292,10 +365,11 @@ def _render_chapter(
 
     body_html = "\n".join(parts)
 
+    all_footnotes_to_render: list[Footnote] = footnotes + list(borrowed_footnotes or [])
     footnotes_html = ""
-    if footnotes:
+    if all_footnotes_to_render:
         fn_parts = ['<aside epub:type="footnotes">']
-        for fn in footnotes:
+        for fn in all_footnotes_to_render:
             key = (fn.provenance.page, fn.callout)
             entry = fn_map.get(key)
             if entry:
