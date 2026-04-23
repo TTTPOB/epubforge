@@ -19,6 +19,7 @@ from epubforge.ir.semantic import (
     Paragraph,
     Provenance,
     Table,
+    TableMergeRecord,
 )
 from epubforge.markers import (
     has_raw_callout as _has_raw_callout,
@@ -150,6 +151,11 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
 
     Footnote blocks at the bottom of a page may sit between a table and its
     cross-page continuation; we look back past them to find the preceding Table.
+
+    When a merge occurs the resulting Table gets a merge_record capturing:
+      segment_html, segment_pages, segment_order, column_widths
+    for each contributing segment in merge order.  constituent_block_uids is
+    intentionally omitted because uids are not yet stable at this stage.
     """
     result: list[Block] = []
     for block in blocks:
@@ -165,16 +171,88 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
                 if not isinstance(candidate, Footnote):
                     break  # hit a non-footnote, non-table block — stop
             if prev_tbl is not None and prev_idx is not None:
+                new_html = _splice_table_html(prev_tbl.html, block.html)
+                merge_record = _build_merge_record(prev_tbl, block)
                 result[prev_idx] = prev_tbl.model_copy(update={
-                    "html": _splice_table_html(prev_tbl.html, block.html),
+                    "html": new_html,
                     "table_title": prev_tbl.table_title or block.table_title,
                     "caption": prev_tbl.caption or block.caption,
                     "multi_page": True,
+                    "merge_record": merge_record,
                 })
                 log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev_tbl.provenance.page)
                 continue
         result.append(block)
     return result
+
+
+def _extract_tbody_html(html: str) -> str:
+    """Return the content of the first <tbody> block, or the full inner table HTML."""
+    tbody_match = re.search(r"<tbody\b[^>]*>(.*?)</tbody>", html, flags=re.IGNORECASE | re.DOTALL)
+    if tbody_match:
+        return tbody_match.group(1)
+    # Fall back to stripping the outer <table> wrapper
+    inner = re.sub(r"^\s*<table[^>]*>", "", html, count=1, flags=re.IGNORECASE)
+    inner = re.sub(r"</table>\s*$", "", inner, count=1, flags=re.IGNORECASE)
+    return inner
+
+
+def _count_row_logical_width(row_html: str) -> int:
+    """Return the logical column width of a single <tr> row (respects colspan)."""
+    width = 0
+    for cell_match in re.finditer(r"<t[dh]\b([^>]*)>", row_html, flags=re.IGNORECASE):
+        attrs = cell_match.group(1)
+        colspan_match = re.search(r'colspan\s*=\s*["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        width += int(colspan_match.group(1)) if colspan_match else 1
+    return max(width, 0)
+
+
+def _modal_column_width(tbody_html: str) -> int:
+    """Return the most common logical row width in a tbody block (0 if no rows)."""
+    rows = re.findall(r"<tr\b[^>]*>.*?</tr>", tbody_html, flags=re.IGNORECASE | re.DOTALL)
+    if not rows:
+        return 0
+    widths: dict[int, int] = {}
+    for row in rows:
+        w = _count_row_logical_width(row)
+        if w > 0:
+            widths[w] = widths.get(w, 0) + 1
+    if not widths:
+        return 0
+    return max(widths, key=lambda w: widths[w])
+
+
+def _build_merge_record(base: Table, continuation: Table) -> TableMergeRecord:
+    """Build a TableMergeRecord from a base table and a single continuation segment.
+
+    When the base already has a merge_record (chained merge), the new segment is
+    appended to the existing lists.
+    """
+    cont_tbody = _extract_tbody_html(continuation.html)
+    cont_page = continuation.provenance.page
+    cont_width = _modal_column_width(cont_tbody)
+
+    existing = base.merge_record
+    if existing is not None:
+        # Extend existing record with one more segment
+        next_order = len(existing.segment_order)
+        return TableMergeRecord(
+            segment_html=existing.segment_html + [cont_tbody],
+            segment_pages=existing.segment_pages + [cont_page],
+            segment_order=existing.segment_order + [next_order],
+            column_widths=existing.column_widths + [cont_width],
+        )
+
+    # First merge: initialise from base + continuation
+    base_tbody = _extract_tbody_html(base.html)
+    base_page = base.provenance.page
+    base_width = _modal_column_width(base_tbody)
+    return TableMergeRecord(
+        segment_html=[base_tbody, cont_tbody],
+        segment_pages=[base_page, cont_page],
+        segment_order=[0, 1],
+        column_widths=[base_width, cont_width],
+    )
 
 
 def _splice_table_html(base: str, cont: str) -> str:

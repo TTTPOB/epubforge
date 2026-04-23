@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from epubforge.editor.ops import InsertBlock, OpEnvelope
+from epubforge.editor.ops import InsertBlock, OpEnvelope, SplitMergedTable
 
 
 def _prov(page: int = 1) -> dict[str, object]:
@@ -446,3 +446,101 @@ def test_op_envelope_rejects_unknown_patch_field() -> None:
                 ],
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# §1.5b SplitMergedTable op schema tests
+# ---------------------------------------------------------------------------
+
+
+class TestSplitMergedTableSchema:
+    """Verify SplitMergedTable op schema constraints (PR-D §1.5b)."""
+
+    def _valid_op(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "op": "split_merged_table",
+            "block_uid": "tbl-1",
+            "segment_html": [
+                "<table><tbody><tr><td>A</td></tr></tbody></table>",
+                "<table><tbody><tr><td>B</td></tr></tbody></table>",
+            ],
+            "segment_pages": [3, 4],
+            "multi_page_was": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_accepts_valid_op(self) -> None:
+        env = OpEnvelope.model_validate(_base_envelope(self._valid_op()))
+        assert isinstance(env.op, SplitMergedTable)
+        assert env.op.block_uid == "tbl-1"
+        assert env.op.segment_html[0].startswith("<table>")
+        assert env.op.segment_pages == [3, 4]
+        assert env.op.multi_page_was is True
+
+    def test_round_trip_preserves_all_fields(self) -> None:
+        env = OpEnvelope.model_validate(_base_envelope(self._valid_op()))
+        restored = OpEnvelope.model_validate_json(env.model_dump_json())
+        assert restored == env
+        assert isinstance(restored.op, SplitMergedTable)
+
+    def test_requires_block_uid(self) -> None:
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(
+                _base_envelope(
+                    {
+                        "op": "split_merged_table",
+                        "segment_html": ["<table><tbody><tr><td>A</td></tr></tbody></table>", "<table><tbody><tr><td>B</td></tr></tbody></table>"],
+                        "segment_pages": [3, 4],
+                        "multi_page_was": True,
+                    }
+                )
+            )
+
+    def test_rejects_empty_block_uid(self) -> None:
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(_base_envelope(self._valid_op(block_uid="   ")))
+
+    def test_requires_at_least_two_segments(self) -> None:
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(
+                _base_envelope(
+                    self._valid_op(
+                        segment_html=["<table><tbody><tr><td>Only</td></tr></tbody></table>"],
+                        segment_pages=[3],
+                    )
+                )
+            )
+
+    def test_rejects_mismatched_segment_lengths(self) -> None:
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(
+                _base_envelope(
+                    self._valid_op(segment_pages=[3, 4, 5])  # 3 pages but 2 html segments
+                )
+            )
+
+    def test_rejects_empty_segment_html_item(self) -> None:
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(
+                _base_envelope(
+                    self._valid_op(
+                        segment_html=["<table><tbody><tr><td>A</td></tr></tbody></table>", "   "],
+                    )
+                )
+            )
+
+    def test_rejects_extra_fields(self) -> None:
+        """constituent_block_uids must NOT be accepted."""
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(
+                _base_envelope(
+                    self._valid_op(constituent_block_uids=["uid-1", "uid-2"])
+                )
+            )
+
+    def test_requires_multi_page_was_field(self) -> None:
+        op = self._valid_op()
+        del op["multi_page_was"]  # type: ignore[misc]
+        with pytest.raises(ValidationError):
+            OpEnvelope.model_validate(_base_envelope(op))

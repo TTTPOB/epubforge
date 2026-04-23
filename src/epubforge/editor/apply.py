@@ -30,6 +30,7 @@ from epubforge.editor.ops import (
     SetText,
     SplitBlock,
     SplitChapter,
+    SplitMergedTable,
 )
 from epubforge.editor.leases import LeaseState
 from epubforge.editor.memory import ChapterStatus, EditMemory
@@ -649,6 +650,41 @@ def _apply_op(book: Book, op: EditOp, *, op_id: str) -> Book:
         target_chapter.blocks = target_chapter.blocks[:insert_at] + [block] + target_chapter.blocks[insert_at:]
         return book
 
+    if isinstance(op, SplitMergedTable):
+        ref, block = _get_block(book, op.block_uid)
+        if not isinstance(block, Table):
+            raise ApplyError("split_merged_table requires a Table block", op_id)
+        if not block.multi_page:
+            raise ApplyError("split_merged_table target block is not a multi_page Table", op_id)
+        chapter = book.chapters[ref.chapter_idx]
+        # Build one new Table per segment; each gets a fresh runtime uid.
+        # Provenance page is taken from segment_pages; all other fields are
+        # inherited from the merged table (title, caption, etc.).
+        new_blocks: list[Block] = []
+        for seg_idx, (seg_html, seg_page) in enumerate(
+            zip(op.segment_html, op.segment_pages, strict=True)
+        ):
+            new_uid = str(uuid4())
+            seg_table = Table(
+                uid=new_uid,
+                html=seg_html,
+                table_title=block.table_title,
+                caption=block.caption if seg_idx == len(op.segment_html) - 1 else "",
+                continuation=(seg_idx > 0),
+                multi_page=False,
+                bbox=block.bbox,
+                provenance=block.provenance.model_copy(update={"page": seg_page}),
+                merge_record=None,
+            )
+            new_blocks.append(seg_table)
+        # Replace the original merged block with the split sequence in-place.
+        chapter.blocks = (
+            chapter.blocks[: ref.block_idx]
+            + new_blocks
+            + chapter.blocks[ref.block_idx + 1 :]
+        )
+        return book
+
     raise AssertionError(f"unsupported op type {type(op)!r}")
 
 
@@ -688,6 +724,7 @@ def _resolve_intra_chapter_uid(book: Book, op: EditOp, *, op_id: str) -> str | N
             SetFootnoteFlag,
             SplitBlock,
             DeleteBlock,
+            SplitMergedTable,
         ),
     ):
         ref, _ = _get_block(book, op.block_uid)

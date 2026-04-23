@@ -26,8 +26,9 @@ from epubforge.editor.ops import (
     SetText,
     SplitBlock,
     SplitChapter,
+    SplitMergedTable,
 )
-from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance
+from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table, TableMergeRecord
 
 
 def _prov(page: int = 1) -> Provenance:
@@ -563,3 +564,211 @@ def test_relocate_block_keeps_existing_chapter_uids_and_status_map() -> None:
     assert [block.uid for block in result.book.chapters[1].blocks] == ["p-3", "p-2", "p-4"]
     assert result.memory is not None
     assert set(result.memory.chapter_status) == {"ch-1", "ch-2"}
+
+
+# ---------------------------------------------------------------------------
+# §1.5b SplitMergedTable apply tests
+# ---------------------------------------------------------------------------
+
+
+def _table_book() -> Book:
+    """Book with a multi_page Table that has two merged segments."""
+    merged_html = (
+        "<table>"
+        "<thead><tr><th>Col</th></tr></thead>"
+        "<tbody><tr><td>Row A</td></tr></tbody>"
+        "<tbody><tr><td>Row B</td></tr></tbody>"
+        "</table>"
+    )
+    return Book(
+        version=0,
+        initialized_at="2026-04-23T08:00:00Z",
+        uid_seed="seed-tbl",
+        title="Table Book",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(uid="p-before", text="Before table.", provenance=_prov(2)),
+                    Table(
+                        uid="tbl-merged",
+                        html=merged_html,
+                        multi_page=True,
+                        provenance=_prov(3),
+                        merge_record=TableMergeRecord(
+                            segment_html=[
+                                "<tr><td>Row A</td></tr>",
+                                "<tr><td>Row B</td></tr>",
+                            ],
+                            segment_pages=[3, 4],
+                            segment_order=[0, 1],
+                            column_widths=[1, 1],
+                        ),
+                    ),
+                    Paragraph(uid="p-after", text="After table.", provenance=_prov(4)),
+                ],
+            )
+        ],
+    )
+
+
+def _split_merged_table_op(block_uid: str = "tbl-merged") -> dict[str, object]:
+    return {
+        "op": "split_merged_table",
+        "block_uid": block_uid,
+        "segment_html": [
+            "<table><tbody><tr><td>Row A</td></tr></tbody></table>",
+            "<table><tbody><tr><td>Row B</td></tr></tbody></table>",
+        ],
+        "segment_pages": [3, 4],
+        "multi_page_was": True,
+    }
+
+
+class TestSplitMergedTableApply:
+    """Apply-layer tests for SplitMergedTable op (PR-D §1.5b)."""
+
+    def test_split_replaces_merged_block_with_two_segment_blocks(self) -> None:
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        blocks = result.book.chapters[0].blocks
+        assert len(blocks) == 4  # p-before, seg0, seg1, p-after
+        assert isinstance(blocks[0], Paragraph)
+        assert isinstance(blocks[1], Table)
+        assert isinstance(blocks[2], Table)
+        assert isinstance(blocks[3], Paragraph)
+
+    def test_split_segment_html_and_pages_are_correct(self) -> None:
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        seg0: Table = result.book.chapters[0].blocks[1]  # type: ignore[assignment]
+        seg1: Table = result.book.chapters[0].blocks[2]  # type: ignore[assignment]
+        assert seg0.html == "<table><tbody><tr><td>Row A</td></tr></tbody></table>"
+        assert seg0.provenance.page == 3
+        assert seg1.html == "<table><tbody><tr><td>Row B</td></tr></tbody></table>"
+        assert seg1.provenance.page == 4
+
+    def test_split_new_blocks_have_unique_runtime_uids(self) -> None:
+        """New block uids are generated at apply time; they must not equal the original."""
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        seg0: Table = result.book.chapters[0].blocks[1]  # type: ignore[assignment]
+        seg1: Table = result.book.chapters[0].blocks[2]  # type: ignore[assignment]
+        assert seg0.uid != "tbl-merged"
+        assert seg1.uid != "tbl-merged"
+        assert seg0.uid != seg1.uid
+        assert seg0.uid is not None
+        assert seg1.uid is not None
+
+    def test_split_does_not_assert_original_uid_restored(self) -> None:
+        """Regression: apply must not try to reuse pre-merge constituent uids."""
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        seg0: Table = result.book.chapters[0].blocks[1]  # type: ignore[assignment]
+        seg1: Table = result.book.chapters[0].blocks[2]  # type: ignore[assignment]
+        # Verify neither segment carries the constituent original uid assumption:
+        assert seg0.uid not in ("tbl-seg-0-pre-merge", "tbl-seg-1-pre-merge")
+        assert seg1.uid not in ("tbl-seg-0-pre-merge", "tbl-seg-1-pre-merge")
+
+    def test_split_first_segment_is_not_continuation(self) -> None:
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        seg0: Table = result.book.chapters[0].blocks[1]  # type: ignore[assignment]
+        seg1: Table = result.book.chapters[0].blocks[2]  # type: ignore[assignment]
+        assert seg0.continuation is False
+        assert seg1.continuation is True
+
+    def test_split_sets_multi_page_false_on_new_blocks(self) -> None:
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        seg0: Table = result.book.chapters[0].blocks[1]  # type: ignore[assignment]
+        seg1: Table = result.book.chapters[0].blocks[2]  # type: ignore[assignment]
+        assert seg0.multi_page is False
+        assert seg1.multi_page is False
+
+    def test_split_requires_target_block_to_be_multi_page(self) -> None:
+        """Applying to a non-multi_page Table must raise ApplyError."""
+        book = _table_book()
+        # Override the merged table with a normal (non-multi_page) table.
+        book.chapters[0].blocks[1] = Table(
+            uid="tbl-merged",
+            html="<table><tbody><tr><td>X</td></tr></tbody></table>",
+            multi_page=False,
+            provenance=_prov(3),
+        )
+        with pytest.raises(ApplyError, match="not a multi_page Table"):
+            apply_envelope(
+                book,
+                _env(_split_merged_table_op(), base_version=0),
+                now=lambda: "2026-04-23T08:00:01Z",
+            )
+
+    def test_split_requires_target_block_to_be_a_table(self) -> None:
+        """Applying to a Paragraph must raise ApplyError."""
+        book = _table_book()
+        with pytest.raises(ApplyError, match="requires a Table block"):
+            apply_envelope(
+                book,
+                _env(_split_merged_table_op(block_uid="p-before"), base_version=0),
+                now=lambda: "2026-04-23T08:00:01Z",
+            )
+
+    def test_split_increments_book_version(self) -> None:
+        book = _table_book()
+        result = apply_envelope(
+            book,
+            _env(_split_merged_table_op(), base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        assert result.book.version == 1
+
+    def test_split_three_segments_produces_three_blocks(self) -> None:
+        book = _table_book()
+        op = {
+            "op": "split_merged_table",
+            "block_uid": "tbl-merged",
+            "segment_html": [
+                "<table><tbody><tr><td>A</td></tr></tbody></table>",
+                "<table><tbody><tr><td>B</td></tr></tbody></table>",
+                "<table><tbody><tr><td>C</td></tr></tbody></table>",
+            ],
+            "segment_pages": [3, 4, 5],
+            "multi_page_was": True,
+        }
+        result = apply_envelope(
+            book,
+            _env(op, base_version=0),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+        blocks = result.book.chapters[0].blocks
+        # p-before, seg0, seg1, seg2, p-after
+        assert len(blocks) == 5
+        for idx in range(1, 4):
+            seg = blocks[idx]
+            assert isinstance(seg, Table)
+            assert seg.multi_page is False

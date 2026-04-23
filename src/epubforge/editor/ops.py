@@ -740,6 +740,39 @@ class RevertOp(EditorModel):
         return _validate_uuid4(value, field_name="target_op_id")
 
 
+class SplitMergedTable(EditorModel):
+    """Split a multi_page-merged Table back into its constituent per-page segments.
+
+    segment_html and segment_pages must have the same length (>= 2).
+    New block uids are assigned at apply time; constituent_block_uids is intentionally
+    absent because the original pre-merge uids were not stable when the merge was made.
+    """
+
+    op: Literal["split_merged_table"]
+    block_uid: str
+    segment_html: list[str] = Field(min_length=2)
+    segment_pages: list[int] = Field(min_length=2)
+    multi_page_was: bool
+
+    @field_validator("block_uid")
+    @classmethod
+    def _validate_block_uid(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="block_uid")
+
+    @field_validator("segment_html")
+    @classmethod
+    def _validate_segment_html(cls, value: list[str]) -> list[str]:
+        for item in value:
+            _require_non_empty(item, field_name="segment_html item")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_lengths_match(self) -> SplitMergedTable:
+        if len(self.segment_html) != len(self.segment_pages):
+            raise ValueError("segment_html and segment_pages must have the same length")
+        return self
+
+
 EditOp = Annotated[
     SetRole
     | SetStyleClass
@@ -755,6 +788,7 @@ EditOp = Annotated[
     | MergeChapters
     | SplitChapter
     | RelocateBlock
+    | SplitMergedTable
     | NoopOp
     | CompactMarker
     | RevertOp,
@@ -832,4 +866,5 @@ __all__ = [
     "SetText",
     "SplitBlock",
     "SplitChapter",
+    "SplitMergedTable",
 ]

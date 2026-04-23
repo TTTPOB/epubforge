@@ -116,6 +116,26 @@ class Figure(_UidMixin):
     provenance: Provenance
 
 
+class TableMergeRecord(BaseModel):
+    """Provenance recorded during assembler._merge_continued_tables().
+
+    All fields reflect information available at merge time (before uid initialisation).
+    constituent_block_uids is deliberately excluded: uids are not stable at this stage.
+    """
+
+    segment_html: list[str]
+    """Raw HTML extracted from each tbody segment, in merge order."""
+
+    segment_pages: list[int]
+    """Source page number for each segment (same order as segment_html)."""
+
+    segment_order: list[int]
+    """0-based merge order index for each segment (same order as segment_html)."""
+
+    column_widths: list[int]
+    """Modal logical column width (sum of colspan) for each segment."""
+
+
 class Table(_UidMixin):
     kind: Literal["table"] = "table"
     html: str
@@ -125,6 +145,7 @@ class Table(_UidMixin):
     multi_page: bool = False  # True when this table was merged from cross-page continuations
     bbox: list[float] | None = None
     provenance: Provenance
+    merge_record: TableMergeRecord | None = None
 
 
 class Equation(_UidMixin):
