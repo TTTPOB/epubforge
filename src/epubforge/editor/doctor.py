@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from statistics import mean, pstdev
 from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from epubforge.audit import DASH_CHAR_LABELS, AuditBundle, DashInventoryChapter, run_all_detectors
 from epubforge.editor.memory import EditMemory, OpenQuestion
-from epubforge.ir.semantic import AuditNote
+from epubforge.ir.semantic import AuditNote, Book
 
 
 class DoctorModel(BaseModel):
@@ -51,6 +54,20 @@ def chapters_missing_scan(memory: EditMemory, chapter_uids: Iterable[str]) -> li
         if status is None or status.read_passes < 1:
             missing.append(chapter_uid)
     return missing
+
+
+def _resolve_chapter_uids(*, book: Book | None, chapter_uids: list[str] | None) -> list[str]:
+    if chapter_uids is not None:
+        return chapter_uids
+    if book is None:
+        raise ValueError("chapter_uids or book must be provided")
+    resolved: list[str] = []
+    for chapter_idx, chapter in enumerate(book.chapters):
+        if chapter.uid is not None and chapter.uid.strip():
+            resolved.append(chapter.uid)
+        else:
+            resolved.append(f"chapter-{chapter_idx}")
+    return resolved
 
 
 class Hint(DoctorModel):
@@ -113,6 +130,86 @@ class DoctorReport(DoctorModel):
     readiness: ReadinessChecklist
     suggested_next_actions: list[str] = Field(default_factory=list)
     delta: DoctorDelta | None = None
+
+
+def _book_dominant_dash(inventory: list[DashInventoryChapter]) -> tuple[str | None, Counter[str]]:
+    totals: Counter[str] = Counter()
+    for entry in inventory:
+        totals.update(entry.counts)
+    if not totals:
+        return None, totals
+    dominant = min(totals.items(), key=lambda item: (-item[1], ord(item[0])))[0]
+    return dominant, totals
+
+
+def _style_inconsistency_hints(bundle: AuditBundle) -> list[Hint]:
+    inventory = [entry for entry in bundle.dash_inventory if entry.total >= 3 and entry.dominant_char is not None]
+    book_dominant, totals = _book_dominant_dash(inventory)
+    if book_dominant is None or len([count for count in totals.values() if count > 0]) < 2:
+        return []
+    hints: list[Hint] = []
+    for entry in inventory:
+        assert entry.dominant_char is not None
+        if entry.dominant_char == book_dominant:
+            continue
+        if entry.dominant_count * 10 < entry.total * 6:
+            continue
+        hints.append(
+            Hint(
+                kind="style_inconsistency",
+                severity="warn",
+                message=(
+                    f"{entry.chapter_uid} 的破折号样式偏离全书主样式：本章以 "
+                    f"U+{ord(entry.dominant_char):04X} {DASH_CHAR_LABELS[entry.dominant_char]} 为主，"
+                    f"全书以 U+{ord(book_dominant):04X} {DASH_CHAR_LABELS[book_dominant]} 为主。"
+                ),
+                scope="chapter",
+                chapter_uid=entry.chapter_uid,
+                suggested_subagent_type="scanner",
+            )
+        )
+    return hints
+
+
+def _unusual_density_hints(bundle: AuditBundle) -> list[Hint]:
+    if len(bundle.footnote_density) < 2:
+        return []
+    counts = [entry.count for entry in bundle.footnote_density]
+    sigma = pstdev(counts)
+    if sigma <= 0:
+        return []
+    average = mean(counts)
+    threshold = average + 3 * sigma
+    hints: list[Hint] = []
+    for entry in bundle.footnote_density:
+        if entry.count <= threshold:
+            continue
+        if entry.chapter_uid is None:
+            hints.append(
+                Hint(
+                    kind="unusual_density",
+                    severity="warn",
+                    message=f"第 {entry.page} 页脚注密度异常高（{entry.count}，均值 {average:.2f}，σ {sigma:.2f}）。",
+                    scope="book",
+                    suggested_subagent_type="scanner",
+                )
+            )
+            continue
+        hints.append(
+            Hint(
+                kind="unusual_density",
+                severity="warn",
+                message=f"第 {entry.page} 页脚注密度异常高（{entry.count}，均值 {average:.2f}，σ {sigma:.2f}）。",
+                scope="chapter",
+                chapter_uid=entry.chapter_uid,
+                suggested_subagent_type="scanner",
+            )
+        )
+    return hints
+
+
+def _detector_hints(bundle: AuditBundle) -> list[Hint]:
+    return [*_style_inconsistency_hints(bundle), *_unusual_density_hints(bundle)]
 
 
 def _convention_signature(memory: EditMemory) -> dict[str, tuple[str, float]]:
@@ -272,15 +369,25 @@ def _suggested_next_actions(
 def build_doctor_report(
     *,
     memory: EditMemory,
-    chapter_uids: list[str],
-    issues: list[AuditNote],
+    chapter_uids: list[str] | None = None,
+    book: Book | None = None,
+    issues: list[AuditNote] | None = None,
     detector_hints: list[Hint] | None = None,
     previous_memory: EditMemory | None = None,
     previous_report: DoctorReport | None = None,
     new_applied_op_count: int = 0,
     supervisor_ready_to_stop: bool = True,
 ) -> DoctorReport:
-    hints = [*(detector_hints or []), *_core_hints(memory, chapter_uids)]
+    resolved_chapter_uids = _resolve_chapter_uids(book=book, chapter_uids=chapter_uids)
+    auto_detector_hints: list[Hint] = []
+    if book is not None:
+        bundle = run_all_detectors(book)
+        auto_detector_hints = _detector_hints(bundle)
+        if issues is None:
+            issues = bundle.to_audit_notes()
+    if issues is None:
+        raise ValueError("issues or book must be provided")
+    hints = [*(detector_hints or []), *auto_detector_hints, *_core_hints(memory, resolved_chapter_uids)]
     delta = compute_doctor_delta(
         memory=memory,
         hints=hints,
@@ -291,7 +398,7 @@ def build_doctor_report(
     )
     readiness = evaluate_convergence(
         memory=memory,
-        chapter_uids=chapter_uids,
+        chapter_uids=resolved_chapter_uids,
         issues=issues,
         delta=delta,
         supervisor_ready_to_stop=supervisor_ready_to_stop,
@@ -319,7 +426,7 @@ def build_doctor_report(
         readiness=readiness,
         suggested_next_actions=_suggested_next_actions(
             memory=memory,
-            chapter_uids=chapter_uids,
+            chapter_uids=resolved_chapter_uids,
             issues=issues,
             readiness=readiness,
             delta=delta,
