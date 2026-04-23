@@ -146,7 +146,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EXTRACT_VLM_DPI",                       "extract", "vlm_dpi",                   int),
     ("EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES",        "extract", "max_simple_batch_pages",    int),
     ("EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES",       "extract", "max_complex_batch_pages",   int),
-    ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),  # legacy env name kept
+    ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),
 ]
 
 _SECTION_MODELS = {
