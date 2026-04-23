@@ -232,3 +232,6 @@ __marimo__/
 # epubforge config (secrets and local overrides)
 config.toml
 config.local.toml
+
+# Codex CLI marker
+.codex
