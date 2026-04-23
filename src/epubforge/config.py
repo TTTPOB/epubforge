@@ -34,15 +34,9 @@ class Config:
     cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
     work_dir: Path = field(default_factory=lambda: Path("work"))
     out_dir: Path = field(default_factory=lambda: Path("out"))
-    proofread_phase1_thinking_budget_tokens: int = 2000
-    proofread_phase2_thinking_budget_tokens: int = 2000
-    proofread_max_chunk_tokens: int = 100_000
-    proofread_chars_per_token: float = 3.0
-    footnote_verify_thinking_budget_tokens: int = 2000
-    footnote_verify_max_chapter_tokens: int = 100_000
-    footnote_verify_chars_per_token: float = 3.0
-    footnote_verify_model: str = ""  # empty = use cfg.llm_model
-    footnote_verify_providers: list[str] = field(default_factory=list)  # OpenRouter provider order
+    editor_lease_ttl_seconds: int = 1800
+    editor_compact_threshold: int = 50
+    editor_max_loops: int = 50
     vlm_dpi: int = 200
     max_simple_batch_pages: int = 8
     max_complex_batch_pages: int = 12
@@ -117,29 +111,14 @@ def load_config(config_path: Path | None = None) -> Config:
             if "out_dir" in rt:
                 cfg.out_dir = Path(str(rt["out_dir"]))
 
-        pr = data.get("proofread") or {}
-        if isinstance(pr, dict):
-            if "phase1_thinking_budget_tokens" in pr:
-                cfg.proofread_phase1_thinking_budget_tokens = int(pr["phase1_thinking_budget_tokens"])  # type: ignore[arg-type]
-            if "phase2_thinking_budget_tokens" in pr:
-                cfg.proofread_phase2_thinking_budget_tokens = int(pr["phase2_thinking_budget_tokens"])  # type: ignore[arg-type]
-            if "max_chunk_tokens" in pr:
-                cfg.proofread_max_chunk_tokens = int(pr["max_chunk_tokens"])  # type: ignore[arg-type]
-            if "chars_per_token" in pr:
-                cfg.proofread_chars_per_token = float(pr["chars_per_token"])  # type: ignore[arg-type]
-
-        fv = data.get("footnote_verify") or {}
-        if isinstance(fv, dict):
-            if "thinking_budget_tokens" in fv:
-                cfg.footnote_verify_thinking_budget_tokens = int(fv["thinking_budget_tokens"])  # type: ignore[arg-type]
-            if "max_chapter_tokens" in fv:
-                cfg.footnote_verify_max_chapter_tokens = int(fv["max_chapter_tokens"])  # type: ignore[arg-type]
-            if "chars_per_token" in fv:
-                cfg.footnote_verify_chars_per_token = float(fv["chars_per_token"])  # type: ignore[arg-type]
-            if "model" in fv:
-                cfg.footnote_verify_model = str(fv["model"])
-            if "providers" in fv:
-                cfg.footnote_verify_providers = [str(p) for p in fv["providers"]]  # type: ignore[union-attr]
+        editor = data.get("editor") or {}
+        if isinstance(editor, dict):
+            if "lease_ttl_seconds" in editor:
+                cfg.editor_lease_ttl_seconds = int(editor["lease_ttl_seconds"])  # type: ignore[arg-type]
+            if "compact_threshold" in editor:
+                cfg.editor_compact_threshold = int(editor["compact_threshold"])  # type: ignore[arg-type]
+            if "max_loops" in editor:
+                cfg.editor_max_loops = int(editor["max_loops"])  # type: ignore[arg-type]
 
         ex = data.get("extract") or {}
         if isinstance(ex, dict):
@@ -181,6 +160,12 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.concurrency = int(v)
     if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
         cfg.cache_dir = Path(v)
+    if v := os.environ.get("EPUBFORGE_EDITOR_LEASE_TTL_SECONDS"):
+        cfg.editor_lease_ttl_seconds = int(v)
+    if v := os.environ.get("EPUBFORGE_EDITOR_COMPACT_THRESHOLD"):
+        cfg.editor_compact_threshold = int(v)
+    if v := os.environ.get("EPUBFORGE_EDITOR_MAX_LOOPS"):
+        cfg.editor_max_loops = int(v)
     if v := os.environ.get("EPUBFORGE_VLM_DPI"):
         cfg.vlm_dpi = int(v)
     if v := os.environ.get("EPUBFORGE_MAX_SIMPLE_BATCH_PAGES"):

@@ -11,6 +11,8 @@ from urllib.parse import quote as _url_quote
 
 from ebooklib import epub
 
+from epubforge.io import EDITABLE_BOOK_PATH
+
 _FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
 
 log = logging.getLogger(__name__)
@@ -79,6 +81,20 @@ def _load_registry(registry_path: Path) -> StyleRegistry | None:
     except Exception:
         log.warning("epub_builder: failed to load style registry from %s", registry_path)
         return None
+
+
+def resolve_build_source(work_dir: Path) -> Path:
+    editable = work_dir / EDITABLE_BOOK_PATH
+    if editable.exists():
+        return editable
+
+    legacy = work_dir / "05_semantic.json"
+    if legacy.exists():
+        return legacy
+
+    raise FileNotFoundError(
+        f"build source not found under {work_dir}: expected {editable.relative_to(work_dir)} or 05_semantic.json"
+    )
 
 
 def build_epub(

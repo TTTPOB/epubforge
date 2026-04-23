@@ -52,12 +52,13 @@ def _init_logging(cfg: Config, pdf_path: Path) -> Path | None:
 
 
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
-    ph1 = cfg.proofread_phase1_thinking_budget_tokens
-    ph2 = cfg.proofread_phase2_thinking_budget_tokens
     log.info(
-        "epubforge startup: model=%s/%s cache_dir=%s thinking=ph1:%d/ph2:%d log=%s",
+        "epubforge startup: model=%s/%s cache_dir=%s editor=ttl:%d/compact:%d/max_loops:%d log=%s",
         cfg.llm_model, cfg.vlm_model, cfg.cache_dir,
-        ph1, ph2, log_path or "(stderr only)",
+        cfg.editor_lease_ttl_seconds,
+        cfg.editor_compact_threshold,
+        cfg.editor_max_loops,
+        log_path or "(stderr only)",
     )
 
 
@@ -80,10 +81,10 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
 def run(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f", help="Re-run stages even if outputs exist"),
-    from_stage: int = typer.Option(1, "--from", min=1, max=8, help="Start from stage N (1–8); existing outputs are reused unless --force-rerun"),
+    from_stage: int = typer.Option(1, "--from", min=1, max=4, help="Start from stage N (1–4); existing outputs are reused unless --force-rerun"),
     pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
 ) -> None:
-    """Run the full pipeline (parse → classify → extract → assemble → refine-toc → proofread → footnote-verify → build)."""
+    """Run the ingestion pipeline (parse → classify → extract → assemble)."""
     cfg = load_config(_config_path)
     cfg.require_llm()
     cfg.require_vlm()
@@ -143,52 +144,11 @@ def assemble(
 
 
 @app.command()
-def refine_toc(
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-) -> None:
-    """Stage 5 — refine heading hierarchy with LLM → work/<name>/05_semantic.json."""
-    cfg = load_config(_config_path)
-    cfg.require_llm()
-    log_path = _init_logging(cfg, pdf_path)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_refine_toc(pdf_path, cfg, force=force)
-
-
-@app.command()
-def proofread(
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-    pages: str | None = typer.Option(None, "--pages", help="Limit to chapters covering these pages, e.g. '1-44'"),
-) -> None:
-    """Stage 6 — book-level proofread → work/<name>/06_proofread.json."""
-    cfg = load_config(_config_path)
-    cfg.require_llm()
-    log_path = _init_logging(cfg, pdf_path)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_proofread(pdf_path, cfg, force=force, pages=_parse_pages(pages))
-
-
-@app.command()
-def footnote_verify(
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-    pages: str | None = typer.Option(None, "--pages", help="Limit to chapters covering these pages, e.g. '1-44'"),
-) -> None:
-    """Stage 7 — LLM footnote pairing verification → work/<name>/07_footnote_verified.json."""
-    cfg = load_config(_config_path)
-    cfg.require_llm()
-    log_path = _init_logging(cfg, pdf_path)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_footnote_verify(pdf_path, cfg, force=force, pages=_parse_pages(pages))
-
-
-@app.command()
 def build(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
-    """Stage 8 — generate EPUB → out/<name>.epub."""
+    """Stage 8 — generate EPUB from edit_state/book.json or 05_semantic.json."""
     cfg = load_config(_config_path)
     log_path = _init_logging(cfg, pdf_path)
     _log_startup_banner(cfg, log_path)

@@ -1,4 +1,4 @@
-"""Pipeline orchestration: stages 1-7 with per-stage caching."""
+"""Pipeline orchestration for stages 1-4 plus explicit build."""
 
 from __future__ import annotations
 
@@ -42,10 +42,6 @@ def run_all(
         run_classify(pdf_path, cfg, force=_f(2))
         run_extract(pdf_path, cfg, force=_f(3), pages=pages)
         run_assemble(pdf_path, cfg, force=_f(4))
-        run_refine_toc(pdf_path, cfg, force=_f(5))
-        run_proofread(pdf_path, cfg, force=_f(6), pages=pages)
-        run_footnote_verify(pdf_path, cfg, force=_f(7), pages=pages)
-        run_build(pdf_path, cfg, force=_f(8))
 
     log.info("pipeline total: %s", get_tracker().summary_line())
 
@@ -110,85 +106,11 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
         assemble(work, out)
     console.print(f"  → {out}")
 
-
-def run_refine_toc(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
-    from epubforge.toc_refiner import refine_toc
-
-    work = cfg.book_work_dir(pdf_path)
-    raw = _stage_path(work, "05_semantic_raw.json")
-    out = _stage_path(work, "05_semantic.json")
-    if _skip(out, force, "refine-toc"):
-        return
-    console.print("[bold]Stage 5:[/bold] refining TOC hierarchy…")
-    with stage_timer(log, "5 refine-toc"):
-        refine_toc(raw, out, cfg)
-    console.print(f"  → {out}")
-
-
-def run_proofread(
-    pdf_path: Path,
-    cfg: Config,
-    *,
-    force: bool = False,
-    pages: set[int] | None = None,
-) -> None:
-    from epubforge.proofreader import proofread
-
-    work = cfg.book_work_dir(pdf_path)
-    src = _stage_path(work, "05_semantic.json")
-    out = _stage_path(work, "06_proofread.json")
-    registry = _stage_path(work, "style_registry.json")
-    book_memory_path = work / "03_extract" / "book_memory.json"
-    audit_notes_path = work / "03_extract" / "audit_notes.json"
-    if _skip(out, force, "proofread"):
-        return
-    console.print("[bold]Stage 6:[/bold] book-level proofreading…")
-    with stage_timer(log, "6 proofread"):
-        proofread(
-            src, out, registry, cfg, pages=pages,
-            book_memory_path=book_memory_path if book_memory_path.exists() else None,
-            audit_notes_path=audit_notes_path if audit_notes_path.exists() else None,
-        )
-    console.print(f"  → {out}")
-
-
-def run_footnote_verify(
-    pdf_path: Path,
-    cfg: Config,
-    *,
-    force: bool = False,
-    pages: set[int] | None = None,
-) -> None:
-    from epubforge.footnote_verifier import verify_footnotes
-
-    work = cfg.book_work_dir(pdf_path)
-    src = _stage_path(work, "06_proofread.json")
-    if not src.exists():
-        console.print("[dim]skip footnote-verify — 06_proofread.json not found[/dim]")
-        return
-    out = _stage_path(work, "07_footnote_verified.json")
-    report = _stage_path(work, "07_footnote_verify_report.json")
-    if _skip(out, force, "footnote-verify"):
-        return
-    console.print("[bold]Stage 7:[/bold] LLM footnote verification…")
-    with stage_timer(log, "7 footnote-verify"):
-        verify_footnotes(src, out, cfg, pages=pages, report_path=report)
-    console.print(f"  → {out}")
-
-
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
-    from epubforge.epub_builder import build_epub
+    from epubforge.epub_builder import build_epub, resolve_build_source
 
     work = cfg.book_work_dir(pdf_path)
-    fn_verified = _stage_path(work, "07_footnote_verified.json")
-    proofread_out = _stage_path(work, "06_proofread.json")
-    refined = _stage_path(work, "05_semantic.json")
-    if fn_verified.exists():
-        semantic = fn_verified
-    elif proofread_out.exists():
-        semantic = proofread_out
-    else:
-        semantic = refined
+    semantic = resolve_build_source(work)
     registry = _stage_path(work, "style_registry.json")
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.book_out_path(pdf_path)
