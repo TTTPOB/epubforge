@@ -449,3 +449,14 @@ __all__ = [
     "evaluate_convergence",
     "unresolved_questions",
 ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    from epubforge.editor.cli_support import run_cli
+    from epubforge.editor.tool_surface import run_doctor
+
+    return run_cli(run_doctor, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
