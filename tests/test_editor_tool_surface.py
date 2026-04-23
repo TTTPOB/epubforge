@@ -389,3 +389,202 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
     assert first_payload["readiness"]["converged"] is False
     assert second_payload["readiness"]["converged"] is True
     assert second_payload["readiness"]["chapters_unscanned"] == []
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by run-script sandbox tests
+# ---------------------------------------------------------------------------
+
+
+def _init_work_dir(tmp_path: Path) -> Path:
+    """Create and initialize a minimal work dir; return it."""
+    work_dir = tmp_path / "work"
+    save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
+    completed = _run_module("epubforge.editor.init", str(work_dir))
+    assert completed.returncode == 0, completed.stderr
+    return work_dir
+
+
+def _run_script_exec(work_dir: Path, exec_path: str) -> subprocess.CompletedProcess[str]:
+    return _run_module("epubforge.editor.run-script", str(work_dir), "--exec", exec_path)
+
+
+# ---------------------------------------------------------------------------
+# §1.1 run-script sandbox rejection tests
+# ---------------------------------------------------------------------------
+
+
+def test_run_script_rejects_absolute_outside_scratch(tmp_path: Path) -> None:
+    work_dir = _init_work_dir(tmp_path)
+    outside = tmp_path / "evil.py"
+    outside.write_text("pass\n", encoding="utf-8")
+
+    result = _run_script_exec(work_dir, str(outside))
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert "scratch_dir" in payload["error"]
+
+
+def test_run_script_rejects_dotdot_escape(tmp_path: Path) -> None:
+    work_dir = _init_work_dir(tmp_path)
+    paths = resolve_editor_paths(work_dir)
+    # Create a real .py file one level above scratch_dir
+    escape_target = paths.scratch_dir.parent / "escape.py"
+    escape_target.write_text("pass\n", encoding="utf-8")
+    rel_escape = "../escape.py"
+
+    result = _run_script_exec(work_dir, rel_escape)
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert "scratch_dir" in payload["error"]
+
+
+def test_run_script_rejects_symlink_escape(tmp_path: Path) -> None:
+    work_dir = _init_work_dir(tmp_path)
+    paths = resolve_editor_paths(work_dir)
+    # Create a real .py file outside scratch and a symlink inside scratch pointing to it
+    real_script = tmp_path / "real_outside.py"
+    real_script.write_text("pass\n", encoding="utf-8")
+    paths.scratch_dir.mkdir(parents=True, exist_ok=True)
+    link = paths.scratch_dir / "link.py"
+    link.symlink_to(real_script)
+
+    result = _run_script_exec(work_dir, str(link))
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert "scratch_dir" in payload["error"]
+
+
+def test_run_script_rejects_non_py_suffix(tmp_path: Path) -> None:
+    work_dir = _init_work_dir(tmp_path)
+    paths = resolve_editor_paths(work_dir)
+    paths.scratch_dir.mkdir(parents=True, exist_ok=True)
+    sh_file = paths.scratch_dir / "script.sh"
+    sh_file.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+    result = _run_script_exec(work_dir, str(sh_file))
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert ".py" in payload["error"]
+
+
+def test_run_script_accepts_relative_inside_scratch(tmp_path: Path) -> None:
+    work_dir = _init_work_dir(tmp_path)
+    paths = resolve_editor_paths(work_dir)
+    paths.scratch_dir.mkdir(parents=True, exist_ok=True)
+    good_script = paths.scratch_dir / "good.py"
+    good_script.write_text('import json; print(json.dumps({"ok": True}))\n', encoding="utf-8")
+
+    # Pass a relative path (just the filename, resolved relative to scratch_dir by the helper)
+    result = _run_script_exec(work_dir, "good.py")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# §1.7 propose-op all-or-nothing tests
+# ---------------------------------------------------------------------------
+
+
+def _make_valid_envelope(block_uid: str, text_value: str = "Alpha paragraph.") -> dict:
+    return {
+        "op_id": str(uuid4()),
+        "ts": "2026-04-23T08:00:00Z",
+        "agent_id": "test-agent",
+        "base_version": 1,
+        "op": {
+            "op": "set_text",
+            "block_uid": block_uid,
+            "field": "text",
+            "value": text_value,
+        },
+        "rationale": "test",
+    }
+
+
+def _setup_initialized_work(tmp_path: Path) -> tuple[Path, str]:
+    """Return (work_dir, block_uid_of_first_block)."""
+    work_dir = tmp_path / "work"
+    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+    imported = _run_module(
+        "epubforge.editor.import-legacy",
+        str(work_dir),
+        "--from",
+        "07_footnote_verified.json",
+    )
+    assert imported.returncode == 0, imported.stderr
+    book = load_book(resolve_editor_paths(work_dir).book_path)
+    block_uid = book.chapters[0].blocks[0].uid
+    assert block_uid
+    return work_dir, block_uid
+
+
+def test_propose_op_all_invalid_rejects_batch(tmp_path: Path) -> None:
+    work_dir, _block_uid = _setup_initialized_work(tmp_path)
+    bad_envelope = {"not": "valid"}
+
+    result = _run_module(
+        "epubforge.editor.propose-op",
+        str(work_dir),
+        input_text=json.dumps([bad_envelope]),
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] == 0
+    assert payload["rejected"] >= 1
+
+    # staging.jsonl must not exist or be empty
+    paths = resolve_editor_paths(work_dir)
+    staging = paths.edit_state_dir / "staging.jsonl"
+    assert not staging.exists() or staging.read_text(encoding="utf-8").strip() == ""
+
+
+def test_propose_op_mixed_batch_rejected_entirely(tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(tmp_path)
+    good = _make_valid_envelope(block_uid)
+    bad = {"not": "valid"}
+
+    result = _run_module(
+        "epubforge.editor.propose-op",
+        str(work_dir),
+        input_text=json.dumps([good, bad]),
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    # All-or-nothing: accepted must be 0 even though one was valid
+    assert payload["accepted"] == 0
+    assert payload["rejected"] == 2
+
+    paths = resolve_editor_paths(work_dir)
+    staging = paths.edit_state_dir / "staging.jsonl"
+    assert not staging.exists() or staging.read_text(encoding="utf-8").strip() == ""
+
+
+def test_propose_op_all_valid_appended_atomically(tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(tmp_path)
+    env1 = _make_valid_envelope(block_uid, "Alpha paragraph.")
+    env2 = _make_valid_envelope(block_uid, "Beta value.")
+
+    result = _run_module(
+        "epubforge.editor.propose-op",
+        str(work_dir),
+        input_text=json.dumps([env1, env2]),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] == 2
+    assert payload["rejected"] == 0
+
+    paths = resolve_editor_paths(work_dir)
+    staging = paths.edit_state_dir / "staging.jsonl"
+    lines = [ln for ln in staging.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 2

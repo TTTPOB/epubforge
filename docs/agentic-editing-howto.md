@@ -194,6 +194,8 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 - `--write <desc>`：分配 `edit_state/scratch/` 下的新脚本路径并写入 stub
 - `--exec <path>`：在项目环境中执行该脚本
 
+`--exec` 仅接受 `scratch_dir` 内的 `.py` 文件；拒绝路径错误会通过 stdout JSON 返回。
+
 何时使用：
 
 - 需要做只读分析

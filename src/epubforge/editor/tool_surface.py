@@ -239,20 +239,26 @@ def run_propose_op(argv: list[str] | None = None) -> int:
     if not isinstance(payload, list):
         raise CommandError("stdin JSON must be an array of OpEnvelope objects")
 
-    accepted: list[OpEnvelope] = []
+    # Validate all envelopes first; only write if every one is valid (all-or-nothing).
+    validated: list[OpEnvelope] = []
     errors: list[dict[str, object]] = []
     for index, item in enumerate(payload):
         try:
-            accepted.append(OpEnvelope.model_validate(item))
+            validated.append(OpEnvelope.model_validate(item))
         except Exception as exc:  # noqa: BLE001
             errors.append({"index": index, "error": str(exc)})
 
-    if accepted:
+    if errors:
+        # Any validation failure → reject the entire batch; do not touch staging.jsonl.
+        emit_json({"accepted": 0, "rejected": len(payload), "errors": errors})
+        return 1
+
+    if validated:
         from epubforge.editor.state import append_staging
 
-        append_staging(paths, accepted)
-    emit_json({"accepted": len(accepted), "rejected": len(errors), "errors": errors})
-    return 0 if not errors else 1
+        append_staging(paths, validated)
+    emit_json({"accepted": len(validated), "rejected": 0, "errors": []})
+    return 0
 
 
 def run_apply_queue(argv: list[str] | None = None) -> int:
@@ -419,7 +425,10 @@ def run_run_script(argv: list[str] | None = None) -> int:
         emit_json({"path": str(path), "scratch_dir": str(paths.scratch_dir)})
         return 0
 
-    result = run_script(args.exec_path, work_dir=paths.work_dir)
+    try:
+        result = run_script(args.exec_path, work_dir=paths.work_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        raise CommandError(str(exc)) from exc
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:

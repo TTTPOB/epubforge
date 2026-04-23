@@ -71,11 +71,26 @@ if __name__ == "__main__":
     return path
 
 
+def _resolve_within_scratch(raw: str | Path, scratch_dir: Path) -> Path:
+    """Resolve *raw* to an absolute path and verify it is inside *scratch_dir*.
+
+    Raises ValueError if the path escapes the sandbox, is not a .py file,
+    or does not exist.
+    """
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = scratch_dir / p
+    if p.suffix != ".py":
+        raise ValueError(f"script must be a .py file, got: {p}")
+    resolved = p.resolve(strict=True)
+    if not resolved.is_relative_to(scratch_dir.resolve()):
+        raise ValueError(f"script must reside under scratch_dir ({scratch_dir}), got: {resolved}")
+    return resolved
+
+
 def run_script(path: str | Path, *, work_dir: str | Path) -> ScriptExecResult:
-    script_path = Path(path).expanduser()
-    if not script_path.is_absolute():
-        script_path = (PROJECT_ROOT / script_path).resolve()
     paths = resolve_editor_paths(work_dir)
+    script_path = _resolve_within_scratch(path, paths.scratch_dir)
     env = os.environ.copy()
     pythonpath_parts = [str(PROJECT_ROOT / "src")]
     if current := env.get("PYTHONPATH"):
