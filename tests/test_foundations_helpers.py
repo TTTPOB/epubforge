@@ -42,9 +42,9 @@ def _editable_book(prov: Callable[..., Provenance]) -> Book:
     )
 
 
-def test_load_book_accepts_legacy_pipeline_artifact(tmp_path: Path) -> None:
-    legacy = {
-        "title": "Legacy",
+def test_load_book_fills_pydantic_defaults_for_minimal_payload(tmp_path: Path) -> None:
+    minimal = {
+        "title": "Minimal",
         "chapters": [
             {
                 "title": "Chapter 1",
@@ -54,11 +54,11 @@ def test_load_book_accepts_legacy_pipeline_artifact(tmp_path: Path) -> None:
             }
         ],
     }
-    (tmp_path / "05_semantic.json").write_text(json.dumps(legacy), encoding="utf-8")
+    (tmp_path / "book.json").write_text(json.dumps(minimal), encoding="utf-8")
 
-    book = load_book(tmp_path)
+    book = load_book(tmp_path / "book.json")
 
-    assert book.title == "Legacy"
+    assert book.title == "Minimal"
     assert book.op_log_version == 0
     assert book.initialized_at == ""
     assert book.uid_seed == ""

@@ -5,23 +5,30 @@ from epubforge.editor.memory import ConventionNote, EditMemory, OpenQuestion, ca
 from epubforge.ir.semantic import AuditNote
 
 
-def _memory(*, assume_verified: bool = False) -> EditMemory:
-    memory = EditMemory.create(
+def _memory() -> EditMemory:
+    return EditMemory.create(
         book_id="book-1",
         updated_at="2026-04-23T08:00:00Z",
         updated_by="tester",
         chapter_uids=["ch-1", "ch-2"],
     )
-    if assume_verified:
-        memory = memory.model_copy(update={"assume_verified": True})
-    return memory
+
+
+def _scanned_memory() -> EditMemory:
+    """Return a memory where all chapters have read_passes >= 1."""
+    memory = _memory()
+    chapter_status = {
+        uid: memory.chapter_status[uid].model_copy(update={"read_passes": 1})
+        for uid in memory.chapter_status
+    }
+    return memory.model_copy(update={"chapter_status": chapter_status})
 
 
 def _report(*, quiet_round_streak: int, issues: list[AuditNote] | None = None) -> DoctorReport:
     return DoctorReport(
         issues=issues or [],
         readiness=evaluate_convergence(
-            memory=_memory(assume_verified=True),
+            memory=_scanned_memory(),
             chapter_uids=["ch-1", "ch-2"],
             issues=issues or [],
             delta=DoctorDelta(quiet_round=True, quiet_round_streak=quiet_round_streak),
@@ -30,56 +37,6 @@ def _report(*, quiet_round_streak: int, issues: list[AuditNote] | None = None) -
         suggested_next_actions=[],
         delta=DoctorDelta(quiet_round=True, quiet_round_streak=quiet_round_streak),
     )
-
-
-def test_assume_verified_only_bypasses_scan_requirement() -> None:
-    memory = _memory(assume_verified=True)
-    previous = _report(quiet_round_streak=1)
-
-    converged = build_doctor_report(
-        memory=memory,
-        chapter_uids=["ch-1", "ch-2"],
-        issues=[],
-        previous_memory=memory,
-        previous_report=previous,
-        new_applied_op_count=0,
-    )
-    assert converged.readiness.chapters_unscanned == []
-    assert converged.readiness.converged is True
-
-    with_question = memory.model_copy(
-        update={
-            "open_questions": [
-                OpenQuestion(
-                    q_id="2b441ceb-c07e-4b5f-a8ef-dad06dbcd4b7",
-                    question="Need reviewer decision.",
-                    asked_by="scanner-1",
-                )
-            ]
-        }
-    )
-    blocked = build_doctor_report(
-        memory=with_question,
-        chapter_uids=["ch-1", "ch-2"],
-        issues=[],
-        previous_memory=with_question,
-        previous_report=previous,
-        new_applied_op_count=0,
-    )
-    assert blocked.readiness.chapters_unscanned == []
-    assert blocked.readiness.open_questions == 1
-    assert blocked.readiness.converged is False
-
-    issue_blocked = build_doctor_report(
-        memory=memory,
-        chapter_uids=["ch-1", "ch-2"],
-        issues=[AuditNote(page=1, kind="other", hint="Table structure mismatch")],
-        previous_memory=memory,
-        previous_report=previous,
-        new_applied_op_count=0,
-    )
-    assert issue_blocked.readiness.converged is False
-    assert issue_blocked.readiness.audit_issues == 1
 
 
 def test_doctor_readiness_hints_and_actions_cover_core_paths() -> None:
@@ -118,7 +75,7 @@ def test_doctor_readiness_hints_and_actions_cover_core_paths() -> None:
 
 
 def test_convergence_hint_and_delta_use_fresh_memory_change_not_duplicates() -> None:
-    current = _memory(assume_verified=True).model_copy(
+    current = _scanned_memory().model_copy(
         update={
             "conventions": {
                 canonical_convention_key("book", None, "dash_range_style"): ConventionNote(
@@ -174,10 +131,10 @@ def test_convergence_hint_and_delta_use_fresh_memory_change_not_duplicates() -> 
 
 def test_convergence_requires_supervisor_stop_gate_even_when_other_conditions_pass() -> None:
     report = build_doctor_report(
-        memory=_memory(assume_verified=True),
+        memory=_scanned_memory(),
         chapter_uids=["ch-1", "ch-2"],
         issues=[],
-        previous_memory=_memory(assume_verified=True),
+        previous_memory=_scanned_memory(),
         previous_report=_report(quiet_round_streak=1),
         new_applied_op_count=0,
         supervisor_ready_to_stop=False,

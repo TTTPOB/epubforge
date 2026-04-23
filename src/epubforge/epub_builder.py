@@ -95,12 +95,8 @@ def resolve_build_source(work_dir: Path) -> Path:
     if editable.exists():
         return editable
 
-    legacy = work_dir / "05_semantic.json"
-    if legacy.exists():
-        return legacy
-
     raise FileNotFoundError(
-        f"build source not found under {work_dir}: expected {editable.relative_to(work_dir)} or 05_semantic.json"
+        f"build source not found under {work_dir}: expected {editable.relative_to(work_dir)}"
     )
 
 

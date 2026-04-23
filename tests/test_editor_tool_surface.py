@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from epubforge.cli import app
-from epubforge.ir.semantic import Figure, Footnote, Paragraph, Table
+from epubforge.ir.semantic import Paragraph
 from epubforge.editor.log import read_current_log
 from epubforge.editor.leases import LeaseState
 from epubforge.editor.memory import EditMemory
@@ -24,7 +24,7 @@ from epubforge.editor.state import (
 )
 from collections.abc import Callable
 
-from epubforge.io import load_book, save_book
+from epubforge.io import load_book
 from epubforge.ir.semantic import Book, Chapter, Provenance
 
 
@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()
 
 
-def _legacy_book(prov: Callable[..., Provenance]) -> Book:
+def _minimal_book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         title="Legacy Sample",
         chapters=[
@@ -48,58 +48,16 @@ def _legacy_book(prov: Callable[..., Provenance]) -> Book:
     )
 
 
-def _verified_legacy_book(prov: Callable[..., Provenance]) -> Book:
-    return Book(
-        title="Verified Synthetic",
-        chapters=[
-            Chapter(
-                title="Chapter 1",
-                blocks=[
-                    Paragraph(
-                        text="Intro \x02fn-1-①\x03 text.",
-                        style_class="epigraph",
-                        provenance=prov(1),
-                    ),
-                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=prov(1)),
-                    Figure(caption="Synthetic figure", provenance=prov(1)),
-                    Table(
-                        html="<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></tbody></table>",
-                        table_title="Table 1",
-                        caption="Synthetic table",
-                        provenance=prov(1),
-                    ),
-                ],
-            ),
-            Chapter(
-                title="Chapter 2",
-                blocks=[Paragraph(text="Clean follow-up paragraph.", provenance=prov(2))],
-            ),
-        ],
-    )
-
-
 def _invoke(args: list[str], input: str | None = None, env: dict[str, str] | None = None):
     """Invoke the root app with optional env overrides via monkeypatching."""
     return runner.invoke(app, args, input=input, env=env, catch_exceptions=False)
 
 
-def _write_legacy_artifact(prov: Callable[..., Provenance], work_dir: Path, filename: str) -> Path:
-    work_dir.mkdir(parents=True, exist_ok=True)
-    artifact = work_dir / filename
-    save_book(_legacy_book(prov), artifact, allow_legacy=True)
-    return artifact
-
-
-def _write_verified_legacy_artifact(prov: Callable[..., Provenance], work_dir: Path, filename: str) -> Path:
-    work_dir.mkdir(parents=True, exist_ok=True)
-    artifact = work_dir / filename
-    save_book(_verified_legacy_book(prov), artifact, allow_legacy=True)
-    return artifact
-
-
 def test_init_command_creates_edit_state(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "sample-init"
-    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
 
     result = _invoke(["editor", "init", str(work_dir)])
 
@@ -117,69 +75,75 @@ def test_init_command_creates_edit_state(prov, tmp_path: Path) -> None:
     assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
 
 
-def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_memory(prov, tmp_path: Path) -> None:
-    base_work = tmp_path / "legacy-a"
-    _write_legacy_artifact(prov, base_work, "07_footnote_verified.json")
-    result = _invoke(
-        ["editor", "import-legacy", str(base_work), "--from", "07_footnote_verified.json"],
-    )
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["book_version"] == 1
-
-    paths = resolve_editor_paths(base_work)
-    book = load_book(paths.book_path)
-    assert book.op_log_version == 1
-    base_meta = json.loads(paths.meta_path.read_text(encoding="utf-8"))
-    assert base_meta == {"initialized_at": book.initialized_at, "uid_seed": book.uid_seed}
-    memory = json.loads(paths.memory_path.read_text(encoding="utf-8"))
-    assert memory["assume_verified"] is False
-    assert all(status["read_passes"] == 0 for status in memory["chapter_status"].values())
-    current_log = read_current_log(paths.edit_state_dir)
-    assert len(current_log) == 1
-    assert current_log[0].op.op == "noop"
-    assert current_log[0].op.purpose == "legacy_baseline"
-
-    verified_work = tmp_path / "legacy-b"
-    _write_legacy_artifact(prov, verified_work, "06_proofread.json")
-    verified = _invoke(
-        ["editor", "import-legacy", str(verified_work), "--from", "06_proofread.json", "--assume-verified"],
-    )
-    assert verified.exit_code == 0, verified.output
-    verified_payload = json.loads(verified.output)
-    assert verified_payload["book_version"] == 1
-
-    verified_paths = resolve_editor_paths(verified_work)
-    verified_book = load_book(verified_paths.book_path)
-    verified_meta = json.loads(verified_paths.meta_path.read_text(encoding="utf-8"))
-    assert verified_meta == {"initialized_at": verified_book.initialized_at, "uid_seed": verified_book.uid_seed}
-    verified_memory = json.loads(verified_paths.memory_path.read_text(encoding="utf-8"))
-    assert verified_book.op_log_version == 1
-    assert verified_memory["assume_verified"] is True
-    assert all(status["read_passes"] == 1 for status in verified_memory["chapter_status"].values())
-
-
 def test_doctor_propose_apply_queue_and_render_prompt_work_together(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-doctor"
-    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
-    imported = _invoke(
-        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
-    )
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+    imported = _invoke(["editor", "init", str(work_dir)])
     assert imported.exit_code == 0, imported.output
 
-    first_doctor = _invoke(["editor", "doctor", str(work_dir)])
-    second_doctor = _invoke(["editor", "doctor", str(work_dir)])
-    assert first_doctor.exit_code == 0, first_doctor.output
-    assert second_doctor.exit_code == 0, second_doctor.output
-    assert json.loads(first_doctor.output)["readiness"]["converged"] is False
-    assert json.loads(second_doctor.output)["readiness"]["converged"] is True
-
+    # Load book to get chapter/block uids
     book = load_book(resolve_editor_paths(work_dir).book_path)
     chapter_uid = book.chapters[0].uid
     block_uid = book.chapters[0].blocks[0].uid
     assert chapter_uid is not None
     assert block_uid is not None
 
+    # Propose and apply a scanner memory patch that marks the chapter as read (read_passes=1).
+    # This must happen BEFORE the first doctor call so that new_applied_op_count=0 on first
+    # doctor (previous=None) and quiet_round streak accumulates correctly.
+    acquired_scan = _invoke(
+        ["editor", "acquire-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "scanner-1", "--task", "scan chapter"],
+    )
+    assert acquired_scan.exit_code == 0, acquired_scan.output
+
+    scan_envelope = [
+        {
+            "op_id": str(uuid4()),
+            "ts": "2026-04-23T08:00:00Z",
+            "agent_id": "scanner-1",
+            "base_version": 0,
+            "op": {"op": "noop", "purpose": "milestone"},
+            "memory_patches": [
+                {
+                    "conventions": [],
+                    "patterns": [],
+                    "chapter_status": [{"chapter_uid": chapter_uid, "read_passes": 1}],
+                    "open_questions": [],
+                }
+            ],
+            "rationale": "scanner pass completed",
+        }
+    ]
+    scan_proposed = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps(scan_envelope, ensure_ascii=False),
+    )
+    assert scan_proposed.exit_code == 0, scan_proposed.output
+    assert json.loads(scan_proposed.output)["accepted"] == 1
+
+    scan_applied = _invoke(["editor", "apply-queue", str(work_dir)])
+    assert scan_applied.exit_code == 0, scan_applied.output
+    assert json.loads(scan_applied.output)["new_version"] == 1
+
+    released_scan = _invoke(
+        ["editor", "release-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "scanner-1"],
+    )
+    assert released_scan.exit_code == 0, released_scan.output
+
+    # First doctor: previous=None → new_applied_op_count=0, quiet_round=True, streak=1.
+    # Chapters are scanned. Not converged yet (streak < 2).
+    first_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    assert first_doctor.exit_code == 0, first_doctor.output
+    assert json.loads(first_doctor.output)["readiness"]["converged"] is False
+
+    # Second doctor: quiet_round=True, streak=2. Converged.
+    second_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    assert second_doctor.exit_code == 0, second_doctor.output
+    assert json.loads(second_doctor.output)["readiness"]["converged"] is True
+
+    # Acquire lease and apply a text-fix op
     acquired = _invoke(
         ["editor", "acquire-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "fixer-1", "--task", "fix text"],
     )
@@ -220,7 +184,6 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(prov, tmp_pa
     assert prompt.exit_code == 0, prompt.output
     assert "当前 book.op_log_version=2" in prompt.output
     assert "当前 memory 快照：" in prompt.output
-    assert '"assume_verified": true' in prompt.output
 
     released = _invoke(
         ["editor", "release-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "fixer-1"],
@@ -235,8 +198,10 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(prov, tmp_pa
 
 def test_book_lock_run_script_snapshot_and_compact_commands(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-tools"
-    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
-    imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+    imported = _invoke(["editor", "init", str(work_dir)])
     assert imported.exit_code == 0, imported.output
 
     locked = _invoke(["editor", "acquire-book-lock", str(work_dir), "--agent", "supervisor", "--reason", "compact"])
@@ -292,41 +257,6 @@ print(json.dumps(payload, ensure_ascii=False))
     assert current_log[0].op.op == "compact_marker"
 
 
-def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_doctor_rounds(prov, tmp_path: Path) -> None:
-    work_dir = tmp_path / "verified-import"
-    _write_verified_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
-
-    imported = _invoke(
-        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
-    )
-    assert imported.exit_code == 0, imported.output
-    payload = json.loads(imported.output)
-    assert payload["book_version"] == 1
-    assert payload["assume_verified"] is True
-
-    paths = resolve_editor_paths(work_dir)
-    book = load_book(paths.book_path)
-    memory = json.loads(paths.memory_path.read_text(encoding="utf-8"))
-    assert book.op_log_version == 1
-    assert all(chapter.uid for chapter in book.chapters)
-    assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
-    assert memory["assume_verified"] is True
-    assert memory["imported"] is True
-    assert memory["imported_from"] == "07_footnote_verified.json"
-    assert all(status["read_passes"] == 1 for status in memory["chapter_status"].values())
-
-    first_doctor = _invoke(["editor", "doctor", str(work_dir)])
-    second_doctor = _invoke(["editor", "doctor", str(work_dir)])
-    assert first_doctor.exit_code == 0, first_doctor.output
-    assert second_doctor.exit_code == 0, second_doctor.output
-
-    first_payload = json.loads(first_doctor.output)
-    second_payload = json.loads(second_doctor.output)
-    assert first_payload["readiness"]["converged"] is False
-    assert second_payload["readiness"]["converged"] is True
-    assert second_payload["readiness"]["chapters_unscanned"] == []
-
-
 # ---------------------------------------------------------------------------
 # Helpers shared by run-script sandbox tests
 # ---------------------------------------------------------------------------
@@ -335,7 +265,9 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
 def _init_work_dir(prov: Callable[..., Provenance], tmp_path: Path) -> Path:
     """Create and initialize a minimal work dir; return it."""
     work_dir = tmp_path / "work"
-    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
     result = _invoke(["editor", "init", str(work_dir)])
     assert result.exit_code == 0, result.output
     return work_dir
@@ -433,7 +365,7 @@ def _make_valid_envelope(block_uid: str, text_value: str = "Alpha paragraph.") -
         "op_id": str(uuid4()),
         "ts": "2026-04-23T08:00:00Z",
         "agent_id": "test-agent",
-        "base_version": 1,
+        "base_version": 0,
         "op": {
             "op": "set_text",
             "block_uid": block_uid,
@@ -447,8 +379,10 @@ def _make_valid_envelope(block_uid: str, text_value: str = "Alpha paragraph.") -
 def _setup_initialized_work(prov: Callable[..., Provenance], tmp_path: Path) -> tuple[Path, str]:
     """Return (work_dir, block_uid_of_first_block)."""
     work_dir = tmp_path / "work"
-    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
-    imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+    imported = _invoke(["editor", "init", str(work_dir)])
     assert imported.exit_code == 0, imported.output
     book = load_book(resolve_editor_paths(work_dir).book_path)
     block_uid = book.chapters[0].blocks[0].uid
@@ -528,7 +462,7 @@ def _make_book_and_memory(prov: Callable[..., Provenance], work_dir: Path) -> tu
     from datetime import UTC, datetime
 
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    book = initialize_book_state(_legacy_book(prov), initialized_at=now)
+    book = initialize_book_state(_minimal_book(prov), initialized_at=now)
     paths = resolve_editor_paths(work_dir)
     memory = EditMemory.create(
         book_id=book_id_from_paths(paths),
@@ -559,7 +493,9 @@ def test_write_initial_state_does_not_touch_book_json(prov, tmp_path: Path) -> N
 
 def test_run_init_persists_book(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "init-persists"
-    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
+    book = _minimal_book(prov)
+    (work_dir / "05_semantic.json").parent.mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
 
     result = _invoke(["editor", "init", str(work_dir)])
 
@@ -570,27 +506,6 @@ def test_run_init_persists_book(prov, tmp_path: Path) -> None:
     book = load_book(paths.book_path)
     assert book.op_log_version == 0
     assert book.uid_seed
-
-
-def test_run_import_legacy_persists_book_and_log(prov, tmp_path: Path) -> None:
-    work_dir = tmp_path / "import-persists"
-    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
-
-    result = _invoke(
-        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"],
-    )
-
-    assert result.exit_code == 0, result.output
-    paths = resolve_editor_paths(work_dir)
-    # book.json must exist and be at version 1 (noop applied)
-    assert paths.book_path.exists()
-    book = load_book(paths.book_path)
-    assert book.op_log_version == 1
-    # edit log must exist via paths.current_log_path (no hardcoded filename)
-    assert paths.current_log_path.exists()
-    current_log = read_current_log(paths.edit_state_dir)
-    assert len(current_log) == 1
-    assert current_log[0].op.op == "noop"
 
 
 # ---------------------------------------------------------------------------
