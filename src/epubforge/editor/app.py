@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from epubforge.editor.cli_support import CommandError, emit_json
+from epubforge.editor.cli_support import CommandError
 
 editor_app = typer.Typer(help="Editor subsystem commands", no_args_is_help=True)
 
