@@ -117,13 +117,6 @@ def ensure_initialized(paths: EditorPaths) -> None:
         raise FileNotFoundError(f"editor state is not initialized: {preview}")
 
 
-def source_artifact_path(paths: EditorPaths, artifact: str | Path) -> Path:
-    candidate = Path(artifact).expanduser()
-    if not candidate.is_absolute():
-        candidate = paths.work_dir / candidate
-    return candidate
-
-
 def default_init_source(paths: EditorPaths) -> Path:
     return paths.work_dir / "05_semantic.json"
 
