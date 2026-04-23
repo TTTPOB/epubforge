@@ -1,282 +1,221 @@
-# epubforge — Usage Guide
+# epubforge 使用说明
 
-## Prerequisites
+## 总览
 
-Install dependencies with [uv](https://docs.astral.sh/uv/):
+当前稳定架构分成两层：
+
+1. ingestion pipeline: `parse -> classify -> extract -> assemble`
+2. agentic editing layer: 以 `edit_state/` 为中心，由 supervisor 调度 scanner / fixer / reviewer
+
+最终 `build` 优先读取 `work/<book>/edit_state/book.json`；如果尚未初始化编辑层，则回退到 `work/<book>/05_semantic.json`。
+
+旧的 `refine-toc`、`proofread`、`footnote-verify` 已不再是 runtime stage。
+
+## 快速开始
+
+安装依赖：
 
 ```bash
 uv sync
 ```
 
-Configure API keys (see [Configuration](#configuration) below).
-
----
-
-## Quick Start
-
-Convert a PDF to EPUB in one command:
+基础转换：
 
 ```bash
-uv run epubforge run fixtures/mybook.pdf
+uv run epubforge run fixtures/example.pdf
 ```
 
-Output is written to `out/mybook.epub`. Intermediate files land in `work/mybook/`.
+产物会写入：
 
----
+- `work/example/01_raw.json`
+- `work/example/02_pages.json`
+- `work/example/03_extract/`
+- `work/example/05_semantic_raw.json`
 
-## Pipeline Overview
+如果只做 ingestion，到这里为止。进入编辑层有两种入口：
 
-The pipeline runs seven stages in sequence:
+- 已有可作为编辑基线的 `05_semantic.json`：用 `python -m epubforge.editor.init`
+- 只有 `05_semantic_raw.json` 或其他 legacy artifact：用 `python -m epubforge.editor.import-legacy --from ...`
 
-| Stage | Command | Output |
-|-------|---------|--------|
-| 1 — Parse | `epubforge parse` | `work/<name>/01_raw.json` |
-| 2 — Classify | `epubforge classify` | `work/<name>/02_pages.json` |
-| 3 — Extract | `epubforge extract` | `work/<name>/03_extract/unit_*.json` |
-| 4 — Assemble | `epubforge assemble` | `work/<name>/05_semantic_raw.json` |
-| 5 — Refine TOC | `epubforge refine-toc` | `work/<name>/05_semantic.json` |
-| 6 — Proofread | `epubforge proofread` | `work/<name>/06_proofread.json` |
-| 7 — Build | `epubforge build` | `out/<name>.epub` |
+## Ingestion Pipeline
 
-Stage 3 (extract) is the expensive step — it calls the VLM for every page. All other stages are cheap and can be re-run freely.
+### 阶段
 
----
+| 阶段 | 命令 | 输出 |
+|---|---|---|
+| 1 | `epubforge parse` | `work/<name>/01_raw.json` |
+| 2 | `epubforge classify` | `work/<name>/02_pages.json` |
+| 3 | `epubforge extract` | `work/<name>/03_extract/unit_*.json` |
+| 4 | `epubforge assemble` | `work/<name>/05_semantic_raw.json` |
+| 8 | `epubforge build` | `out/<name>.epub` |
 
-## Running Individual Stages
+`run` 只会串行执行 1-4。`build` 独立运行。
 
-Each stage can be run in isolation. Stages skip if their output already exists — pass `--force-rerun` (or `-f`) to override.
+### 单独运行
+
+所有 ingestion/build 子命令都接收 PDF 路径：
 
 ```bash
-uv run epubforge parse   fixtures/mybook.pdf
-uv run epubforge classify fixtures/mybook.pdf
-uv run epubforge extract  fixtures/mybook.pdf
-uv run epubforge assemble work/mybook
-uv run epubforge refine-toc work/mybook
-uv run epubforge proofread  work/mybook
-uv run epubforge build   fixtures/mybook.pdf
+uv run epubforge parse fixtures/example.pdf
+uv run epubforge classify fixtures/example.pdf
+uv run epubforge extract fixtures/example.pdf
+uv run epubforge assemble fixtures/example.pdf
+uv run epubforge build fixtures/example.pdf
 ```
 
-Note: `parse`, `classify`, `extract`, `build` take the PDF path; `assemble`, `refine-toc`, `proofread` take the work directory.
-
----
-
-## Re-running from a Specific Stage
-
-Use `epubforge run --from N` to skip stages 1 through N−1:
+### 从指定阶段继续
 
 ```bash
-# Re-run from stage 4 (assemble) onwards, forcing re-run of all stages >= 4
-uv run epubforge run fixtures/mybook.pdf --from 4 --force-rerun
-
-# Re-run only proofread and build (stages 6-7)
-uv run epubforge run fixtures/mybook.pdf --from 6 --force-rerun
+uv run epubforge run fixtures/example.pdf --from 3
+uv run epubforge run fixtures/example.pdf --from 4 --force-rerun
 ```
 
-Without `--force-rerun`, stages whose outputs already exist are still skipped even when `--from` includes them.
+`--from` 只允许 `1-4`。`--force-rerun` 会强制重跑该阶段及其后续阶段。
 
----
-
-## Resuming a Partial Extract
-
-Stage 3 is resumable: unit files that already exist are reused automatically. If a run was interrupted partway through, just re-run extract:
+### 局部提取
 
 ```bash
-uv run epubforge extract fixtures/mybook.pdf
+uv run epubforge run fixtures/example.pdf --pages 1-20
 ```
 
-It will pick up where it left off.
+`--pages` 主要用于抽样、调试或构造 synthetic 测试资产；不要把它和旧文档里的手工 unit 删除流程混为一谈。
 
-### Re-extracting Specific Pages
+## Agentic Editing Layer
 
-If you need specific pages re-extracted (e.g., after fixing a grouping bug), delete the corresponding unit files and re-run extract:
+编辑层的稳定命令面不挂在 `epubforge` 主 CLI 下，而是以下列模块形式调用：
 
-```bash
-# Find which unit files cover pages 45-50
-python3 -c "
-import json
-from pathlib import Path
-for u in sorted(Path('work/mybook/03_extract').glob('unit_*.json')):
-    d = json.loads(u.read_text())
-    if any(45 <= p <= 50 for p in d['unit']['pages']):
-        print(u.name, d['unit']['pages'])
-"
+- `python -m epubforge.editor.init`
+- `python -m epubforge.editor.import-legacy`
+- `python -m epubforge.editor.doctor`
+- `python -m epubforge.editor.propose-op`
+- `python -m epubforge.editor.apply-queue`
+- `python -m epubforge.editor.acquire-lease`
+- `python -m epubforge.editor.release-lease`
+- `python -m epubforge.editor.acquire-book-lock`
+- `python -m epubforge.editor.release-book-lock`
+- `python -m epubforge.editor.run-script`
+- `python -m epubforge.editor.compact`
+- `python -m epubforge.editor.snapshot`
+- `python -m epubforge.editor.render-prompt`
 
-# Delete those unit files
-rm work/mybook/03_extract/unit_XXXX.json ...
+详细工作流见 [agentic-editing-howto.md](./agentic-editing-howto.md)。
 
-# Re-run extract (reuses all other units, re-runs deleted ones)
-uv run epubforge extract fixtures/mybook.pdf
+规则知识库见：
 
-# Then re-run downstream stages
-uv run epubforge assemble work/mybook --force-rerun
-uv run epubforge refine-toc work/mybook --force-rerun
-uv run epubforge proofread work/mybook --force-rerun
-uv run epubforge build fixtures/mybook.pdf --force-rerun
-```
+- [rules/punctuation.md](./rules/punctuation.md)
+- [rules/tables.md](./rules/tables.md)
+- [rules/footnotes.md](./rules/footnotes.md)
+- [rules/structure.md](./rules/structure.md)
 
-> **Important**: always delete unit files using the full-book page numbering — do not use `--pages` for this, because `--pages` renumbers the unit index from 0 and will conflict with existing unit files.
+## 目录结构
 
----
-
-## Work Directory Layout
-
-```
+```text
 work/
-└── mybook/
-    ├── 01_raw.json            # Docling parse output
-    ├── 02_pages.json          # Per-page classification (simple/complex/toc)
+└── example/
+    ├── 01_raw.json
+    ├── 02_pages.json
     ├── 03_extract/
-    │   ├── unit_0000.json     # VLM extract output, one file per unit (batch of pages)
+    │   ├── unit_0000.json
     │   ├── unit_0001.json
-    │   ├── ...
-    │   ├── book_memory.json   # Rolling per-book facts (footnote symbols, etc.)
-    │   └── audit_notes.json   # VLM-flagged suspicious items
-    ├── 05_semantic_raw.json   # Assembled Semantic IR (pre-proofread)
-    ├── 05_semantic.json       # After TOC refinement
-    ├── 06_proofread.json      # After proofreading
-    ├── images/                # Extracted page images (figures)
-    ├── style_registry.json    # Block style registry (created by proofread)
+    │   └── ...
+    ├── 05_semantic_raw.json
+    ├── 05_semantic.json        # optional curated baseline for `editor.init`
+    ├── edit_state/
+    │   ├── book.json
+    │   ├── meta.json
+    │   ├── memory.json
+    │   ├── leases.json
+    │   ├── staging.jsonl
+    │   ├── edit_log.jsonl
+    │   ├── audit/
+    │   │   ├── doctor_report.json
+    │   │   └── doctor_context.json
+    │   ├── scratch/
+    │   └── snapshots/
+    ├── images/
     └── logs/
-        └── run-<timestamp>.log
 out/
-└── mybook.epub
+└── example.epub
 ```
 
----
+## 配置
 
-## Configuration
+配置优先级：
 
-Settings are loaded in this priority order (highest wins):
+1. 环境变量
+2. `config.local.toml`
+3. `config.toml`
+4. 内建默认值
 
-1. Environment variables
-2. `config.local.toml` (git-ignored, for personal secrets)
-3. `config.toml` (committed defaults)
-4. Built-in defaults
-
-### Minimal config.toml
+### 最小配置
 
 ```toml
 [llm]
-api_key = "sk-or-..."        # OpenRouter key (used for LLM stages)
-model   = "anthropic/claude-haiku-4.5"
+api_key = "sk-or-..."
+model = "anthropic/claude-haiku-4.5"
 
 [vlm]
-# api_key and base_url default to [llm] values if omitted
 model = "google/gemini-2.5-flash-preview"
 ```
 
-### Full reference
+### 常用项
 
 ```toml
 [llm]
-base_url        = "https://openrouter.ai/api/v1"
-api_key         = "sk-or-..."
-model           = "anthropic/claude-haiku-4.5"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "sk-or-..."
+model = "anthropic/claude-haiku-4.5"
 timeout_seconds = 300
-max_tokens      = 8192        # optional hard cap
-prompt_caching  = true        # Anthropic cache_control headers
+max_tokens = 8192
+prompt_caching = true
 
 [vlm]
-base_url        = "https://openrouter.ai/api/v1"  # falls back to [llm]
-api_key         = "sk-or-..."                      # falls back to [llm]
-model           = "google/gemini-2.5-flash-preview"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "sk-or-..."
+model = "google/gemini-2.5-flash-preview"
 timeout_seconds = 300
-max_tokens      = 8192
-prompt_caching  = true
+max_tokens = 8192
+prompt_caching = true
 
 [runtime]
-concurrency = 4               # parallel VLM requests during extract
-cache_dir   = "work/.cache"   # disk cache for LLM/VLM responses
-work_dir    = "work"
-out_dir     = "out"
+concurrency = 4
+cache_dir = "work/.cache"
+work_dir = "work"
+out_dir = "out"
 
 [extract]
-vlm_dpi                = 200  # PDF render DPI (200 recommended for footnote readability)
-max_simple_batch_pages = 8    # max pages per simple-page VLM batch
-max_complex_batch_pages = 12  # max pages per complex-page VLM batch
-enable_book_memory     = true # rolling per-book facts injected into VLM context
+vlm_dpi = 200
+max_simple_batch_pages = 8
+max_complex_batch_pages = 12
+enable_book_memory = true
 
-[proofread]
-phase1_thinking_budget_tokens = 2000
-phase2_thinking_budget_tokens = 2000
-max_chunk_tokens              = 100000
+[editor]
+lease_ttl_seconds = 1800
+compact_threshold = 50
+max_loops = 50
 ```
 
-### Environment variables
-
-All config keys are available as env vars (highest priority):
+### 环境变量
 
 ```bash
 EPUBFORGE_LLM_API_KEY=sk-or-...
 EPUBFORGE_LLM_MODEL=anthropic/claude-haiku-4.5
 EPUBFORGE_VLM_MODEL=google/gemini-2.5-flash-preview
-EPUBFORGE_VLM_DPI=200
 EPUBFORGE_CONCURRENCY=4
-EPUBFORGE_ENABLE_BOOK_MEMORY=true
-EPUBFORGE_MAX_SIMPLE_BATCH_PAGES=8
-EPUBFORGE_MAX_COMPLEX_BATCH_PAGES=12
-EPUBFORGE_LOG_LEVEL=INFO      # DEBUG / INFO / WARNING
+EPUBFORGE_LOG_LEVEL=INFO
+EPUBFORGE_LLM_PROMPT_CACHING=1
 ```
 
----
+## 日志
 
-## Logging
-
-Logs are written to `work/<name>/logs/run-<timestamp>.log` and also printed to stdout. Adjust verbosity:
+日志默认写入 `work/<name>/logs/run-<timestamp>.log`，同时输出到 stderr。
 
 ```bash
-# Verbose (shows VLM prompts and responses)
-uv run epubforge -L DEBUG run fixtures/mybook.pdf
-
-# Quiet
-uv run epubforge -L WARNING run fixtures/mybook.pdf
+uv run epubforge -L DEBUG run fixtures/example.pdf
+uv run epubforge -L WARNING build fixtures/example.pdf
 ```
 
----
+## 迁移提示
 
-## Common Workflows
-
-### First run on a new book
-
-```bash
-uv run epubforge run fixtures/mybook.pdf
-```
-
-### Re-run only proofread (after tuning prompts)
-
-```bash
-uv run epubforge proofread work/mybook --force-rerun
-uv run epubforge build fixtures/mybook.pdf --force-rerun
-```
-
-### Re-run assemble through EPUB after fixing assembler code
-
-```bash
-uv run epubforge run fixtures/mybook.pdf --from 4 --force-rerun
-```
-
-### Extend an existing extract run (book was truncated at page N, now run full book)
-
-```bash
-# Find and delete unit files for the last few pages (they need regrouping in full-book context)
-python3 -c "
-import json
-from pathlib import Path
-for u in sorted(Path('work/mybook/03_extract').glob('unit_*.json')):
-    d = json.loads(u.read_text())
-    if any(p >= 45 for p in d['unit']['pages']):  # adjust threshold
-        print(u)
-" | xargs rm
-
-# Resume extract (pages 1–44 reused, 45–end re-run with correct grouping)
-uv run epubforge extract fixtures/mybook.pdf
-
-# Rebuild downstream
-uv run epubforge run fixtures/mybook.pdf --from 4 --force-rerun
-```
-
-### Disable book memory (for debugging or cost reduction)
-
-```bash
-EPUBFORGE_ENABLE_BOOK_MEMORY=false uv run epubforge extract fixtures/mybook.pdf --force-rerun
-```
+- 如果你还在寻找 `refine-toc` / `proofread` / `footnote-verify`，请转到 [agentic-editing-howto.md](./agentic-editing-howto.md)。
+- 如果你想知道“如何判断一本书的标点、表格、脚注、结构该怎么修”，请直接读 `docs/rules/`，不要再参考旧的人工审校 SOP。
