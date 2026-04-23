@@ -37,8 +37,6 @@ def unresolved_questions(memory: EditMemory) -> list[OpenQuestion]:
 
 
 def chapters_missing_scan(memory: EditMemory, chapter_uids: Iterable[str]) -> list[str]:
-    if memory.assume_verified:
-        return []
     missing: list[str] = []
     for chapter_uid in sorted(set(chapter_uids)):
         status = memory.chapter_status.get(chapter_uid)

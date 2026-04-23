@@ -7,7 +7,6 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Literal
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -26,7 +25,7 @@ from epubforge.editor.log import (
     reverted_target_op_ids,
 )
 from epubforge.editor.memory import EditMemory
-from epubforge.editor.ops import NoopOp, OpEnvelope
+from epubforge.editor.ops import OpEnvelope
 from epubforge.editor.prompts import render_prompt
 from epubforge.editor.scratch import allocate_script_path, run_script, write_script_stub
 from epubforge.editor.state import (
@@ -44,7 +43,6 @@ from epubforge.editor.state import (
     resolve_editor_paths,
     save_leases,
     save_memory,
-    source_artifact_path,
     write_initial_state,
     initialize_book_state,
 )
@@ -125,56 +123,6 @@ def run_init(work: Path, cfg: Config) -> int:
             "initialized_at": book.initialized_at,
             "uid_seed": book.uid_seed,
             "book_version": book.op_log_version,
-            "book_path": str(paths.book_path),
-        }
-    )
-    return 0
-
-
-def run_import_legacy(work: Path, source: str, assume_verified: bool, cfg: Config) -> int:
-    paths = resolve_editor_paths(work)
-    ensure_work_dir(paths)
-    ensure_uninitialized(paths)
-    source_path = source_artifact_path(paths, source)
-    if not source_path.exists():
-        raise CommandError(f"missing legacy artifact: {source_path}")
-
-    now = _timestamp()
-    book = initialize_book_state(load_book(source_path), initialized_at=now)
-    memory = EditMemory.create(
-        book_id=book_id_from_paths(paths),
-        updated_at=now,
-        updated_by="editor.import-legacy",
-        chapter_uids=chapter_uids(book),
-    ).with_legacy_import(
-        imported_from=source_path.name,
-        imported_at=now,
-        updated_by="editor.import-legacy",
-        chapter_uids=chapter_uids(book),
-        assume_verified=assume_verified,
-    )
-    write_initial_state(paths, book=book, memory=memory, leases=LeaseState())
-
-    noop_env = OpEnvelope(
-        op_id=str(uuid4()),
-        ts=now,
-        agent_id="editor.import-legacy",
-        base_version=0,
-        op=NoopOp(op="noop", purpose="legacy_baseline"),
-        rationale="legacy import baseline",
-    )
-    result = apply_envelope(book, noop_env, now=lambda: now)
-    imported_book = result.book
-    for accepted in result.accepted_envelopes:
-        append_accepted_log(paths.edit_state_dir, accepted)
-    save_book(imported_book, paths.work_dir)
-
-    emit_json(
-        {
-            "initialized_at": imported_book.initialized_at,
-            "uid_seed": imported_book.uid_seed,
-            "book_version": imported_book.op_log_version,
-            "assume_verified": memory.assume_verified,
             "book_path": str(paths.book_path),
         }
     )
@@ -464,7 +412,6 @@ __all__ = [
     "run_apply_queue",
     "run_compact",
     "run_doctor",
-    "run_import_legacy",
     "run_init",
     "run_propose_op",
     "run_release_book_lock",

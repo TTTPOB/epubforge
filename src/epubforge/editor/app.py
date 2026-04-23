@@ -45,24 +45,6 @@ def _init_cmd(
     raise typer.Exit(_run(run_init, work=work, cfg=cfg))
 
 
-@editor_app.command("import-legacy")
-def _import_legacy_cmd(
-    ctx: typer.Context,
-    work: Annotated[Path, typer.Argument(help="Work directory")],
-    source: Annotated[str, typer.Option("--from", help="Legacy artifact filename or path")] = "",
-    assume_verified: Annotated[bool, typer.Option("--assume-verified", help="Mark all chapters as read_passes=1")] = False,
-) -> None:
-    """Initialize edit_state from a legacy artifact."""
-    from epubforge.editor.tool_surface import run_import_legacy
-
-    if not source:
-        typer.echo('{"error": "--from is required"}')
-        raise typer.Exit(2)
-    app_ctx = ctx.find_root().obj
-    cfg = app_ctx.config
-    raise typer.Exit(_run(run_import_legacy, work=work, source=source, assume_verified=assume_verified, cfg=cfg))
-
-
 @editor_app.command("doctor")
 def _doctor_cmd(
     ctx: typer.Context,

@@ -679,7 +679,7 @@ class RelocateBlock(StrictModel):
 
 class NoopOp(StrictModel):
     op: Literal["noop"]
-    purpose: Literal["legacy_baseline", "milestone"]
+    purpose: Literal["milestone"]
 
 
 class CompactMarker(StrictModel):

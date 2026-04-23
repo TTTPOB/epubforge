@@ -206,10 +206,6 @@ class OpenQuestion(StrictModel):
 
 class EditMemory(StrictModel):
     book_id: str
-    imported: bool = False
-    imported_from: str | None = None
-    imported_at: str | None = None
-    assume_verified: bool = False
     conventions: dict[str, ConventionNote] = Field(default_factory=dict)
     patterns: dict[str, PatternNote] = Field(default_factory=dict)
     chapter_status: dict[str, ChapterStatus] = Field(default_factory=dict)
@@ -227,28 +223,6 @@ class EditMemory(StrictModel):
     def _validate_updated_at(cls, value: str) -> str:
         return validate_utc_iso_timestamp(value, field_name="updated_at")
 
-    @field_validator("imported_from")
-    @classmethod
-    def _validate_imported_from(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return require_non_empty(value, field_name="imported_from")
-
-    @field_validator("imported_at")
-    @classmethod
-    def _validate_imported_at(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return validate_utc_iso_timestamp(value, field_name="imported_at")
-
-    @model_validator(mode="after")
-    def _check_import_fields(self) -> EditMemory:
-        if self.imported and (self.imported_from is None or self.imported_at is None):
-            raise ValueError("imported memory must include imported_from and imported_at")
-        if not self.imported and (self.imported_from is not None or self.imported_at is not None):
-            raise ValueError("non-imported memory must not set imported_from/imported_at")
-        return self
-
     @classmethod
     def create(
         cls,
@@ -263,38 +237,6 @@ class EditMemory(StrictModel):
             for chapter_uid in sorted(set(chapter_uids or []))
         }
         return cls(book_id=book_id, updated_at=updated_at, updated_by=updated_by, chapter_status=statuses)
-
-    def with_legacy_import(
-        self,
-        *,
-        imported_from: str,
-        imported_at: str,
-        updated_by: str,
-        chapter_uids: list[str],
-        assume_verified: bool = False,
-    ) -> EditMemory:
-        chapter_status = dict(self.chapter_status)
-        note = f"imported from {imported_from}"
-        for chapter_uid in sorted(set(chapter_uids)):
-            current = chapter_status.get(chapter_uid, ChapterStatus(chapter_uid=chapter_uid))
-            if assume_verified:
-                chapter_status[chapter_uid] = current.model_copy(
-                    update={"read_passes": max(current.read_passes, 1), "last_reader": "legacy-import", "notes": note}
-                )
-            else:
-                chapter_status[chapter_uid] = current
-        return self.model_copy(
-            update={
-                "imported": True,
-                "imported_from": imported_from,
-                "imported_at": imported_at,
-                "assume_verified": assume_verified,
-                "chapter_status": chapter_status,
-                "open_questions": [] if assume_verified else self.open_questions,
-                "updated_at": imported_at,
-                "updated_by": updated_by,
-            }
-        )
 
 
 class MemoryPatch(StrictModel):

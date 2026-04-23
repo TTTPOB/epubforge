@@ -207,35 +207,3 @@ def test_pattern_merge_uses_stable_canonical_key_and_dedupes_rephrasing() -> Non
 
     assert second.fresh_change_count == 0
     assert second.decisions[0].outcome == "duplicate"
-
-
-def test_legacy_import_assume_verified_marks_chapters_and_clears_questions() -> None:
-    memory = _memory().model_copy(
-        update={
-            "open_questions": [
-                OpenQuestion(
-                    q_id="aef8bcef-083c-4521-80d6-1a9a16bdb11e",
-                    question="Need a decision.",
-                    asked_by="scanner-1",
-                )
-            ]
-        }
-    )
-    imported = memory.with_legacy_import(
-        imported_from="06_proofread.json",
-        imported_at="2026-04-23T09:00:00Z",
-        updated_by="legacy-import",
-        chapter_uids=["ch-1", "ch-2"],
-        assume_verified=True,
-    )
-
-    assert imported.imported is True
-    assert imported.imported_from == "06_proofread.json"
-    assert imported.assume_verified is True
-    assert imported.open_questions == []
-    assert imported.chapter_status["ch-1"] == ChapterStatus(
-        chapter_uid="ch-1",
-        read_passes=1,
-        last_reader="legacy-import",
-        notes="imported from 06_proofread.json",
-    )
