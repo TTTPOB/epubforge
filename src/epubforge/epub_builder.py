@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
+import tempfile
 import uuid
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote as _url_quote
@@ -14,6 +18,9 @@ from ebooklib import epub
 from epubforge.io import EDITABLE_BOOK_PATH
 
 _FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
+_OPF_MODIFIED_RE = re.compile(r"(<meta property=\"dcterms:modified\">)([^<]+)(</meta>)")
+_FIXED_EPUB_MODIFIED = "2000-01-01T00:00:00Z"
+_FIXED_ZIP_TIMESTAMP = (2000, 1, 1, 0, 0, 0)
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +116,7 @@ def build_epub(
     css = _generate_css(registry)
 
     ebook = epub.EpubBook()
-    ebook.set_identifier(str(uuid.uuid4()))
+    ebook.set_identifier(_deterministic_identifier(book_model, css=css, images_dir=images_dir))
     ebook.set_title(book_model.title)
     ebook.set_language(book_model.language)
     for author in book_model.authors:
@@ -218,6 +225,7 @@ def build_epub(
     ebook.add_item(epub.EpubNav())
 
     epub.write_epub(str(out_path), ebook)
+    _normalize_epub_archive(out_path)
 
     n_chapters = len(book_model.chapters)
     n_blocks = sum(len(ch.blocks) for ch in book_model.chapters)
@@ -227,6 +235,82 @@ def build_epub(
         "epub_builder: chapters=%d blocks=%d images=%d size=%d bytes → %s",
         n_chapters, n_blocks, n_images, size, out_path.name,
     )
+
+
+def _deterministic_identifier(book_model: Book, *, css: str, images_dir: Path | None) -> str:
+    payload = {
+        "title": book_model.title,
+        "language": book_model.language,
+        "authors": list(book_model.authors),
+        "chapters": [_chapter_identity(chapter) for chapter in book_model.chapters],
+        "css": css,
+        "images": _image_manifest(images_dir),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return str(uuid.UUID(digest[:32]))
+
+
+def _chapter_identity(chapter: Chapter) -> dict[str, object]:
+    return {
+        "title": chapter.title,
+        "level": chapter.level,
+        "id": chapter.id,
+        "blocks": [_block_identity(block) for block in chapter.blocks],
+    }
+
+
+def _block_identity(block: Paragraph | Heading | Footnote | Figure | Table | Equation) -> dict[str, object]:
+    payload = block.model_dump(mode="json")
+    payload.pop("uid", None)
+    return payload
+
+
+def _image_manifest(images_dir: Path | None) -> dict[str, str]:
+    if images_dir is None or not images_dir.exists():
+        return {}
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(images_dir.glob("*.png"))
+    }
+
+
+def _normalize_epub_archive(out_path: Path) -> None:
+    with zipfile.ZipFile(out_path, "r") as source:
+        entries = [(info, source.read(info.filename)) for info in source.infolist()]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=out_path.parent, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        with zipfile.ZipFile(tmp_path, "w") as target:
+            for info, payload in entries:
+                data = payload
+                if info.filename == "EPUB/content.opf":
+                    data = _OPF_MODIFIED_RE.sub(
+                        rf"\1{_FIXED_EPUB_MODIFIED}\3",
+                        payload.decode("utf-8"),
+                        count=1,
+                    ).encode("utf-8")
+
+                normalized = zipfile.ZipInfo(filename=info.filename, date_time=_FIXED_ZIP_TIMESTAMP)
+                normalized.compress_type = info.compress_type
+                normalized.comment = info.comment
+                normalized.extra = info.extra
+                normalized.create_system = info.create_system
+                normalized.create_version = info.create_version
+                normalized.extract_version = info.extract_version
+                normalized.flag_bits = info.flag_bits
+                normalized.volume = info.volume
+                normalized.internal_attr = info.internal_attr
+                normalized.external_attr = info.external_attr
+                target.writestr(normalized, data)
+        tmp_path.replace(out_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def _map_figures_to_images(

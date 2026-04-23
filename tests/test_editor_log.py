@@ -39,14 +39,14 @@ def _book() -> Book:
     )
 
 
-def _env(op, *, base_version: int, op_id: str | None = None) -> OpEnvelope:
+def _env(op, *, base_version: int, op_id: str | None = None, preconditions: list[dict[str, object]] | None = None) -> OpEnvelope:
     return OpEnvelope.model_validate(
         {
             "op_id": op_id or str(uuid4()),
             "ts": "2026-04-23T08:00:00Z",
             "agent_id": "agent-1",
             "base_version": base_version,
-            "preconditions": [],
+            "preconditions": preconditions or [],
             "op": op if isinstance(op, dict) else op.model_dump(mode="json"),
             "rationale": "test",
         }
@@ -121,3 +121,76 @@ def test_compact_archives_log_builds_index_and_keeps_revertable_history(tmp_path
     assert insert_env.op_id in backrefs
     assert "reverted_by" not in paths.current.read_text(encoding="utf-8")
     assert "reverted_by" not in (located.archive_path / "edit_log.jsonl").read_text(encoding="utf-8")
+
+
+def test_duplicate_revert_is_rejected_without_mutating_append_only_log(tmp_path: Path) -> None:
+    edit_dir = tmp_path / "edit_state"
+    target_env = _env(
+        SetText(op="set_text", block_uid="p-1", field="text", value="Beta"),
+        base_version=0,
+        preconditions=[
+            {"kind": "field_equals", "block_uid": "p-1", "field": "text", "expected": "Alpha"},
+        ],
+    )
+    applied = apply_and_log(_book(), edit_dir, target_env, now="2026-04-23T08:00:01Z")
+    first_revert = apply_and_log(
+        applied.book,
+        edit_dir,
+        _env(RevertOp(op="revert", target_op_id=target_env.op_id), base_version=1),
+        now="2026-04-23T08:00:02Z",
+    )
+
+    paths = resolve_edit_log_paths(edit_dir)
+    log_before = paths.current.read_text(encoding="utf-8")
+    rejected_before = paths.rejected.read_text(encoding="utf-8") if paths.rejected.exists() else ""
+
+    with pytest.raises(ApplyError, match="already been reverted"):
+        apply_and_log(
+            first_revert.book,
+            edit_dir,
+            _env(RevertOp(op="revert", target_op_id=target_env.op_id), base_version=2),
+            now="2026-04-23T08:00:03Z",
+        )
+
+    assert paths.current.read_text(encoding="utf-8") == log_before
+    assert len(read_current_log(edit_dir)) == 3
+    assert paths.revert_backrefs.read_text(encoding="utf-8").count(target_env.op_id) == 1
+    assert "reverted_by" not in log_before
+    rejected_after = paths.rejected.read_text(encoding="utf-8")
+    assert len(rejected_after) > len(rejected_before)
+    assert "already been reverted" in rejected_after
+
+
+def test_cross_compact_revert_rejects_stale_target_effect_after_later_edits(tmp_path: Path) -> None:
+    edit_dir = tmp_path / "edit_state"
+    first_edit = _env(
+        SetText(op="set_text", block_uid="p-1", field="text", value="Beta"),
+        base_version=0,
+        preconditions=[
+            {"kind": "field_equals", "block_uid": "p-1", "field": "text", "expected": "Alpha"},
+        ],
+    )
+    updated = apply_and_log(_book(), edit_dir, first_edit, now="2026-04-23T08:00:01Z")
+    compact_log(edit_dir, updated.book, ts="2026-04-23T08:00:02Z")
+
+    second_edit = _env(
+        SetText(op="set_text", block_uid="p-1", field="text", value="Gamma"),
+        base_version=1,
+        preconditions=[
+            {"kind": "field_equals", "block_uid": "p-1", "field": "text", "expected": "Beta"},
+        ],
+    )
+    progressed = apply_and_log(updated.book, edit_dir, second_edit, now="2026-04-23T08:00:03Z")
+
+    with pytest.raises(ApplyError, match="precondition failed"):
+        apply_and_log(
+            progressed.book,
+            edit_dir,
+            _env(RevertOp(op="revert", target_op_id=first_edit.op_id), base_version=2),
+            now="2026-04-23T08:00:04Z",
+        )
+
+    assert [entry.op.op for entry in read_current_log(edit_dir)] == ["compact_marker", "set_text"]
+    rejected = resolve_edit_log_paths(edit_dir).rejected.read_text(encoding="utf-8")
+    assert first_edit.op_id in rejected
+    assert "precondition failed" in rejected

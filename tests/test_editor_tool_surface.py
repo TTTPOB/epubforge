@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from epubforge.ir.semantic import Paragraph
+from epubforge.ir.semantic import Figure, Footnote, Paragraph, Table
 from epubforge.editor.log import read_current_log
 from epubforge.editor.state import resolve_editor_paths
 from epubforge.io import load_book, save_book
@@ -36,6 +36,36 @@ def _legacy_book() -> Book:
     )
 
 
+def _verified_legacy_book() -> Book:
+    return Book(
+        title="Verified Synthetic",
+        chapters=[
+            Chapter(
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(
+                        text="Intro \x02fn-1-①\x03 text.",
+                        style_class="epigraph",
+                        provenance=_prov(1),
+                    ),
+                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=_prov(1)),
+                    Figure(caption="Synthetic figure", provenance=_prov(1)),
+                    Table(
+                        html="<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></tbody></table>",
+                        table_title="Table 1",
+                        caption="Synthetic table",
+                        provenance=_prov(1),
+                    ),
+                ],
+            ),
+            Chapter(
+                title="Chapter 2",
+                blocks=[Paragraph(text="Clean follow-up paragraph.", provenance=_prov(2))],
+            ),
+        ],
+    )
+
+
 def _run_module(module: str, *args: str, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     merged_env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + merged_env.get("PYTHONPATH", "")
@@ -56,6 +86,13 @@ def _write_legacy_artifact(work_dir: Path, filename: str) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact = work_dir / filename
     save_book(_legacy_book(), artifact, allow_legacy=True)
+    return artifact
+
+
+def _write_verified_legacy_artifact(work_dir: Path, filename: str) -> Path:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    artifact = work_dir / filename
+    save_book(_verified_legacy_book(), artifact, allow_legacy=True)
     return artifact
 
 
@@ -313,3 +350,42 @@ print(json.dumps(payload, ensure_ascii=False))
     current_log = read_current_log(resolve_editor_paths(work_dir).edit_state_dir)
     assert len(current_log) == 1
     assert current_log[0].op.op == "compact_marker"
+
+
+def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_doctor_rounds(tmp_path: Path) -> None:
+    work_dir = tmp_path / "verified-import"
+    _write_verified_legacy_artifact(work_dir, "07_footnote_verified.json")
+
+    imported = _run_module(
+        "epubforge.editor.import-legacy",
+        str(work_dir),
+        "--from",
+        "07_footnote_verified.json",
+        "--assume-verified",
+    )
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    payload = json.loads(imported.stdout)
+    assert payload["book_version"] == 1
+    assert payload["assume_verified"] is True
+
+    paths = resolve_editor_paths(work_dir)
+    book = load_book(paths.book_path)
+    memory = json.loads(paths.memory_path.read_text(encoding="utf-8"))
+    assert book.version == 1
+    assert all(chapter.uid for chapter in book.chapters)
+    assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
+    assert memory["assume_verified"] is True
+    assert memory["imported"] is True
+    assert memory["imported_from"] == "07_footnote_verified.json"
+    assert all(status["read_passes"] == 1 for status in memory["chapter_status"].values())
+
+    first_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
+    second_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
+    assert first_doctor.returncode == 0, first_doctor.stdout + first_doctor.stderr
+    assert second_doctor.returncode == 0, second_doctor.stdout + second_doctor.stderr
+
+    first_payload = json.loads(first_doctor.stdout)
+    second_payload = json.loads(second_doctor.stdout)
+    assert first_payload["readiness"]["converged"] is False
+    assert second_payload["readiness"]["converged"] is True
+    assert second_payload["readiness"]["chapters_unscanned"] == []

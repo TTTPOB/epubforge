@@ -270,7 +270,9 @@ def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> N
 
     replayed = apply_log(_book(), log_path)
 
-    assert replayed.version == 2
+    assert revert_result.accepted_envelopes[0].applied_version == 1
+    assert revert_result.accepted_envelopes[1].applied_version == 2
+    assert replayed.version == revert_result.accepted_envelopes[1].applied_version
     assert [block.uid for block in replayed.chapters[0].blocks] == ["p-1", "h-1", "fn-1"]
 
 

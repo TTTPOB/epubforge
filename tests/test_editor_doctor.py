@@ -170,3 +170,21 @@ def test_convergence_hint_and_delta_use_fresh_memory_change_not_duplicates() -> 
     assert report.readiness.converged is True
     assert any(hint.kind == "convergence" for hint in report.hints)
     assert report.suggested_next_actions == ["doctor 判定已收敛；supervisor 可停止编辑循环。"]
+
+
+def test_convergence_requires_supervisor_stop_gate_even_when_other_conditions_pass() -> None:
+    report = build_doctor_report(
+        memory=_memory(assume_verified=True),
+        chapter_uids=["ch-1", "ch-2"],
+        issues=[],
+        previous_memory=_memory(assume_verified=True),
+        previous_report=_report(quiet_round_streak=1),
+        new_applied_op_count=0,
+        supervisor_ready_to_stop=False,
+    )
+
+    assert report.readiness.chapters_unscanned == []
+    assert report.readiness.open_questions == 0
+    assert report.readiness.audit_issues == 0
+    assert report.readiness.converged is False
+    assert report.suggested_next_actions == ["结构与扫描条件已满足，但仍需 supervisor 做最后一轮约定审视。"]

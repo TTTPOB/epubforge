@@ -7,7 +7,63 @@ from typer.testing import CliRunner
 from epubforge import pipeline
 from epubforge.cli import app
 from epubforge.config import Config, load_config
-from epubforge.epub_builder import resolve_build_source
+from epubforge.editor.tool_surface import run_import_legacy
+from epubforge.epub_builder import build_epub, resolve_build_source
+from epubforge.io import EDITABLE_BOOK_PATH
+from epubforge.io import save_book
+from epubforge.ir.semantic import Book, Chapter, Figure, Footnote, Paragraph, Provenance, Table
+from epubforge.ir.style_registry import StyleDefinition, StyleRegistry
+
+
+def _prov(page: int) -> Provenance:
+    return Provenance(page=page, source="passthrough")
+
+
+def _synthetic_verified_book() -> Book:
+    return Book(
+        title="Synthetic Build",
+        chapters=[
+            Chapter(
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(
+                        text="Intro \x02fn-1-①\x03 text.",
+                        style_class="intro",
+                        provenance=_prov(1),
+                    ),
+                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=_prov(1)),
+                    Figure(caption="Synthetic figure", provenance=_prov(1)),
+                    Table(
+                        html="<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></tbody></table>",
+                        table_title="Table 1",
+                        caption="Synthetic table",
+                        provenance=_prov(1),
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def _write_synthetic_build_assets(destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    save_book(_synthetic_verified_book(), destination / "07_footnote_verified.json", allow_legacy=True)
+    registry = StyleRegistry(
+        book="synthetic-build",
+        styles=[
+            StyleDefinition(
+                id="intro",
+                parent_role="body",
+                description="Synthetic intro style",
+                css_class="intro",
+                css_rules={"text-indent": "0", "font-weight": "bold"},
+            )
+        ],
+    )
+    (destination / "style_registry.json").write_text(registry.model_dump_json(indent=2), encoding="utf-8")
+    images_dir = destination / "images"
+    images_dir.mkdir()
+    (images_dir / "p0001_synthetic.png").write_bytes(b"\x89PNG\r\n\x1a\nsynthetic-image")
 
 
 def test_run_all_stops_after_stage_4(monkeypatch) -> None:
@@ -113,3 +169,30 @@ thinking_budget_tokens = 2
     assert cfg.editor_lease_ttl_seconds == 900
     assert cfg.editor_compact_threshold == 33
     assert cfg.editor_max_loops == 7
+
+
+def test_synthetic_build_is_byte_equivalent_before_and_after_import_legacy_migration(tmp_path: Path) -> None:
+    work_dir = tmp_path / "synthetic-build"
+    _write_synthetic_build_assets(work_dir)
+
+    legacy_epub = work_dir / "legacy.epub"
+    migrated_epub = work_dir / "migrated.epub"
+
+    build_epub(
+        work_dir / "07_footnote_verified.json",
+        legacy_epub,
+        images_dir=work_dir / "images",
+        registry_path=work_dir / "style_registry.json",
+    )
+
+    assert run_import_legacy([str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"]) == 0
+    assert resolve_build_source(work_dir) == work_dir / EDITABLE_BOOK_PATH
+
+    build_epub(
+        resolve_build_source(work_dir),
+        migrated_epub,
+        images_dir=work_dir / "images",
+        registry_path=work_dir / "style_registry.json",
+    )
+
+    assert legacy_epub.read_bytes() == migrated_epub.read_bytes()
