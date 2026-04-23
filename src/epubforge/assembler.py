@@ -96,9 +96,8 @@ def assemble(work_dir: Path, out_path: Path) -> None:
 
     # Merge empty-callout footnotes (VLM continuation text misplaced or fn_flag not set)
     all_blocks = _merge_empty_callout_footnotes(all_blocks)
-    # Merge cross-page table continuations, absorb adjacent title/caption paragraphs, pair footnotes
+    # Merge cross-page table continuations then pair footnotes
     all_blocks = _merge_continued_tables(all_blocks)
-    all_blocks = _absorb_table_text(all_blocks)
     all_blocks = _pair_footnotes(all_blocks)
 
     # Group blocks into chapters at heading-level-1 boundaries
@@ -266,35 +265,6 @@ def _splice_table_html(base: str, cont: str) -> str:
                    count=1, flags=re.IGNORECASE | re.DOTALL)
     return re.sub(r"</table>\s*$", inner + "</table>", base, count=1, flags=re.IGNORECASE)
 
-
-_TABLE_TITLE_RE = re.compile(r"^表\s*[\d一二三四五六七八九十百]+", re.UNICODE)
-_TABLE_SOURCE_RE = re.compile(r"^(资料来源|来源|注|数据来源)[:：]", re.UNICODE)
-
-
-def _absorb_table_text(blocks: list[Block]) -> list[Block]:
-    """Move adjacent paragraphs that are table titles or source notes into the Table block."""
-    result: list[Block] = list(blocks)
-    i = 0
-    while i < len(result):
-        block = result[i]
-        if not isinstance(block, Table):
-            i += 1
-            continue
-        # Paragraph immediately before → table title
-        prev_block = result[i - 1] if i > 0 else None
-        if isinstance(prev_block, Paragraph) and not block.table_title and _TABLE_TITLE_RE.match(prev_block.text):
-            result[i] = block.model_copy(update={"table_title": prev_block.text})
-            result.pop(i - 1)
-            i -= 1
-            continue
-        # Paragraph immediately after → source/caption
-        next_block = result[i + 1] if i + 1 < len(result) else None
-        if isinstance(next_block, Paragraph) and not block.caption and _TABLE_SOURCE_RE.match(next_block.text):
-            result[i] = block.model_copy(update={"caption": next_block.text})
-            result.pop(i + 1)
-            continue
-        i += 1
-    return result
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
