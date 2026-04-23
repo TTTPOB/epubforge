@@ -674,3 +674,58 @@ def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
     current_log = read_current_log(paths.edit_state_dir)
     assert len(current_log) == 1
     assert current_log[0].op.op == "noop"
+
+
+# ---------------------------------------------------------------------------
+# §1.6a memory_patches envelope-only schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_propose_op_accepts_memory_patches_in_envelope(tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(tmp_path)
+
+    envelope = _make_valid_envelope(block_uid)
+    envelope["memory_patches"] = [
+        {
+            "conventions": [
+                {
+                    "canonical_key": "book:-:dash_range_style",
+                    "scope": "book",
+                    "topic": "dash_range_style",
+                    "statement": "Use en-dash for ranges.",
+                    "value": "en-dash",
+                    "confidence": 0.9,
+                    "evidence_uids": ["blk-1"],
+                    "contributed_by": "test-agent",
+                    "contributed_at": "2026-04-23T08:00:00Z",
+                }
+            ],
+            "patterns": [],
+            "chapter_status": [],
+            "open_questions": [],
+        }
+    ]
+
+    result = _run_module(
+        "epubforge.editor.propose-op",
+        str(work_dir),
+        input_text=json.dumps([envelope]),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] == 1
+    assert payload["rejected"] == 0
+
+    paths = resolve_editor_paths(work_dir)
+    staging = paths.edit_state_dir / "staging.jsonl"
+    lines = [ln for ln in staging.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+
+    # Verify memory_patches round-trips through staging.jsonl
+    from epubforge.editor.ops import OpEnvelope
+
+    stored = OpEnvelope.model_validate_json(lines[0])
+    assert stored.memory_patches is not None
+    assert len(stored.memory_patches) == 1
+    assert stored.memory_patches[0].conventions[0].topic == "dash_range_style"

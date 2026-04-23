@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from epubforge.editor.memory import MemoryPatch
 from epubforge.ir.semantic import Provenance
 from epubforge.ir.style_registry import ALLOWED_ROLES
 
@@ -772,6 +773,7 @@ class OpEnvelope(EditorModel):
     irreversible: bool = False
     applied_version: int | None = Field(default=None, ge=0)
     applied_at: str | None = None
+    memory_patches: list[MemoryPatch] | None = None
 
     @field_validator("agent_id", "rationale")
     @classmethod

@@ -378,3 +378,71 @@ class TestValidators:
                     }
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# §1.6a memory_patches envelope-only schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_op_envelope_accepts_memory_patches() -> None:
+    env = OpEnvelope.model_validate(
+        _base_envelope(
+            {
+                "op": "set_text",
+                "block_uid": "blk-1",
+                "field": "text",
+                "value": "Hello world.",
+            },
+            memory_patches=[
+                {
+                    "conventions": [
+                        {
+                            "canonical_key": "book:-:dash_range_style",
+                            "scope": "book",
+                            "topic": "dash_range_style",
+                            "statement": "Use en-dash for ranges.",
+                            "value": "en-dash",
+                            "confidence": 0.9,
+                            "evidence_uids": ["blk-1"],
+                            "contributed_by": "agent-1",
+                            "contributed_at": "2026-04-23T08:00:00Z",
+                        }
+                    ],
+                    "patterns": [],
+                    "chapter_status": [],
+                    "open_questions": [],
+                }
+            ],
+        )
+    )
+
+    assert env.memory_patches is not None
+    assert len(env.memory_patches) == 1
+    assert env.memory_patches[0].conventions[0].topic == "dash_range_style"
+    # Round-trip must preserve the field
+    restored = OpEnvelope.model_validate_json(env.model_dump_json())
+    assert restored.memory_patches == env.memory_patches
+
+
+def test_op_envelope_rejects_unknown_patch_field() -> None:
+    with pytest.raises(ValidationError):
+        OpEnvelope.model_validate(
+            _base_envelope(
+                {
+                    "op": "set_text",
+                    "block_uid": "blk-1",
+                    "field": "text",
+                    "value": "Hello world.",
+                },
+                memory_patches=[
+                    {
+                        "conventions": [],
+                        "patterns": [],
+                        "chapter_status": [],
+                        "open_questions": [],
+                        "unknown_extra_field": "should be rejected",
+                    }
+                ],
+            )
+        )
