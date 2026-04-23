@@ -74,6 +74,8 @@
 
 **测试**：
 
+以下拒绝路径用例均断言 `returncode != 0`，并解析 stdout JSON，检查 `error` 字段包含目标信息（如 `must reside under scratch_dir`）。**不要断言 stderr**，因为 editor CLI 的错误契约是 `CommandError -> stdout JSON`，拒绝路径不写 stderr。
+
 - `test_run_script_rejects_absolute_outside_scratch`
 - `test_run_script_rejects_dotdot_escape`
 - `test_run_script_rejects_symlink_escape`
