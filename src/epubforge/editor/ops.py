@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Annotated, Any, Literal
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from epubforge.editor._validators import StrictModel, require_non_empty, validate_utc_iso_timestamp, validate_uuid4
 from epubforge.editor.memory import MemoryPatch
 from epubforge.ir.semantic import Provenance
 from epubforge.ir.style_registry import ALLOWED_ROLES
@@ -32,51 +31,16 @@ PRECONDITION_FIELDS = (
 BLOCK_KINDS = ("paragraph", "heading", "footnote", "figure", "table", "equation")
 
 
-def _require_non_empty(value: str, *, field_name: str) -> str:
-    if not value.strip():
-        raise ValueError(f"{field_name} must not be empty")
-    return value
-
-
-def _validate_uuid4(value: str, *, field_name: str) -> str:
-    value = _require_non_empty(value, field_name=field_name)
-    try:
-        parsed = UUID(value)
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid UUID") from exc
-    if parsed.version != 4 or str(parsed) != value.lower():
-        raise ValueError(f"{field_name} must be a canonical UUID4 string")
-    return value
-
-
-def _validate_utc_iso_timestamp(value: str, *, field_name: str) -> str:
-    value = _require_non_empty(value, field_name=field_name)
-    if not value.endswith("Z"):
-        raise ValueError(f"{field_name} must be a UTC ISO timestamp ending with 'Z'")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid UTC ISO timestamp") from exc
-    offset = parsed.utcoffset()
-    if offset is None or offset.total_seconds() != 0:
-        raise ValueError(f"{field_name} must be in UTC")
-    return value
-
-
 def _validate_style_class(value: str | None) -> str | None:
     if value is None:
         return None
-    value = _require_non_empty(value, field_name="style_class")
+    value = require_non_empty(value, field_name="style_class")
     if not STYLE_CLASS_PATTERN.fullmatch(value):
         raise ValueError("style_class must use [A-Za-z0-9._-] and start with an alphanumeric character")
     return value
 
 
-class EditorModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class ParagraphPayload(EditorModel):
+class ParagraphPayload(StrictModel):
     text: str
     role: str = "body"
     display_lines: list[str] | None = None
@@ -87,12 +51,12 @@ class ParagraphPayload(EditorModel):
     @field_validator("text")
     @classmethod
     def _validate_text(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="text")
+        return require_non_empty(value, field_name="text")
 
     @field_validator("role")
     @classmethod
     def _validate_role(cls, value: str) -> str:
-        value = _require_non_empty(value, field_name="role")
+        value = require_non_empty(value, field_name="role")
         if value not in ALLOWED_ROLES:
             raise ValueError(f"role must be one of {sorted(ALLOWED_ROLES)}")
         return value
@@ -103,7 +67,7 @@ class ParagraphPayload(EditorModel):
         return _validate_style_class(value)
 
 
-class HeadingPayload(EditorModel):
+class HeadingPayload(StrictModel):
     level: Literal[1, 2, 3] = 1
     text: str
     id: str | None = None
@@ -113,14 +77,14 @@ class HeadingPayload(EditorModel):
     @field_validator("text")
     @classmethod
     def _validate_text(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="text")
+        return require_non_empty(value, field_name="text")
 
     @field_validator("id")
     @classmethod
     def _validate_heading_id(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="id")
+        return require_non_empty(value, field_name="id")
 
     @field_validator("style_class")
     @classmethod
@@ -128,7 +92,7 @@ class HeadingPayload(EditorModel):
         return _validate_style_class(value)
 
 
-class FootnotePayload(EditorModel):
+class FootnotePayload(StrictModel):
     callout: str
     text: str
     paired: bool = False
@@ -139,7 +103,7 @@ class FootnotePayload(EditorModel):
     @field_validator("callout")
     @classmethod
     def _validate_callout(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="callout")
+        return require_non_empty(value, field_name="callout")
 
     @model_validator(mode="after")
     def _validate_flags(self) -> FootnotePayload:
@@ -148,14 +112,14 @@ class FootnotePayload(EditorModel):
         return self
 
 
-class FigurePayload(EditorModel):
+class FigurePayload(StrictModel):
     caption: str = ""
     image_ref: str | None = None
     bbox: list[float] | None = None
     provenance: Provenance
 
 
-class TablePayload(EditorModel):
+class TablePayload(StrictModel):
     html: str
     table_title: str = ""
     caption: str = ""
@@ -167,10 +131,10 @@ class TablePayload(EditorModel):
     @field_validator("html")
     @classmethod
     def _validate_html(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="html")
+        return require_non_empty(value, field_name="html")
 
 
-class EquationPayload(EditorModel):
+class EquationPayload(StrictModel):
     latex: str = ""
     image_ref: str | None = None
     bbox: list[float] | None = None
@@ -184,7 +148,7 @@ class ParagraphSnapshot(ParagraphPayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 class HeadingSnapshot(HeadingPayload):
@@ -194,7 +158,7 @@ class HeadingSnapshot(HeadingPayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 class FootnoteSnapshot(FootnotePayload):
@@ -204,7 +168,7 @@ class FootnoteSnapshot(FootnotePayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 class FigureSnapshot(FigurePayload):
@@ -214,7 +178,7 @@ class FigureSnapshot(FigurePayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 class TableSnapshot(TablePayload):
@@ -224,7 +188,7 @@ class TableSnapshot(TablePayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 class EquationSnapshot(EquationPayload):
@@ -234,7 +198,7 @@ class EquationSnapshot(EquationPayload):
     @field_validator("uid")
     @classmethod
     def _validate_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="uid")
+        return require_non_empty(value, field_name="uid")
 
 
 BlockSnapshot = Annotated[
@@ -252,7 +216,7 @@ BLOCK_PAYLOAD_MODELS = {
 }
 
 
-class Precondition(EditorModel):
+class Precondition(StrictModel):
     kind: Literal[
         "block_exists",
         "field_equals",
@@ -285,7 +249,7 @@ class Precondition(EditorModel):
     def _validate_optional_uid(cls, value: str | None, info: Any) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_shape(self) -> Precondition:
@@ -370,7 +334,7 @@ class Precondition(EditorModel):
         return self
 
 
-class SetRole(EditorModel):
+class SetRole(StrictModel):
     op: Literal["set_role"]
     block_uid: str
     value: str
@@ -378,18 +342,18 @@ class SetRole(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @field_validator("value")
     @classmethod
     def _validate_value(cls, value: str) -> str:
-        value = _require_non_empty(value, field_name="value")
+        value = require_non_empty(value, field_name="value")
         if value not in ALLOWED_ROLES:
             raise ValueError(f"value must be one of {sorted(ALLOWED_ROLES)}")
         return value
 
 
-class SetStyleClass(EditorModel):
+class SetStyleClass(StrictModel):
     op: Literal["set_style_class"]
     block_uid: str
     value: str | None
@@ -397,7 +361,7 @@ class SetStyleClass(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @field_validator("value")
     @classmethod
@@ -405,7 +369,7 @@ class SetStyleClass(EditorModel):
         return _validate_style_class(value)
 
 
-class SetText(EditorModel):
+class SetText(StrictModel):
     op: Literal["set_text"]
     block_uid: str
     field: Literal["text", "table_title", "caption", "callout", "html"]
@@ -414,10 +378,10 @@ class SetText(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
 
-class SetHeadingLevel(EditorModel):
+class SetHeadingLevel(StrictModel):
     op: Literal["set_heading_level"]
     block_uid: str
     value: Literal[1, 2, 3]
@@ -425,10 +389,10 @@ class SetHeadingLevel(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
 
-class SetHeadingId(EditorModel):
+class SetHeadingId(StrictModel):
     op: Literal["set_heading_id"]
     block_uid: str
     value: str | None
@@ -436,17 +400,17 @@ class SetHeadingId(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @field_validator("value")
     @classmethod
     def _validate_value(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="value")
+        return require_non_empty(value, field_name="value")
 
 
-class SetFootnoteFlag(EditorModel):
+class SetFootnoteFlag(StrictModel):
     op: Literal["set_footnote_flag"]
     block_uid: str
     paired: bool | None = None
@@ -455,7 +419,7 @@ class SetFootnoteFlag(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @model_validator(mode="after")
     def _validate_flags(self) -> SetFootnoteFlag:
@@ -466,7 +430,7 @@ class SetFootnoteFlag(EditorModel):
         return self
 
 
-class MergeBlocks(EditorModel):
+class MergeBlocks(StrictModel):
     op: Literal["merge_blocks"]
     block_uids: list[str] = Field(min_length=2)
     join: Literal["concat", "cjk", "newline"] = "cjk"
@@ -476,7 +440,7 @@ class MergeBlocks(EditorModel):
     @field_validator("block_uids")
     @classmethod
     def _validate_block_uids(cls, value: list[str]) -> list[str]:
-        normalized = [_require_non_empty(item, field_name="block_uids") for item in value]
+        normalized = [require_non_empty(item, field_name="block_uids") for item in value]
         if len(set(normalized)) != len(normalized):
             raise ValueError("block_uids must be unique")
         return normalized
@@ -493,7 +457,7 @@ class MergeBlocks(EditorModel):
         return self
 
 
-class SplitBlock(EditorModel):
+class SplitBlock(StrictModel):
     op: Literal["split_block"]
     block_uid: str
     strategy: Literal["at_marker", "at_line_index", "at_text_match", "at_sentence"]
@@ -506,12 +470,12 @@ class SplitBlock(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @field_validator("new_block_uids")
     @classmethod
     def _validate_new_block_uids(cls, value: list[str]) -> list[str]:
-        normalized = [_require_non_empty(item, field_name="new_block_uids") for item in value]
+        normalized = [require_non_empty(item, field_name="new_block_uids") for item in value]
         if len(set(normalized)) != len(normalized):
             raise ValueError("new_block_uids must be unique")
         return normalized
@@ -521,7 +485,7 @@ class SplitBlock(EditorModel):
     def _validate_text_match(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="text_match")
+        return require_non_empty(value, field_name="text_match")
 
     @model_validator(mode="after")
     def _validate_strategy(self) -> SplitBlock:
@@ -554,17 +518,17 @@ class SplitBlock(EditorModel):
         return self
 
 
-class DeleteBlock(EditorModel):
+class DeleteBlock(StrictModel):
     op: Literal["delete_block"]
     block_uid: str
 
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
 
-class InsertBlock(EditorModel):
+class InsertBlock(StrictModel):
     op: Literal["insert_block"]
     chapter_uid: str
     after_uid: str | None = None
@@ -577,7 +541,7 @@ class InsertBlock(EditorModel):
     def _validate_optional_uid(cls, value: str | None, info: Any) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_block_data(self) -> InsertBlock:
@@ -587,7 +551,7 @@ class InsertBlock(EditorModel):
         return self
 
 
-class FootnoteOp(EditorModel):
+class FootnoteOp(StrictModel):
     op: Literal["pair_footnote", "unpair_footnote", "relink_footnote", "mark_orphan"]
     fn_block_uid: str
     source_block_uid: str | None = None
@@ -599,7 +563,7 @@ class FootnoteOp(EditorModel):
     def _validate_optional_uid(cls, value: str | None, info: Any) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_shape(self) -> FootnoteOp:
@@ -625,7 +589,7 @@ class FootnoteOp(EditorModel):
         return self
 
 
-class HeadingSpec(EditorModel):
+class HeadingSpec(StrictModel):
     text: str
     id: str | None = None
     style_class: str | None = None
@@ -634,14 +598,14 @@ class HeadingSpec(EditorModel):
     @field_validator("text", "new_block_uid")
     @classmethod
     def _validate_required_text(cls, value: str, info: Any) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("id")
     @classmethod
     def _validate_heading_id(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="id")
+        return require_non_empty(value, field_name="id")
 
     @field_validator("style_class")
     @classmethod
@@ -649,7 +613,7 @@ class HeadingSpec(EditorModel):
         return _validate_style_class(value)
 
 
-class MergeChapters(EditorModel):
+class MergeChapters(StrictModel):
     op: Literal["merge_chapters"]
     source_chapter_uids: list[str] = Field(min_length=2)
     new_title: str
@@ -659,7 +623,7 @@ class MergeChapters(EditorModel):
     @field_validator("source_chapter_uids")
     @classmethod
     def _validate_source_uids(cls, value: list[str]) -> list[str]:
-        normalized = [_require_non_empty(item, field_name="source_chapter_uids") for item in value]
+        normalized = [require_non_empty(item, field_name="source_chapter_uids") for item in value]
         if len(set(normalized)) != len(normalized):
             raise ValueError("source_chapter_uids must be unique")
         return normalized
@@ -667,7 +631,7 @@ class MergeChapters(EditorModel):
     @field_validator("new_title", "new_chapter_uid")
     @classmethod
     def _validate_required_text(cls, value: str, info: Any) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_sections(self) -> MergeChapters:
@@ -680,7 +644,7 @@ class MergeChapters(EditorModel):
         return self
 
 
-class SplitChapter(EditorModel):
+class SplitChapter(StrictModel):
     op: Literal["split_chapter"]
     chapter_uid: str
     split_at_block_uid: str
@@ -690,7 +654,7 @@ class SplitChapter(EditorModel):
     @field_validator("chapter_uid", "split_at_block_uid", "new_chapter_title", "new_chapter_uid")
     @classmethod
     def _validate_required_text(cls, value: str, info: Any) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_new_uid(self) -> SplitChapter:
@@ -699,7 +663,7 @@ class SplitChapter(EditorModel):
         return self
 
 
-class RelocateBlock(EditorModel):
+class RelocateBlock(StrictModel):
     op: Literal["relocate_block"]
     block_uid: str
     target_chapter_uid: str
@@ -710,15 +674,15 @@ class RelocateBlock(EditorModel):
     def _validate_optional_uid(cls, value: str | None, info: Any) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
 
-class NoopOp(EditorModel):
+class NoopOp(StrictModel):
     op: Literal["noop"]
     purpose: Literal["legacy_baseline", "milestone"]
 
 
-class CompactMarker(EditorModel):
+class CompactMarker(StrictModel):
     op: Literal["compact_marker"]
     compacted_at_version: int = Field(ge=0)
     archive_path: str
@@ -727,20 +691,20 @@ class CompactMarker(EditorModel):
     @field_validator("archive_path")
     @classmethod
     def _validate_archive_path(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="archive_path")
+        return require_non_empty(value, field_name="archive_path")
 
 
-class RevertOp(EditorModel):
+class RevertOp(StrictModel):
     op: Literal["revert"]
     target_op_id: str
 
     @field_validator("target_op_id")
     @classmethod
     def _validate_target_op_id(cls, value: str) -> str:
-        return _validate_uuid4(value, field_name="target_op_id")
+        return validate_uuid4(value, field_name="target_op_id")
 
 
-class SplitMergedTable(EditorModel):
+class SplitMergedTable(StrictModel):
     """Split a multi_page-merged Table back into its constituent per-page segments.
 
     segment_html and segment_pages must have the same length (>= 2).
@@ -757,13 +721,13 @@ class SplitMergedTable(EditorModel):
     @field_validator("block_uid")
     @classmethod
     def _validate_block_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="block_uid")
+        return require_non_empty(value, field_name="block_uid")
 
     @field_validator("segment_html")
     @classmethod
     def _validate_segment_html(cls, value: list[str]) -> list[str]:
         for item in value:
-            _require_non_empty(item, field_name="segment_html item")
+            require_non_empty(item, field_name="segment_html item")
         return value
 
     @model_validator(mode="after")
@@ -796,7 +760,7 @@ EditOp = Annotated[
 ]
 
 
-class OpEnvelope(EditorModel):
+class OpEnvelope(StrictModel):
     op_id: str
     ts: str
     agent_id: str
@@ -812,19 +776,19 @@ class OpEnvelope(EditorModel):
     @field_validator("agent_id", "rationale")
     @classmethod
     def _validate_required_text(cls, value: str, info: Any) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("op_id")
     @classmethod
     def _validate_op_id(cls, value: str) -> str:
-        return _validate_uuid4(value, field_name="op_id")
+        return validate_uuid4(value, field_name="op_id")
 
     @field_validator("ts", "applied_at")
     @classmethod
     def _validate_timestamp(cls, value: str | None, info: Any) -> str | None:
         if value is None:
             return None
-        return _validate_utc_iso_timestamp(value, field_name=info.field_name)
+        return validate_utc_iso_timestamp(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> OpEnvelope:

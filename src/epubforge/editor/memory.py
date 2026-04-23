@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
 from typing import Callable, Literal, TypeAlias
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
+
+from epubforge.editor._validators import StrictModel, require_non_empty, validate_utc_iso_timestamp, validate_uuid4
 
 
 CONVENTION_TOPICS: TypeAlias = Literal[
@@ -27,41 +28,6 @@ PATTERN_TOPICS: TypeAlias = Literal[
     "table_continuation_split_row",
     "vlm_concatenated_heading",
 ]
-
-
-class MemoryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-def _require_non_empty(value: str, *, field_name: str) -> str:
-    if not value.strip():
-        raise ValueError(f"{field_name} must not be empty")
-    return value
-
-
-def _validate_utc_iso_timestamp(value: str, *, field_name: str) -> str:
-    value = _require_non_empty(value, field_name=field_name)
-    if not value.endswith("Z"):
-        raise ValueError(f"{field_name} must be a UTC ISO timestamp ending with 'Z'")
-    try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid UTC ISO timestamp") from exc
-    offset = parsed.utcoffset()
-    if offset is None or offset.total_seconds() != 0:
-        raise ValueError(f"{field_name} must be in UTC")
-    return value
-
-
-def _validate_uuid4(value: str, *, field_name: str) -> str:
-    value = _require_non_empty(value, field_name=field_name)
-    try:
-        parsed = UUID(value)
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid UUID") from exc
-    if parsed.version != 4 or str(parsed) != value.lower():
-        raise ValueError(f"{field_name} must be a canonical UUID4 string")
-    return value
 
 
 def _sorted_unique(values: list[str]) -> list[str]:
@@ -86,7 +52,7 @@ def canonical_pattern_key(topic: PATTERN_TOPICS, affected_uids: list[str]) -> st
     return f"{topic}:{digest}"
 
 
-class ConventionNote(MemoryModel):
+class ConventionNote(StrictModel):
     canonical_key: str
     scope: Literal["book", "chapter"]
     chapter_uid: str | None = None
@@ -104,17 +70,17 @@ class ConventionNote(MemoryModel):
     def _validate_chapter_uid(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="chapter_uid")
+        return require_non_empty(value, field_name="chapter_uid")
 
     @field_validator("statement", "value", "contributed_by")
     @classmethod
     def _validate_non_empty(cls, value: str, info) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("contributed_at")
     @classmethod
     def _validate_contributed_at(cls, value: str) -> str:
-        return _validate_utc_iso_timestamp(value, field_name="contributed_at")
+        return validate_utc_iso_timestamp(value, field_name="contributed_at")
 
     @field_validator("evidence_uids", "supersedes")
     @classmethod
@@ -138,7 +104,7 @@ class ConventionNote(MemoryModel):
         return self
 
 
-class PatternNote(MemoryModel):
+class PatternNote(StrictModel):
     canonical_key: str
     topic: PATTERN_TOPICS
     description: str
@@ -150,14 +116,14 @@ class PatternNote(MemoryModel):
     @field_validator("description", "contributed_by")
     @classmethod
     def _validate_non_empty(cls, value: str, info) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("suggested_fix")
     @classmethod
     def _validate_suggested_fix(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="suggested_fix")
+        return require_non_empty(value, field_name="suggested_fix")
 
     @field_validator("affected_uids")
     @classmethod
@@ -175,7 +141,7 @@ class PatternNote(MemoryModel):
         return self
 
 
-class ChapterStatus(MemoryModel):
+class ChapterStatus(StrictModel):
     chapter_uid: str
     read_passes: int = Field(default=0, ge=0)
     last_reader: str | None = None
@@ -186,17 +152,17 @@ class ChapterStatus(MemoryModel):
     @field_validator("chapter_uid")
     @classmethod
     def _validate_chapter_uid(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="chapter_uid")
+        return require_non_empty(value, field_name="chapter_uid")
 
     @field_validator("last_reader")
     @classmethod
     def _validate_last_reader(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="last_reader")
+        return require_non_empty(value, field_name="last_reader")
 
 
-class OpenQuestion(MemoryModel):
+class OpenQuestion(StrictModel):
     q_id: str
     question: str
     context_uids: list[str] = Field(default_factory=list)
@@ -208,12 +174,12 @@ class OpenQuestion(MemoryModel):
     @field_validator("q_id")
     @classmethod
     def _validate_q_id(cls, value: str) -> str:
-        return _validate_uuid4(value, field_name="q_id")
+        return validate_uuid4(value, field_name="q_id")
 
     @field_validator("question", "asked_by")
     @classmethod
     def _validate_non_empty(cls, value: str, info) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("context_uids", "options")
     @classmethod
@@ -227,7 +193,7 @@ class OpenQuestion(MemoryModel):
     def _validate_resolution(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="resolution")
+        return require_non_empty(value, field_name="resolution")
 
     @model_validator(mode="after")
     def _check_resolution(self) -> OpenQuestion:
@@ -238,7 +204,7 @@ class OpenQuestion(MemoryModel):
         return self
 
 
-class EditMemory(MemoryModel):
+class EditMemory(StrictModel):
     book_id: str
     imported: bool = False
     imported_from: str | None = None
@@ -254,26 +220,26 @@ class EditMemory(MemoryModel):
     @field_validator("book_id", "updated_by")
     @classmethod
     def _validate_non_empty(cls, value: str, info) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("updated_at")
     @classmethod
     def _validate_updated_at(cls, value: str) -> str:
-        return _validate_utc_iso_timestamp(value, field_name="updated_at")
+        return validate_utc_iso_timestamp(value, field_name="updated_at")
 
     @field_validator("imported_from")
     @classmethod
     def _validate_imported_from(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name="imported_from")
+        return require_non_empty(value, field_name="imported_from")
 
     @field_validator("imported_at")
     @classmethod
     def _validate_imported_at(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _validate_utc_iso_timestamp(value, field_name="imported_at")
+        return validate_utc_iso_timestamp(value, field_name="imported_at")
 
     @model_validator(mode="after")
     def _check_import_fields(self) -> EditMemory:
@@ -331,14 +297,14 @@ class EditMemory(MemoryModel):
         )
 
 
-class MemoryPatch(MemoryModel):
+class MemoryPatch(StrictModel):
     conventions: list[ConventionNote] = Field(default_factory=list)
     patterns: list[PatternNote] = Field(default_factory=list)
     chapter_status: list[ChapterStatus] = Field(default_factory=list)
     open_questions: list[OpenQuestion] = Field(default_factory=list)
 
 
-class MemoryHistoryEntry(MemoryModel):
+class MemoryHistoryEntry(StrictModel):
     item_type: Literal["convention", "pattern"]
     canonical_key: str
     reason: Literal["replaced", "duplicate", "conflict_open_question"]
@@ -350,15 +316,15 @@ class MemoryHistoryEntry(MemoryModel):
     @field_validator("canonical_key", "recorded_by")
     @classmethod
     def _validate_non_empty(cls, value: str, info) -> str:
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @field_validator("recorded_at")
     @classmethod
     def _validate_recorded_at(cls, value: str) -> str:
-        return _validate_utc_iso_timestamp(value, field_name="recorded_at")
+        return validate_utc_iso_timestamp(value, field_name="recorded_at")
 
 
-class MemoryMergeDecision(MemoryModel):
+class MemoryMergeDecision(StrictModel):
     item_type: Literal["convention", "pattern", "chapter_status", "open_question"]
     canonical_key: str | None = None
     question_id: str | None = None
@@ -370,10 +336,10 @@ class MemoryMergeDecision(MemoryModel):
     @field_validator("reason")
     @classmethod
     def _validate_reason(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="reason")
+        return require_non_empty(value, field_name="reason")
 
 
-class MemoryMergeResult(MemoryModel):
+class MemoryMergeResult(StrictModel):
     memory: EditMemory
     decisions: list[MemoryMergeDecision] = Field(default_factory=list)
     history: list[MemoryHistoryEntry] = Field(default_factory=list)
@@ -633,8 +599,8 @@ def merge_edit_memory(
     updated_by: str,
     question_id_factory: Callable[[], str] | None = None,
 ) -> MemoryMergeResult:
-    _validate_utc_iso_timestamp(updated_at, field_name="updated_at")
-    updated_by = _require_non_empty(updated_by, field_name="updated_by")
+    validate_utc_iso_timestamp(updated_at, field_name="updated_at")
+    updated_by = require_non_empty(updated_by, field_name="updated_by")
     next_memory = memory.model_copy(deep=True)
     decisions: list[MemoryMergeDecision] = []
     history: list[MemoryHistoryEntry] = []

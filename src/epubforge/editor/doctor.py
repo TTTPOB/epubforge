@@ -6,21 +6,12 @@ from collections import Counter
 from statistics import mean, pstdev
 from typing import Iterable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from epubforge.audit import DASH_CHAR_LABELS, AuditBundle, DashInventoryChapter, run_all_detectors
+from epubforge.editor._validators import StrictModel, require_non_empty
 from epubforge.editor.memory import EditMemory, OpenQuestion
 from epubforge.ir.semantic import AuditNote, Book
-
-
-class DoctorModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-def _require_non_empty(value: str, *, field_name: str) -> str:
-    if not value.strip():
-        raise ValueError(f"{field_name} must not be empty")
-    return value
 
 
 def canonical_issue_key(issue: AuditNote) -> str:
@@ -70,7 +61,7 @@ def _resolve_chapter_uids(*, book: Book | None, chapter_uids: list[str] | None) 
     return resolved
 
 
-class Hint(DoctorModel):
+class Hint(StrictModel):
     kind: Literal["needs_scan", "style_inconsistency", "unusual_density", "open_question", "convergence"]
     severity: Literal["info", "warn"] = "info"
     message: str
@@ -82,14 +73,14 @@ class Hint(DoctorModel):
     @field_validator("message")
     @classmethod
     def _validate_message(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="message")
+        return require_non_empty(value, field_name="message")
 
     @field_validator("chapter_uid", "block_uid", "suggested_subagent_type")
     @classmethod
     def _validate_optional_strings(cls, value: str | None, info) -> str | None:
         if value is None:
             return None
-        return _require_non_empty(value, field_name=info.field_name)
+        return require_non_empty(value, field_name=info.field_name)
 
     @model_validator(mode="after")
     def _validate_scope(self) -> Hint:
@@ -102,7 +93,7 @@ class Hint(DoctorModel):
         return self
 
 
-class ReadinessChecklist(DoctorModel):
+class ReadinessChecklist(StrictModel):
     chapters_scanned: list[str] = Field(default_factory=list)
     chapters_unscanned: list[str] = Field(default_factory=list)
     open_questions: int = 0
@@ -110,7 +101,7 @@ class ReadinessChecklist(DoctorModel):
     converged: bool = False
 
 
-class DoctorDelta(DoctorModel):
+class DoctorDelta(StrictModel):
     new_issue_keys: list[str] = Field(default_factory=list)
     resolved_issue_keys: list[str] = Field(default_factory=list)
     new_hint_keys: list[str] = Field(default_factory=list)
@@ -124,7 +115,7 @@ class DoctorDelta(DoctorModel):
     quiet_round_streak: int = 0
 
 
-class DoctorReport(DoctorModel):
+class DoctorReport(StrictModel):
     issues: list[AuditNote] = Field(default_factory=list)
     hints: list[Hint] = Field(default_factory=list)
     readiness: ReadinessChecklist

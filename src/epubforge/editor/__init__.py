@@ -48,6 +48,7 @@ from epubforge.editor.ops import (
     SetText,
     SplitBlock,
     SplitChapter,
+    SplitMergedTable,
 )
 
 __all__ = [
@@ -91,6 +92,7 @@ __all__ = [
     "SetText",
     "SplitBlock",
     "SplitChapter",
+    "SplitMergedTable",
     "apply_envelope",
     "apply_log",
     "build_doctor_report",
