@@ -7,7 +7,6 @@
 当前稳定 command surface 通过 `epubforge editor <cmd>` 调用，配置文件通过根 `--config <path>` 指定（省略时使用 defaults + env）：
 
 - `epubforge editor init`
-- `epubforge editor import-legacy`
 - `epubforge editor doctor`
 - `epubforge editor propose-op`
 - `epubforge editor apply-queue`
@@ -20,7 +19,7 @@
 - `epubforge editor snapshot`
 - `epubforge editor render-prompt`
 
-`python -m epubforge.editor.*` 入口已废除。配置通过顶层 root callback 的 `--config` 一次性注入，所有子命令共享同一 `AppContext`。没有 `refine-toc`、`proofread`、`footnote-verify` 这类运行时 stage。
+`python -m epubforge.editor.*` 入口已废除。配置通过顶层 root callback 的 `--config` 一次性注入，所有子命令共享同一 `AppContext`。
 
 ## 角色分工
 
@@ -82,9 +81,7 @@
 适用场景：
 
 - 你已经有当前架构下的干净 `05_semantic.json`
-- 你希望从标准编辑入口开始，而不是继承旧工件
-
-如果当前工作目录只有 `05_semantic_raw.json`，而没有整理过的 `05_semantic.json`，应改用 `import-legacy --from 05_semantic_raw.json`。
+- 你希望从标准编辑入口开始
 
 结果：
 
@@ -92,23 +89,6 @@
 - 生成 `meta.json`、`memory.json`、`leases.json`
 - 初始化空的 `edit_log.jsonl` 和 `staging.jsonl`
 - 为 chapter / block 补全稳定 uid，并把 `book.op_log_version` 置为 0
-
-### `import-legacy`
-
-`import-legacy <work> --from <artifact>` 会从指定 legacy artifact 初始化 `edit_state/`。`--from` 可以指向工作目录下的旧文件名，也可以是显式路径。
-
-它与 `init` 的关键差别：
-
-- 基线不必来自 `05_semantic.json`
-- 会写入一条 `legacy_baseline` noop，形成可追踪的导入起点
-
-`--assume-verified` 的语义：
-
-- 把所有 chapter 视为至少已经完成一次通读
-- `memory.assume_verified = true`
-- doctor 不再把“尚未 scan 过每一章”作为阻塞条件
-
-这适用于确实继承了已审过的旧工件，而不是为了偷过收敛检查。
 
 ## 核心循环
 
@@ -207,7 +187,7 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 - 用它绕开 op queue 直接改 `book.json`
 - 把它当成长期工作流的主要入口
 
-## `snapshot`、`compact`、`revert`、`import-legacy`
+## `snapshot`、`compact`、`revert`
 
 ### `snapshot`
 
@@ -250,16 +230,12 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 
 因此，`revert` 的语义是“通过日志反操作回退某条历史 op”，不是把整个工作目录回滚到某个 snapshot。
 
-### `import-legacy`
-
-`import-legacy` 的意义不是“把旧时代流程继续跑下去”，而是把旧工件转成新的编辑层基线。它会初始化 `edit_state/`，写入 legacy baseline 的 noop 起点；导入后的一切后续动作，仍然走 `doctor -> render-prompt -> propose-op -> apply-queue`。
-
 ## 收敛怎么判断
 
 当前 `doctor` 的收敛条件是四项同时满足：
 
 1. `issues` 为空
-2. 没有未扫描章节；若 `assume_verified = true`，这一项自动满足
+2. 没有未扫描章节
 3. 没有 unresolved open questions
 4. 连续两轮 `doctor` 都没有新增 convention、pattern，也没有新应用的 op
 

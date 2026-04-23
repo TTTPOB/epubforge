@@ -7,9 +7,7 @@
 1. ingestion pipeline: `parse -> classify -> extract -> assemble`
 2. agentic editing layer: 以 `edit_state/` 为中心，由 supervisor 调度 scanner / fixer / reviewer
 
-最终 `build` 优先读取 `work/<book>/edit_state/book.json`；如果尚未初始化编辑层，则回退到 `work/<book>/05_semantic.json`。
-
-旧的 `refine-toc`、`proofread`、`footnote-verify` 已不再是 runtime stage。
+最终 `build` 读取 `work/<book>/edit_state/book.json`。
 
 ## 快速开始
 
@@ -32,10 +30,7 @@ uv run epubforge run fixtures/example.pdf
 - `work/example/03_extract/`
 - `work/example/05_semantic_raw.json`
 
-如果只做 ingestion，到这里为止。进入编辑层有两种入口：
-
-- 已有可作为编辑基线的 `05_semantic.json`：用 `epubforge editor init`
-- 只有 `05_semantic_raw.json` 或其他 legacy artifact：用 `epubforge editor import-legacy --from ...`
+如果只做 ingestion，到这里为止。进入编辑层：用 `epubforge editor init` 初始化编辑状态。
 
 ## Ingestion Pipeline
 
@@ -78,14 +73,13 @@ uv run epubforge run fixtures/example.pdf --from 4 --force-rerun
 uv run epubforge run fixtures/example.pdf --pages 1-20
 ```
 
-`--pages` 主要用于抽样、调试或构造 synthetic 测试资产；不要把它和旧文档里的手工 unit 删除流程混为一谈。
+`--pages` 主要用于抽样、调试或构造 synthetic 测试资产。
 
 ## Agentic Editing Layer
 
 编辑层的稳定命令面通过 `epubforge editor <cmd>` 调用，所有命令均需通过根 `--config <path>` 传入配置文件（或省略以使用 defaults + env）：
 
 - `epubforge editor init`
-- `epubforge editor import-legacy`
 - `epubforge editor doctor`
 - `epubforge editor propose-op`
 - `epubforge editor apply-queue`
@@ -226,7 +220,3 @@ uv run epubforge -L DEBUG run fixtures/example.pdf
 uv run epubforge -L WARNING build fixtures/example.pdf
 ```
 
-## 迁移提示
-
-- 如果你还在寻找 `refine-toc` / `proofread` / `footnote-verify`，请转到 [agentic-editing-howto.md](./agentic-editing-howto.md)。
-- 如果你想知道“如何判断一本书的标点、表格、脚注、结构该怎么修”，请直接读 `docs/rules/`，不要再参考旧的人工审校 SOP。

@@ -86,13 +86,12 @@ Full JSON schema: see `editor/ops.py` (ops and envelope definitions),
 
 ### `epubforge editor <cmd>` commands
 
-All 13 commands are available via `epubforge editor <cmd>`. Each command receives
+All 12 commands are available via `epubforge editor <cmd>`. Each command receives
 effective config from `ctx.find_root().obj.config` (injected by the root Typer callback).
 
 | Command | Purpose |
 |---------|---------|
 | `init` | Initialize `edit_state/` from `05_semantic.json` |
-| `import-legacy` | Initialize `edit_state/` from a legacy artifact |
 | `doctor` | Run audit detectors and print readiness report |
 | `propose-op` | Validate `OpEnvelope[]` from stdin and append to `staging.jsonl` |
 | `apply-queue` | Apply staged envelopes from `staging.jsonl` to `book.json` and edit log |
@@ -220,7 +219,7 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 EPUBFORGE_EXTRACT_VLM_DPI                   extract.vlm_dpi
 EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES    extract.max_simple_batch_pages
 EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES   extract.max_complex_batch_pages
-EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory  (legacy name)
+EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
 ```
 
 ### Test-only / scratch subprocess injection
