@@ -125,9 +125,7 @@
 
 - `paths.current_log_path.exists() is True`
 
-不要再写：
-
-- `current.jsonl`
+不要硬编码文件名（正确常量为 `edit_log.jsonl`，通过 `CURRENT_LOG` 定义）。
 
 ---
 
