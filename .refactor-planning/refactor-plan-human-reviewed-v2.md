@@ -1,9 +1,9 @@
-# epubforge Refactor Plan — Human Reviewed v1
+# epubforge Refactor Plan — Human Reviewed v2
 
-**Status**: finalized — 所有决策点已由用户确认，可进入执行。
-**Base**: `refactor-plan-v2.md`（已 APPROVED） + `human_input.md`（用户决策）。
-**Scope**: 优雅重构——消除重复、统一命名、清理死代码、修正文档。无用户可见的功能性变更（除 config 加载行为变更）。
-**Authorization**: 用户已授权 break 向后兼容（zxgb fixture 已完成，无历史包袱）。
+**Status**: finalized — 所有决策点已由用户确认，串行审阅已收敛，可进入执行。
+**Base**: `refactor-plan-v2.md`（已 APPROVED） + `human_input.md`（用户决策） + 已收敛的串行审阅 / nested-config 规划结论。
+**Scope**: 优雅重构——消除重复、统一命名、清理死代码、修正文档。无用户可见的功能性变更（除 config 加载行为变更）。按新世界设计执行，不考虑兼容性、迁移路径、旧状态保留。
+**Authorization**: 用户已授权 break 向后兼容；项目单人使用，当前无历史数据包袱。
 
 ---
 
@@ -19,15 +19,17 @@
 | D6 | **B — 改名 Stage 5** | 与 v2 推荐一致 |
 | D7 | **A — pytest fixture** | 与 v2 推荐一致 |
 | D8 | **B — 把 `python -m epubforge.editor.<cmd>` 迁成 `epubforge editor <cmd>` Typer 子命令**（⚠️ 用户追加指令后翻转） | ⚠️ **翻转 v2 推荐**（v2 推荐 A 保留 `python -m`） |
-| R5 额外 | 用户不关心 break fixture（"i've finished all job on it"）→ §7.1 原"zxgb fixture 重建确认"不再阻塞 | — |
+| R5 额外 | 用户不关心 break fixture（"i've finished all job on it"）→ 原"zxgb fixture 重建确认"不再阻塞 | — |
 | R6 修正 | **只读 CLI `--config <path>` 指定的文件**；不再隐式扫描 `config.toml` / `config.local.toml` | ⚠️ **扩大 v2 R6 的范围**（v2 保留双文件 layered 读） |
+| R6 定稿 | **B — 保留嵌套 TOML 结构 + 嵌套 `Config` 子模型** | ✅ 原待定项已收口 |
 | 计划外新增 | **Book.version → op_log_version** 重命名（原在 v2 §3 "放弃项 #7"） | ⚠️ **新增 R15**（v2 标记"不做"） |
 
 ### 对执行的直接影响
 
 - **D5 翻转**改写 R6 实现路径：原本小改 dataclass + 消除 CLI 硬编码 → 现在要迁到 `pydantic-settings.BaseSettings`。
 - **R6 修正**进一步改写加载语义：`load_config()` 参数从"可选"变为"唯一来源"，无 TOML 指定时只用 defaults + env。命令行必须显式 `--config <path>`（或干脆不用 TOML，只 env）。
-- **D8 翻转** + R6 收益合流：9 个 editor 脚本迁成 `epubforge editor <cmd>` Typer 子命令后，`--config` 只在 Typer 根 callback 接收一次，自然通过 `ctx.obj` 下发到所有子命令——**§7.1（子进程 config 分发策略）自动消失**。
+- **R6 定稿**把实现形态写死为：嵌套 TOML + 嵌套 `Config` 子模型 + 显式 env 映射表 + `resolved_vlm()` 单一归一化入口 + Typer 根 callback 产出 effective config。
+- **D8 翻转** + R6 收益合流：13 个现有 editor 入口统一迁成 `epubforge editor <cmd>` Typer 子命令后，`--config` 只在 Typer 根 callback 接收一次，再通过 `ctx.obj` 下发到所有子命令。
 - **新增 R15**把原本放弃的 `Book.version` 重命名列为正式工作项——涉及 IR schema 字段改名 + `edit_log.jsonl`/`book.json` 序列化字段随之 break，用户已授权。
 
 ---
@@ -37,11 +39,11 @@
 本轮重构聚焦 5 条主线：
 1. **editor 子包内部整洁**（R1/R2/R10）——消除 4 份复制的 validator 与 4 个等价 `extra="forbid"` 基类，补漏 `SplitMergedTable` 导出。
 2. **apply 分派重构**（R4/R5）——`_apply_op` 16 路 `isinstance` → dispatch 表；`_join_text("cjk")` 修正 + CJK helper 抽取到 `text_utils.py`。
-3. **Config 现代化**（R6）——迁到 `pydantic-settings`；删除死 section `[proofread]` / `[footnote_verify]`；消除 CLI 硬编码默认；`load_config()` 只认 CLI `--config <path>`，不隐式扫描。
+3. **Config 现代化**（R6）——迁到 `pydantic-settings`；保留嵌套 TOML，并将 `Config` 定稿为嵌套子模型；`load_config()` 只认 CLI `--config <path>`，不隐式扫描；env 通过显式映射表覆盖嵌套路径；`resolved_vlm()` / root callback 统一有效配置入口。
 4. **清除死代码 + 一致性**（R3/R11/R12/R13/R14）——`CLEAN_SYSTEM`、`TocRefineOutput`、`CleanOutput` 删除（保留共享 `_*_RULES` 片段）；pipeline console.print → logging；pillow 未使用依赖删；log.py 裸 `write_text` → `atomic_write_text`；audit HTML regex 去重。
-5. **命名/文档/测试**（R7/R8/R9/R15）——editor CLI 文件 kebab → snake_case；AGENTS.md 重写；测试 `_prov` → pytest fixture；`Book.version` → `op_log_version`。
+5. **命名/文档/测试**（R7/R8/R9/R15）——13 个 editor 入口统一迁到 `epubforge editor <cmd>`（其中 9 个文件 kebab → snake_case）；AGENTS.md 与 `docs/usage.md` / `docs/agentic-editing-howto.md` 同步重写；测试 `_prov` → pytest fixture；`Book.version` → `op_log_version`。
 
-预计 **15** 个工作项、~1000 行代码改动（多为删除 + 改名），覆盖约 12 个源文件 + 9 个 editor CLI 文件重命名。**新增 1 项生产依赖：`pydantic-settings`**。
+预计 **15** 个工作项、~1100 行代码改动（多为删除 + 改名），覆盖约 13 个源文件 + 13 个 editor CLI 入口迁移（其中 9 个文件重命名）。**新增 1 项生产依赖：`pydantic-settings`**。
 
 ---
 
@@ -175,7 +177,7 @@ def _join_text(parts: list[str], join: Literal["concat", "cjk", "newline"]) -> s
 
 **影响面**：新增 `text_utils.py`（~30 行）；`assembler.py:577-640` 局部改 import；`apply.py:196-201` 4-7 行改。
 
-**R5 用户补充**："i don't care breaking that file, i've finished all job on it." → 若 zxgb 的 `book.json` 因 `MergeBlocks(join="cjk")` replay 结果变化，**直接接受 book.json 差异或重建 edit_state**。v2 §7.1 待调研点移除。
+**R5 用户补充**："i don't care breaking that file, i've finished all job on it." → 若 zxgb 的 `book.json` 因 `MergeBlocks(join="cjk")` replay 结果变化，**直接接受 book.json 差异或重建 edit_state**。
 
 **风险**：低。行为变更范围已确认可接受。
 
@@ -197,91 +199,130 @@ def _join_text(parts: list[str], join: Literal["concat", "cjk", "newline"]) -> s
 
 即：`config.py:65` 的 `toml_paths = (config_path,) if config_path else (Path("config.toml"), Path("config.local.toml"))` **隐式 fallback 必须消除**。没有 `--config` 时 → 仅用 defaults + env vars。
 
-**建议方案（修订版，整合 D5 + R6 用户约束）**：
+**建议方案（修订版，已按 β 定稿）**：
 
-**Step 1: 迁到 `pydantic-settings`**
+**Step 1: 迁到 `pydantic-settings`，并将 `Config` 定稿为嵌套子模型**
 1. 新增依赖 `pydantic-settings>=2.7`（`pyproject.toml`）。
-2. 改写 `src/epubforge/config.py`：
+2. 改写 `src/epubforge/config.py`，不再使用扁平字段 + nested->flat 胶水，而是直接让 Python 内存结构与 TOML section 同构：
    ```python
-   from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
-   from pydantic import Field
+   from pydantic import BaseModel, Field
+   from pydantic_settings import BaseSettings, SettingsConfigDict
+
+   class ProviderSettings(BaseModel):
+       base_url: str = "https://openrouter.ai/api/v1"
+       api_key: str | None = None
+       model: str = "anthropic/claude-haiku-4.5"
+       timeout_seconds: float = 300.0
+       max_tokens: int | None = None
+       prompt_caching: bool = True
+       extra_body: dict[str, Any] = Field(default_factory=dict)
+
+   class RuntimeSettings(BaseModel):
+       concurrency: int = 4
+       cache_dir: Path = Path("work/.cache")
+       work_dir: Path = Path("work")
+       out_dir: Path = Path("out")
+       log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
+
+   class EditorSettings(BaseModel):
+       lease_ttl_seconds: int = 1800
+       book_exclusive_ttl_seconds: int = 300
+       compact_threshold: int = 50
+       max_loops: int = 50
+
+   class ExtractSettings(BaseModel):
+       vlm_dpi: int = 200
+       max_simple_batch_pages: int = 8
+       max_complex_batch_pages: int = 12
+       enable_book_memory: bool = True
 
    class Config(BaseSettings):
-       model_config = SettingsConfigDict(
-           env_prefix="EPUBFORGE_",
-           extra="ignore",  # 忽略未知 env var（兼容 scratch 子进程注入）
-       )
-
-       llm_base_url: str = "https://openrouter.ai/api/v1"
-       llm_api_key: str = Field(default="", alias="llm_api_key")
-       # ... 扁平化所有字段（env var 天然命名为 EPUBFORGE_LLM_BASE_URL 等）
-       editor_lease_ttl_seconds: int = 1800
-       book_exclusive_ttl_seconds: int = 300  # 新增
-       vlm_max_tokens: int = 16384             # 从 None 改为具体默认
-       log_level: str = "INFO"                  # 从 cli.py:43 迁入
-       # ...
+       model_config = SettingsConfigDict(extra="ignore")
+       llm: ProviderSettings = Field(default_factory=ProviderSettings)
+       vlm: ProviderSettings = Field(default_factory=lambda: ProviderSettings(model="google/gemini-flash-3", max_tokens=16384))
+       runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+       editor: EditorSettings = Field(default_factory=EditorSettings)
+       extract: ExtractSettings = Field(default_factory=ExtractSettings)
    ```
-3. TOML 嵌套结构（`[llm]` / `[vlm]` / `[runtime]` / `[editor]` / `[extract]`）通过 `TomlConfigSettingsSource` + 自定义 mapping 或改用扁平 TOML 表达。**推荐**：让 pydantic-settings 读顶层扁平 key，TOML schema 也扁平化（`config.example.toml` 同步改写）。*若用户强烈要求保留嵌套 TOML 结构，作为 §7 待确认——执行前需选择。*
-4. 自定义 `settings_customise_sources` 关闭自动 `.env` 扫描；保留顺序：init kwargs → env → toml（如指定）→ defaults。
+3. 顶层 5 个 nested 字段统一使用 `Field(default_factory=...)`，子模型叶子字段自带默认值；因此 `load_config(None)` 在“无 TOML、无 env”时也必须直接成功。
+4. TOML 形态固定保留嵌套结构：`[llm]` / `[vlm]` / `[runtime]` / `[editor]` / `[extract]`。`config.example.toml` 保持这种结构，不扁平化。
+5. TOML / init kwargs 对未知 section / key 一律 `extra="forbid"` fail fast；未知 env 则继续忽略，不报错。
 
-**Step 2: `load_config()` 只认 CLI `--config`**
+**Step 2: source layering 收口为“defaults + explicit TOML + env”**
 ```python
 def load_config(config_path: Path | None = None) -> Config:
-    # config_path=None: defaults + env only (no TOML)
-    # config_path=Path(...): defaults + env + that single TOML file
-    sources: list = []
-    if config_path is not None:
-        if not config_path.exists():
-            raise SystemExit(f"config file not found: {config_path}")
-        sources.append(TomlConfigSettingsSource(Config, toml_file=config_path))
-    return Config(_toml_sources=sources)  # 实际通过 settings_customise_sources 注入
+    # config_path=None: defaults + env only
+    # config_path=Path(...): defaults + that TOML + env
+    ...
 ```
-- **删除** v2 `config.py:65` 的 `(Path("config.toml"), Path("config.local.toml"))` 隐式扫描分支。
-- 删除 `.gitignore:233-234` 的 `config.toml` / `config.local.toml` 条目（因默认不再读，用户若放文件也不会被误读；`config.example.toml` 保留作为模板）。
-- `config.local.toml` 若当前存在——可删除或由用户自行重命名为显式 `my-config.toml` 并通过 `--config` 传入。
+1. `config_path=None`：只使用 defaults + env，**绝不扫描** cwd 下任何 `config.toml` / `config.local.toml`。
+2. `config_path=Path(...)`：只读取这一份 TOML；路径不存在直接报错。
+3. 关闭自动 `.env` 扫描、默认 secrets source、`EPUBFORGE_CONFIG_PATH` 一类额外入口。
+4. `load_config()` 只负责 settings source 合并；CLI runtime override（如 `--log-level` / `--log-file`）不属于 `load_config()` 层。
 
-**Step 3: CLI 入口统一 `--config`（因 D8=B 变简单）**
-- `cli.py` 的 Typer `app` 根 callback 增加 `--config` 选项：
-  ```python
-  @app.callback()
-  def main(ctx: typer.Context, config: Path | None = typer.Option(None, "--config", help="Path to TOML config file")):
-      ctx.obj = load_config(config_path=config)
-  ```
-- 9 个 editor 子命令也挂在同一 Typer `app` 下（R9 迁 Typer 之后），共用根 callback 的 `--config`——无需在每个子命令再定义一次。
-- 子命令通过 `ctx.obj` 取 Config：`def propose_op_cmd(ctx: typer.Context, work: Path): cfg = ctx.obj; ...`。
-- **§7.1 已废除**：因为没有"9 个独立子进程"，无需选择 α/β/γ 分发策略。
+**Step 3: env 采用显式映射表，而不是自动 nested delimiter**
+1. 不使用 `env_nested_delimiter` 之类的自动推导。
+2. 维护固定白名单映射表，把 env 名显式映射到嵌套路径，例如：
+   - `EPUBFORGE_LLM_BASE_URL` -> `llm.base_url`
+   - `EPUBFORGE_LLM_API_KEY` -> `llm.api_key`
+   - `EPUBFORGE_VLM_MODEL` -> `vlm.model`
+   - `EPUBFORGE_RUNTIME_CONCURRENCY` -> `runtime.concurrency`
+   - `EPUBFORGE_RUNTIME_LOG_LEVEL` -> `runtime.log_level`
+   - `EPUBFORGE_EDITOR_LEASE_TTL_SECONDS` -> `editor.lease_ttl_seconds`
+   - `EPUBFORGE_EDITOR_BOOK_EXCLUSIVE_TTL_SECONDS` -> `editor.book_exclusive_ttl_seconds`
+   - `EPUBFORGE_EXTRACT_VLM_DPI` -> `extract.vlm_dpi`
+3. env 只覆盖被点到的叶子字段，不得把整个 nested 子对象替换掉；同一 section 中 TOML / default 提供的 sibling 字段必须保留。
+4. `extra_body` 保持 TOML-only，不为其增加 JSON-in-env 解析。
 
-**Step 4: 消除 CLI 硬编码默认**
-- `editor/tool_surface.py` 中 `acquire-lease`/`acquire-book-lock` 的 `--ttl`：
-  ```python
-  cfg = load_config(args.config)
-  parser.add_argument("--ttl", type=int, default=cfg.editor_lease_ttl_seconds)
-  ```
-- **不改** `leases.py:106/146` 方法签名默认值（最终兜底）。
+**Step 4: `resolved_vlm()` 作为唯一归一化入口**
+1. `vlm.base_url` / `vlm.api_key` 原始字段允许为 `None`。
+2. 在 `Config` 中提供唯一规范入口：`resolved_vlm() -> ProviderSettings`。
+3. `require_vlm()`、`LLMClient(use_vlm=True)` 和其它调用方只使用 `resolved_vlm()`；不再并列保留 `resolved_vlm_base_url` / `resolved_vlm_api_key` 一类旁路 API。
+4. `vlm.max_tokens` 直接在配置层给出默认值 `16384`，删除 `llm/client.py` 中的隐式 `None -> 16384` 兜底。
 
-**Step 5: 删除死 section**
-- `config.example.toml` 和（若保留）`config.local.toml` 删除 `[proofread]` / `[footnote_verify]` 节。
+**Step 5: CLI 根 callback 产出 effective config**
+1. 顶层 `src/epubforge/cli.py` 根 callback 是唯一配置装配点：
+   - 解析 `--config`
+   - 调用 `load_config(config_path=...)`
+   - 在得到 `Config` 后再应用 CLI runtime override
+2. `--log-level` 若出现，直接覆写到 effective `config.runtime.log_level`；不要再维护第二套平行 `_log_level` 状态。
+3. `ctx.obj` 不直接塞裸 `Config`，而是塞最小 `AppContext`：
+   ```python
+   @dataclass
+   class AppContext:
+       config: Config
+       log_file_override: Path | None
+   ```
+4. 子命令统一从 `ctx.find_root().obj.config` 取 effective config。
 
-**Step 6: vlm_max_tokens / log_level 统一**
-- `Config.vlm_max_tokens: int = 16384`（不再 None），删 `client.py:122-123` 条件赋值。
-- `Config.log_level: str = "INFO"`，`cli.py:43` 改为 `_log_level = log_level or cfg.log_level`。
+**Step 6: `tool_surface.py` 彻底退回业务层**
+1. `tool_surface.py` 不得导入 `load_config`。
+2. `tool_surface.py` 不得声明 CLI option default，不得读取 `typer.Context`。
+3. 命令层参数统一写成 `ttl: int | None = None`，由命令层决定默认值：
+   - chapter lease -> `cfg.editor.lease_ttl_seconds`
+   - book lock -> `cfg.editor.book_exclusive_ttl_seconds`
+4. `tool_surface.acquire_lease(...)` / `tool_surface.acquire_book_lock(...)` 只接收最终解析好的整数 TTL。`leases.py:106/146` 的默认值仅保留为最终兜底，不作为 CLI 默认值来源。
+
+**Step 7: 删除死 section 并统一可见配置项**
+1. `config.example.toml` 删除 `[proofread]` / `[footnote_verify]`。
+2. `runtime.log_level` 成为正式配置字段，替代 `cli.py` 里直接读 `os.environ` 的逻辑。
+3. `editor.book_exclusive_ttl_seconds` 成为正式配置字段，替代当前 book lock 的 `300` 硬编码。
 
 **影响面**：
 - `pyproject.toml`（+1 依赖）
-- `src/epubforge/config.py`（整体重写 ~180 → ~100 行）
-- `src/epubforge/cli.py`（+ `--config` 根 callback，log_level 改读 cfg）
-- `src/epubforge/editor/tool_surface.py`（`--ttl` 默认改动态，通过 `ctx.obj` 取 Config）
-- 9 个 editor 子命令（D8=B，R9 迁 Typer 后**自动**共用根 callback 的 `--config`，无需单独加参数）
-- `config.example.toml` / `config.local.toml`（死 section 删 + 可能扁平化）
-- `llm/client.py`（2 行删）
-- `.gitignore`（删 2 条）
+- `src/epubforge/config.py`（整体重写为 nested settings + source hook + explicit env mapping）
+- `src/epubforge/cli.py`（根 callback 产出 `AppContext`，`--log-level` 覆写 effective config）
+- `src/epubforge/editor/app.py`（R9 新增；13 个 editor 入口共用根 callback 注入链）
+- `src/epubforge/editor/tool_surface.py`（移除 config/CLI 感知，仅保留业务函数）
+- `config.example.toml`（保持 nested TOML，死 section 删）
+- `llm/client.py`（删除 VLM token 隐式默认）
 
 **风险**：中-高。
-1. pydantic-settings 的 TomlConfigSettingsSource 对嵌套表的映射需要微调，若扁平化失败需改 schema 提供 alias。
-2. 迁 Typer 后每次 `epubforge editor <cmd>` 启动仍需实例化 BaseSettings + parse TOML，但只一次（不再是 9 个独立 `python -m` 子进程），开销降低。
-3. `.gitignore` 改动可能让用户本地 `config.toml` 意外进入 git —— **Commit 5 执行前必须口头提醒用户 `git rm --cached config.toml config.local.toml` 或确认本地无敏感内容**。
+1. `pydantic-settings` source hook 需要正确处理“单叶子 env override 不冲掉 sibling 字段”的 nested merge 语义。
+2. 顶层 root callback + `AppContext` 一旦收口不严，13 个 editor 子命令很容易出现 `ctx.obj` / effective config 不一致。
+3. `resolved_vlm()` 必须是唯一规范入口，否则 fallback 会再次散落到 config / client / CLI 多处。
 
-**依赖**：必须与 R9 绑定（R9 把 9 个 editor 脚本迁 Typer 后，根 callback 才能把 `--config` 推到所有子命令）。
+**依赖**：必须与 R9 绑定（R9 把 13 个 editor 入口统一挂到 Typer 根注入链后，`--config` 与 effective config 才能真正单点下发）。
 
 ---
 
@@ -299,10 +340,10 @@ def load_config(config_path: Path | None = None) -> Config:
 **建议方案**：重写 `AGENTS.md`，结构：
 1. **Project Overview**：改为"5-stage ingestion pipeline + editor subsystem"。
 2. **Pipeline Stages**：表格只列 parse/classify/extract/assemble/build；stage 编号按 D6=B **改为 Stage 1-5**。
-3. **Editor Subsystem**（全新节）：简述 `edit_state/` 目录结构、`OpEnvelope` / `apply_envelope` / `memory_patches` 语义、所有 `python -m epubforge.editor.<cmd>` 命令清单及 JSON 契约要点。**补写 invariant**: "`apply_envelope` 的事务性依赖 `working = book.model_copy(deep=True)`（`apply.py:1065` 附近）——任何 op/memory_patches 失败都回滚到原 `book`。"
+3. **Editor Subsystem**（全新节）：简述 `edit_state/` 目录结构、`OpEnvelope` / `apply_envelope` / `memory_patches` 语义、所有 `epubforge editor <cmd>` 命令清单及 JSON 契约要点。**补写 invariant**: "`apply_envelope` 的事务性依赖 `working = book.model_copy(deep=True)`（`apply.py:1065` 附近）——任何 op/memory_patches 失败都回滚到原 `book`。"
 4. **Audit Subsystem**（全新节）：列举 `detect_structure_issues` / `detect_table_merge_issues` / `detect_footnote_issues` / `detect_dash_inventory` / `detect_table_issues` / `detect_invariant_issues`。
 5. **Semantic IR**：补 `TableMergeRecord`、`Table.multi_page`、`Table.merge_record`；`VLMPageOutput.updated_book_memory`；`BookMemory` 用途。**补一句** "`Book.op_log_version: int` 是 op 日志版本号（每次 `apply_envelope` +1），不是 IR schema 版本"（R15 之后用新字段名；若 R15 先合入 AGENTS.md 也按新名写）。
-6. **Config**：全量 env var 清单 + `EPUBFORGE_EDITOR_NOW` 等（标 "test-only / scratch subprocess injection"）。**新增一段**："自 vNext 起，TOML 配置文件路径必须通过 `--config <path>` CLI 参数或 `EPUBFORGE_CONFIG_PATH` env var 显式指定；不再隐式读取 `config.toml` / `config.local.toml`"（R6 行为说明）。
+6. **Config**：全量 env var 清单 + `EPUBFORGE_EDITOR_NOW` 等（标 "test-only / scratch subprocess injection"）。**新增一段**："TOML 配置文件路径必须通过 `--config <path>` CLI 参数显式指定；不再隐式读取 `config.toml` / `config.local.toml`。`Config` 为嵌套子模型，env 通过显式映射表覆盖嵌套路径；`resolved_vlm()` 是 VLM 实际生效配置的唯一归一化入口。"（R6 行为说明）。
 7. **保留** Beads / shell commands 段落不动。
 
 **影响面**：仅 `AGENTS.md`（~160 行改动）。
@@ -333,98 +374,101 @@ def prov():
 
 ---
 
-### [R9] 迁移 9 个 editor `python -m` 脚本为 `epubforge editor <cmd>` Typer 子命令（D8=B 确认 ⚠️）[MOD]
+### [R9] 迁移 13 个现有 editor 入口为 `epubforge editor <cmd>` Typer 子命令（D8=B 确认 ⚠️）[MOD]
 
 **用户追加指令（human_input.md 最新，覆盖原 D8=A）**：
 > python -m 子命令都改成 epubforge editor xxx 去掉 -m editor.xx
 
 **问题描述**：
-- `editor/` 下 9 个 kebab-case 文件：`acquire-book-lock.py`、`acquire-lease.py`、`apply-queue.py`、`import-legacy.py`、`propose-op.py`、`release-book-lock.py`、`release-lease.py`、`render-prompt.py`、`run-script.py`。同目录其他文件 snake_case。
-- 用户调用方式当前是 `python -m epubforge.editor.<name>`，绕过顶层 `epubforge` Typer app，与 `epubforge run/parse/classify/...` 风格不一致。
-- 测试 `tests/test_editor_tool_surface.py` 用 `subprocess` + `python -m` 调用 19 处；文档 `docs/agentic-editing-howto.md` 约 29 处反引号引用。
+- `src/epubforge/editor/__main__.py` 当前公开的稳定 editor 入口共有 **13 个**：`init`、`import-legacy`、`doctor`、`propose-op`、`apply-queue`、`acquire-lease`、`release-lease`、`acquire-book-lock`、`release-book-lock`、`run-script`、`compact`、`snapshot`、`render-prompt`。
+- 其中只有 9 个命令对应 kebab-case 文件，需要做文件层重命名；`init`、`doctor`、`compact`、`snapshot` 已是 snake_case，但同样必须迁到 `epubforge editor <cmd>` 统一入口。
+- 当前用户调用方式是 `python -m epubforge.editor.<name>`，绕过顶层 `epubforge` Typer app；测试 `tests/test_editor_tool_surface.py` 仍以 `subprocess + python -m` 为主；`docs/usage.md` 与 `docs/agentic-editing-howto.md` 也在描述旧入口。
 
 **建议方案（D8=B 的实现路径）**：
 
-**Step 1：每个脚本的业务逻辑抽取为纯函数**
+**Step 1：将 13 个命令面与文件重命名范围拆开表述**
+1. 命令面迁移范围是 **13 个 editor 入口**，这必须体现在正文、测试和验收口径中。
+2. 文件重命名范围仍然是 **9 个 kebab-case 文件**：
+   - `acquire-book-lock.py` -> `acquire_book_lock.py`
+   - `acquire-lease.py` -> `acquire_lease.py`
+   - `apply-queue.py` -> `apply_queue.py`
+   - `import-legacy.py` -> `import_legacy.py`
+   - `propose-op.py` -> `propose_op.py`
+   - `release-book-lock.py` -> `release_book_lock.py`
+   - `release-lease.py` -> `release_lease.py`
+   - `render-prompt.py` -> `render_prompt.py`
+   - `run-script.py` -> `run_script.py`
+3. `init`、`doctor`、`compact`、`snapshot` 不做文件重命名，但要与其余 9 个命令一起挂到新的 `editor_app`。
 
-当前 9 个脚本各自是 `argparse` + `if __name__ == "__main__"` 薄包装。将每个脚本的 `main()`（或对等逻辑）重构为不依赖 argparse 的纯函数（带类型签名），`argparse` 块保留或删除取决于 Step 2 选择。
-
-示例 `editor/propose_op.py`（改名后）：
+**Step 2：建立 `editor` Typer 子 app，并让 13 个命令都走同一注入链**
 ```python
-def propose_op(work: Path, input_payload: str, cfg: Config) -> int:
-    """Core logic, returns exit code."""
-    ...
-```
-
-**Step 2：建立 `editor` Typer 子 app**
-
-新建 `src/epubforge/editor/app.py`：
-```python
-import typer
-from pathlib import Path
-from epubforge.config import Config
-
 editor_app = typer.Typer(help="Editor subsystem commands", no_args_is_help=True)
 
 @editor_app.command("propose-op")
 def _propose_op_cmd(ctx: typer.Context, work: Path = typer.Argument(...)):
-    from epubforge.editor.propose_op import propose_op
-    raise typer.Exit(propose_op(work, sys.stdin.read(), ctx.obj))
+    app_ctx = ctx.find_root().obj
+    raise typer.Exit(propose_op(work, sys.stdin.read(), app_ctx.config))
 
-# ... 9 commands, command name 可保持 kebab-case（Typer 的惯例）
+# ... 其余 12 个命令同理
 ```
-
-子命令名用 **kebab-case**（`propose-op`、`apply-queue` 等）——Typer/Click 惯例，与用户原话 `epubforge editor xxx` 形式一致。文件名按 PEP 8 必须 snake_case（Python 模块名限制）。
+- 子命令名保持 **kebab-case**，文件名改为 **snake_case**。
+- 所有 13 个命令都从 `ctx.find_root().obj.config` 取 effective config；不允许某些命令继续自建 config 入口。
 
 **Step 3：`cli.py` 挂载 editor 子 app**
 ```python
 from epubforge.editor.app import editor_app
 app.add_typer(editor_app, name="editor")
 ```
+- 根 callback 负责 `--config` 与 `--log-level` 装配 `AppContext`；`editor_app` 不再拥有自己的 config callback。
 
-**Step 4：文件重命名（kebab → snake，仅文件层）**
-
-9 个 `.py` 文件重命名为 snake_case：`acquire_book_lock.py`、`acquire_lease.py`、`apply_queue.py`、`import_legacy.py`、`propose_op.py`、`release_book_lock.py`、`release_lease.py`、`render_prompt.py`、`run_script.py`。**目的**：能被 Typer command 从同包 import（`from epubforge.editor.propose_op import propose_op`）。
+**Step 4：每个命令模块收缩为“业务函数 + Typer 包装”**
+- 13 个入口对应模块都应收敛成不依赖 argparse 的纯函数或等价业务函数。
+- `tool_surface.py` 继续下沉为纯业务层，不承担 parser/default/config 读取。
+- 旧的 `argparse` 块全部删除或缩成最薄兼容包装；由于本轮已明确废除 `python -m epubforge.editor.<cmd>`，可直接删掉入口包装而不是双轨维护。
 
 **Step 5：删除或瘦身 `editor/__main__.py`**
+- `python -m epubforge.editor.<cmd>` 不再是支持入口。
+- `python -m epubforge.editor` 若仍需保留，可改为调用 `editor_app()`；若无收益，直接删除 `editor/__main__.py` 的命令分发表。
 
-用户指令 "去掉 -m editor.xx" 意味着 `python -m epubforge.editor.<cmd>` 不再是支持的入口。`editor/__main__.py:13-25` 若只是一个 command 分发表，整个文件删除。若有其它职责（如当前 `python -m epubforge.editor` 整体分发），改为调用 `editor_app()`。
-
-**Step 6：测试从 `subprocess` + `python -m` 迁 Typer `CliRunner`**
-
-`tests/test_editor_tool_surface.py` 的 19 处 `_run_module("epubforge.editor.<name>", ...)` 改造：
-- **首选**：`typer.testing.CliRunner().invoke(editor_app, ["<name>", ...])`——in-process，快 ~10x，保留 exit_code / stdout / stderr 检查。
-- **例外**：若某测试明确验证 subprocess 隔离语义（scratch env var 注入、fork 行为等），改为 `subprocess.run(["uv", "run", "epubforge", "editor", "<name>", ...])`——调用真实 entrypoint。执行时 grep `EPUBFORGE_EDITOR_NOW` / `EPUBFORGE_PROJECT_ROOT` / `EPUBFORGE_WORK_DIR` / `EPUBFORGE_EDIT_STATE_DIR` 是否出现在 test 文件中——若是，保留 subprocess。
+**Step 6：测试口径改为“顶层 app 覆盖 + 少量真实入口 smoke”**
+1. 主体命令测试迁到：
+   ```python
+   CliRunner().invoke(app, ["--config", str(config_path), "editor", "<cmd>", ...])
+   ```
+   重点是覆盖顶层 root callback 的 config 注入链，而不是只直调 `editor_app`。
+2. 可保留极少量 `editor_app` 级别的轻量测试，但**不得**把配置注入验证建立在 `editor_app` 直调上。
+3. 保留至少 1 条真实入口 smoke：
+   - `uv run epubforge editor <cmd> ...`
+   - 用来验证 console script 挂载与“未传 `--config` 时不会误读 ambient TOML”。
+4. 若测试涉及 `EPUBFORGE_EDITOR_NOW` / `EPUBFORGE_PROJECT_ROOT` / `EPUBFORGE_WORK_DIR` / `EPUBFORGE_EDIT_STATE_DIR` 这类 subprocess 语义，可保留少量 subprocess 测试；其余迁为 `CliRunner + monkeypatch`。
 
 **Step 7：同步更新调用站点（文档 + prompt）**
-
-- `src/epubforge/editor/prompts.py:23-24`：prompt 文本 `python -m epubforge.editor.run-script` → `epubforge editor run-script`（两处）。
-- `docs/usage.md:38,88-99`：命令示例 10 行，全改。
-- `docs/agentic-editing-howto.md`：全文约 29 处 `python -m epubforge.editor.<cmd>` 反引号引用，全改为 `epubforge editor <cmd>`。
-- `docs/footnote-audit-process.md` / `docs/finer-proofread.md` / `docs/fix-plan-v3.md`：若含引用，一并更新。
-- 9 个文件的 docstring 首行：`"""CLI entrypoint for \`python -m epubforge.editor.<name>\`."""` → `"""Implementation for \`epubforge editor <name>\`."""`。
-- AGENTS.md 中所有 `python -m epubforge.editor.*` 引用（R7 中一起处理）。
+- `src/epubforge/editor/prompts.py` 中所有 `python -m epubforge.editor.run-script` 改为 `epubforge editor run-script`。
+- `docs/usage.md` 的 editor 命令示例全部改为 `epubforge editor <cmd>`，并与 `--config <path>` 新约定一致。
+- `docs/agentic-editing-howto.md` 全文改写为新入口形式；原“当前稳定 surface 只有 `python -m epubforge.editor.*`”的表述全部删除。
+- `docs/footnote-audit-process.md` / `docs/finer-proofread.md` / `docs/fix-plan-v3.md` 若有旧引用，一并更新。
+- `AGENTS.md` 在 R7 中同步反映 13 个 editor 入口的新形态。
 
 **Step 8：执行扫尾检查**
-
 - `grep -rn 'python -m epubforge\.editor\.' .` 返回空。
-- `grep -rn '_run_module\|python.*-m.*epubforge\.editor' tests/` 返回空（subprocess 测试已迁 CliRunner 或改为 `epubforge editor`）。
-- `grep -rn 'epubforge\.editor\.[a-z]*-[a-z]*' .` 返回空（kebab-case import path 都已消除）。
+- `grep -rn '_run_module\|python.*-m.*epubforge\.editor' tests/` 返回空，或仅剩显式保留的真实入口 smoke。
+- `grep -rn 'epubforge\.editor\.[a-z]*-[a-z]*' .` 返回空。
+- `grep -rn 'load_config\(' src/epubforge/editor` 返回空。
 
 **影响面**：
-- 新增 `src/epubforge/editor/app.py`（~100 行——9 个 command 注册 + import wiring）。
-- 9 个文件重命名 + argparse 块删除或重构 + docstring 改（~200 行改动）。
-- `src/epubforge/cli.py`（+1 行 `add_typer`）。
-- `src/epubforge/editor/__main__.py`（删除或改为 `editor_app()`）。
-- `tests/test_editor_tool_surface.py`（19 处迁 CliRunner，预计减少 ~40 行——in-process 不需要 subprocess cleanup）。
-- `docs/`：3-4 文件，共 ~40 处字符串替换。
-- `editor/prompts.py`：2 处。
+- 新增 `src/epubforge/editor/app.py`（13 个 command 注册 + import wiring）。
+- 9 个文件重命名；13 个命令模块的 argparse 包装删除或重构。
+- `src/epubforge/cli.py`（挂载 `editor_app`，统一 root callback 注入）。
+- `src/epubforge/editor/__main__.py`（删除或收缩为 `editor_app()`）。
+- `tests/test_editor_tool_surface.py`（主体迁到顶层 `app` 路径；保留少量真实入口 smoke）。
+- `docs/usage.md`、`docs/agentic-editing-howto.md` 及其他引用文件。
+- `editor/prompts.py`。
 
-**风险**：中-高（比 v2 的 R9 明显扩大）。
-1. **subprocess → CliRunner 迁移**：若现有 subprocess 测试依赖 stdin/stdout pipe 精确行为，CliRunner 的 `input=` 参数可替代，但需逐一核对。
-2. **Typer Context 下发 Config**：9 个 command 都要从 `ctx.obj` 取 Config，改错会导致 "NoneType has no attribute" 运行时错误。需 `pytest` 覆盖所有 9 个 command 的 happy path。
-3. **scratch env var 注入语义**：若某测试通过 subprocess 显式设置 `EPUBFORGE_EDITOR_NOW` 等验证行为，迁 CliRunner 后需用 `monkeypatch.setenv(...)` 替代。
-4. **R9 与 R6 绑定变强**：必须同一 commit 完成；中间态（R9 完成 R6 未完成，或反过来）会导致 `--config` 参数无处着落。
+**风险**：中-高。
+1. **13 个命令统一注入链**：任何一个命令漏从 `ctx.find_root().obj.config` 取值，都会留下双入口。
+2. **顶层 app 测试迁移**：若仍用 `CliRunner(editor_app)` 验证 config 注入，会产生“测试绿了但真实入口坏了”的假阳性。
+3. **真实入口 smoke 缺失**：若完全取消 subprocess/console script 覆盖，`uv run epubforge editor ...` 挂载错误不易暴露。
+4. **R9 与 R6 深度耦合**：必须同一 commit 完成；中间态会让 `--config` / `AppContext` / TTL 默认值同时失真。
 
 **依赖**：与 R6 绑定同 commit（根 callback 同时处理 `--config` 与挂载 `editor_app`）；R7 文档同步必须反映新命令形式。
 
@@ -562,8 +606,8 @@ app.add_typer(editor_app, name="editor")
 *单独 commit 方便 revert 与定位序列化 break 的冲击面。*
 
 **Commit 5 — Config 现代化 + editor CLI 迁 Typer**（~2 天，最大 commit）
-- R6（pydantic-settings 迁移 + 只读 `--config` + 死 section 删 + CLI 硬编码消除 + vlm_max_tokens/log_level 入 Config）
-- R9（9 个 editor 脚本迁 `epubforge editor <cmd>` Typer 子命令 + 文件重命名 + 测试迁 `CliRunner` + 文档 ~40 处字符串替换）
+- R6（pydantic-settings 迁移 + 嵌套 `Config` 子模型 + 显式 env 映射表 + `resolved_vlm()` + 只读 `--config` + effective config 注入链）
+- R9（13 个 editor 入口统一迁 `epubforge editor <cmd>` Typer 子命令；其中 9 个文件重命名 + 测试迁顶层 `app` 路径 + 少量真实入口 smoke + 文档全局替换）
 - R11（console.print → logging）
 - R13（log.py atomic_write）
 
@@ -578,7 +622,7 @@ app.add_typer(editor_app, name="editor")
 - **Commit 2** 删除 + 新抽取 util，走得越早暴露问题越快。
 - **Commit 3** dispatch 改动较大，独立 commit 便于 review 与回滚。
 - **Commit 4** 序列化 break 独立——任何 fixture 问题一眼可定位到此 commit。
-- **Commit 5** pydantic-settings 迁移 + CLI 重命名深度耦合（`--config` 选项分发到 9 个 snake_case 子命令），合并可避免 `config.toml` 与 `propose-op.py` / `propose_op.py` 中间不一致态。
+- **Commit 5** pydantic-settings 迁移 + 13 个 editor 入口统一接入顶层配置注入链深度耦合，合并可避免 `load_config()` / `AppContext` / TTL 默认值 / Typer 挂载出现半旧半新的中间态。
 - **Commit 6** 最后做，反映终态。
 
 ---
@@ -613,13 +657,21 @@ uv run epubforge --config config.example.toml editor apply-queue work/zxgb
 - [ ] `grep -r CLEAN_SYSTEM src/` 返回空。
 - [ ] `grep -r _LINE_BREAK_RULES src/epubforge/llm/prompts.py` 返回定义 + `VLM_SYSTEM` 引用共 2 类。
 - [ ] `grep -r 16384 src/` 返回空（或仅 `config.py` 一处）。
+- [ ] `grep -rn 'EPUBFORGE_CONFIG_PATH' src/ docs/ tests/ AGENTS.md` 返回空。
 - [ ] `grep -rn 'python -m epubforge\.editor\.' .` 返回空（D8=B 废除该入口形式）。
 - [ ] `grep -rn 'epubforge\.editor\.[a-z]*-[a-z]*' .` 返回空（kebab-case import path 消除）。
-- [ ] `grep -rn '_run_module\|subprocess.*epubforge\.editor' tests/` 返回空或仅剩显式 subprocess 隔离测试。
+- [ ] `grep -rn 'load_config\(' src/epubforge/editor` 返回空。
+- [ ] `grep -rn '_run_module\|subprocess.*epubforge\.editor' tests/` 返回空，或仅剩显式保留的真实入口 smoke。
 - [ ] `uv run epubforge --config config.example.toml editor doctor work/zxgb` 正常退出。
+- [ ] `pytest` 覆盖 `load_config(None)` 在存在 ambient `config.toml` / `config.local.toml` 时仍完全忽略它们。
+- [ ] `pytest` 覆盖 nested source merge：同一 section 中 env 只覆写一个叶子字段时，不会冲掉 sibling 字段。
+- [ ] `pytest` 覆盖 `load_config(None)` 时 5 个 nested 子模型都能由 `default_factory` 成功构造。
+- [ ] `pytest` 覆盖顶层 `app` 路径下 `--log-level` 已覆写到 `ctx.obj.config.runtime.log_level`。
+- [ ] `pytest` 覆盖 `resolved_vlm()` 是唯一被断言的生效入口：未显式设置时继承 `llm.*`，显式设置后不再继承。
+- [ ] `pytest` 覆盖 `acquire-lease` / `acquire-book-lock` 未传 `--ttl` 时分别取 `cfg.editor.lease_ttl_seconds` / `cfg.editor.book_exclusive_ttl_seconds`。
 - [ ] `grep -rn '\.version\b' src/epubforge/ | grep -Ev 'base_version|applied_version|op_log_version|__version__|epub_version|package_version'` 返回空（确认 `Book.version` 全部改名）。
 - [ ] `grep -r '"version"' src/ tests/` 在 book 序列化上下文中的出现已改为 `"op_log_version"`。
-- [ ] `grep -r 'config\.toml\|config\.local\.toml' src/ docs/` 只剩"历史兼容删除说明"的一处文档（R6 中 AGENTS.md 的迁移说明），不在运行时代码中。
+- [ ] `grep -r 'config\.toml\|config\.local\.toml' src/ docs/ AGENTS.md` 只允许出现在“**不再隐式读取**”的否定说明中，不得作为现行入口出现。
 - [ ] `grep -rn 'Stage 8' src/` 返回空。
 - [ ] `uv run epubforge --config config.example.toml run fixtures/zxgb.pdf` 不报错。
 - [ ] 根据 D6=B：AGENTS.md Pipeline 表格与 `cli.py` `--from max=4` 一致；`pipeline.py:120` stage_timer 改 `"5 build"`。
@@ -637,52 +689,78 @@ uv run epubforge --config config.example.toml editor apply-queue work/zxgb
 | **D5** Config 框架 | **B. 迁到 pydantic-settings** | R6 重写，新增依赖 |
 | **D6** Build stage 编号 | **B. Stage 5** | 同步 `cli.py:151` / `pipeline.py:119,120` 三处 |
 | **D7** conftest 形式 | **A. pytest fixture** | R8 使用 fixture 方案 |
-| **D8** editor 顶层子命令 | **B. 迁 Typer `epubforge editor <cmd>`** ⚠️ 翻转 | R9 范围扩大：9 脚本迁 Typer + 测试迁 CliRunner + 文档 ~40 处字符串替换；`python -m` 入口废除 |
-| **R5 额外** | 不在意 break zxgb fixture | §7.1 fixture 重建确认**移除** |
-| **R6 扩展** | 只读 CLI `--config`，不隐式扫描 | R6 Step 2：删 `config.py:65` fallback 分支 + 删 `.gitignore:233-234` |
+| **D8** editor 顶层子命令 | **B. 迁 Typer `epubforge editor <cmd>`** ⚠️ 翻转 | R9 范围扩大：13 个入口统一迁移；其中 9 个文件重命名；测试主路径迁顶层 `app`；`python -m` 入口废除 |
+| **R5 额外** | 不在意 break zxgb fixture | zxgb fixture break 不阻塞执行 |
+| **R6 扩展** | 只读 CLI `--config`，不隐式扫描 | R6 Step 2：删 `config.py:65` fallback 分支；`load_config(None)` 只走 defaults + env |
+| **R6 定稿** | 保留嵌套 TOML + 嵌套 `Config` 子模型 | `Config` / TOML / 文档三者同构；env 显式映射到嵌套路径；`resolved_vlm()` 与 `AppContext` 收口 |
 | **R15 新增** | `Book.version` → `op_log_version` | 新增独立 commit，带 schema break |
 
 ---
 
-## 7. 执行前仍需用户最终确认的 1 点
+## 7. R6 设计定稿（已收口）
 
-### ~~7.1 R6：子进程接受 `--config` 的方式~~ — **已因 D8=B 自动消除**
+### 7.1 R6 定稿：保留嵌套 TOML + 嵌套 `Config` 子模型
 
-D8 翻转为 Typer 子命令后，`epubforge editor <cmd>` 是单进程调用，`--config` 在 Typer 根 callback 一次解析后通过 `ctx.obj` 下发到所有子命令。不再有"9 个独立子进程如何拿 config"的问题。
+本项已经定稿，不再保留待定分支。
 
-### 7.1 R6：TOML schema 扁平化 vs 保留嵌套（**唯一剩余待定**）
+**为什么不选扁平 `Config`**
+- TOML 结构、Python 内存结构、文档结构三者同构，可显著降低理解与维护成本。
+- 若保留嵌套 TOML、内部却维持扁平字段，只是把复杂度从用户接口挪进 source mapping，没有真正减少复杂度。
 
-pydantic-settings 的 `TomlConfigSettingsSource` 默认按顶层 key → 字段名映射。当前 TOML 嵌套如：
-```toml
-[llm]
-base_url = "..."
-api_key = "..."
-```
-对应字段 `llm_base_url` / `llm_api_key`，名称错位。两种解决：
-- **方案 α（推荐）**：TOML schema 扁平化——`config.example.toml` 改为 `llm_base_url = "..."` 平铺写。用户只需改一个 example 文件，自己的 `*.toml` 按例子格式即可。代价：TOML 阅读性略降。
-- **方案 β**：保留嵌套 TOML，为 Config 提供自定义 `settings_customise_sources` + 嵌套→扁平映射函数。代价：~40 行 glue code。
+**目标形态**
+- 顶层 `Config(BaseSettings)` 只持有 5 个 nested 子模型：`llm`、`vlm`、`runtime`、`editor`、`extract`。
+- 顶层 5 个字段均使用 `Field(default_factory=...)`；子模型叶子字段自带默认值，因此 `load_config(None)` 在无 TOML、无 env 时也能直接成功。
+- `config.example.toml` 保持：
+  - `[llm]`
+  - `[vlm]`
+  - `[runtime]`
+  - `[editor]`
+  - `[extract]`
 
-请用户在 `human_input.md` 追加选择（α/β）。
+**source layering**
+- `load_config(config_path=None)`：defaults + env only。
+- `load_config(config_path=Path(...))`：defaults + that TOML + env。
+- 不再隐式读取 `config.toml` / `config.local.toml`。
+- 不再提供 `EPUBFORGE_CONFIG_PATH`、默认 `.env` 扫描或其它隐式配置入口。
+
+**env 映射规则**
+- 使用显式白名单映射表，把 env 名映射到嵌套路径。
+- 不使用自动 nested delimiter 推导。
+- 同一 section 中，env 只覆盖被点到的叶子字段，不得冲掉 sibling 字段。
+
+**归一化与注入链**
+- `resolved_vlm()` 是 VLM 实际生效配置的唯一归一化入口。
+- 顶层 Typer root callback 先 `load_config()`，再把 `--log-level` 覆写到 effective `config.runtime.log_level`。
+- `ctx.obj` 承载最小 `AppContext(config, log_file_override)`。
+- 13 个 `epubforge editor <cmd>` 子命令统一从 `ctx.find_root().obj.config` 取 effective config。
+
+**边界约束**
+- `tool_surface.py` 不得导入 `load_config`。
+- `tool_surface.py` 不得声明 CLI option default，也不得读取 `typer.Context`。
+- CLI 默认值决议留在命令层：`ttl: int | None = None`，再由命令层解析成最终整数。
+
+至此，R6 不再有剩余人类决策项。
 
 ---
 
-## 附录 A. v2 → human-reviewed v1 差异摘要
+## 附录 A. original v2 → human-reviewed v2 差异摘要
 
 | 变化 | 内容 |
 |---|---|
 | 工作项数 | 14 → **15**（新增 R15 `Book.version` rename） |
 | Commit 数 | 5 → **6**（R15 独立 commit） |
 | 新依赖 | **+ `pydantic-settings`** |
-| R6 | 从"保留 dataclass + 消除 CLI 硬编码" → "**迁 pydantic-settings + 只认 `--config`**"；删除 `config.toml`/`config.local.toml` 隐式扫描；删除 `.gitignore` 两条 |
-| R9 | 从"仅重命名 9 个文件"扩大为 "**迁 Typer 子命令 `epubforge editor <cmd>`** + 重命名 + 测试迁 CliRunner + 文档全局替换"（因 D8 翻转 B） |
-| R7 | 新增 `--config` 约定说明段落；`Book.version` 语义句改用 `op_log_version`；所有 `python -m epubforge.editor.*` 表述改为 `epubforge editor <cmd>` |
+| R6 | 从"保留 dataclass + 消除 CLI 硬编码" → "**迁 pydantic-settings + 只认 `--config` + 保留嵌套 TOML + 嵌套 `Config` 子模型 + 显式 env 映射表 + `resolved_vlm()` / `AppContext` 定稿**" |
+| R9 | 从"仅重命名 9 个文件"扩大为 "**迁 13 个 editor 入口到 `epubforge editor <cmd>`** + 9 文件重命名 + 测试覆盖顶层 `app` 路径 + 少量真实入口 smoke + 文档全局替换" |
+| R7 | 新增 `--config` 终态说明段落；`Config` / env / `resolved_vlm()` 定稿说明；`Book.version` 语义句改用 `op_log_version`；所有 `python -m epubforge.editor.*` 表述改为 `epubforge editor <cmd>` |
 | §3 放弃项 | #1（config 迁移）与 #7（Book.version rename）从放弃转为正式项 |
-| §7 待调研 | 从 2 点缩减到 **1 点**（仅 TOML schema 形态；子进程 config 分发因 D8=B 废除） |
-| §6 决策汇总 | 从"待决定"转为"已封版"表格；D5/D8 翻转明确 |
+| §7 待调研 | 从 2 点缩减到 **0 点**（子进程 config 分发因 D8=B 消除；R6 嵌套 TOML 方案已定稿） |
+| §6 决策汇总 | 从"待决定"转为"已封版"表格；D5/D8 翻转明确，新增 R6 定稿行 |
+| Scope | 明确补充：按新世界设计执行，不考虑兼容性、迁移路径、旧状态保留 |
 
 ---
 
-## 附录 B. `human_input.md` 原文存档
+## 附录 B. `human_input.md` 与后续对话原文存档
 
 ```
 D1: A, StrictModel
@@ -707,4 +785,11 @@ item 7: i prefer to use op_log_version
 
 > python -m 子命令都改成 epubforge editor xxx 去掉 -m editor.xx
 
-此指令将 D8 从 A 翻转为 B，并扩大 R9 范围。
+> 这项目就我一个人用 目前也没什么数据 完全无需考虑兼容性
+
+> 需要嵌套结构。扁平太丑了
+
+这些追加指令分别：
+- 将 D8 从 A 翻转为 B，并扩大 R9 范围；
+- 将兼容性 / 迁移路径 / 旧状态保留排除出本轮范围；
+- 将 R6 的 TOML 形态定稿为“保留嵌套结构”。
