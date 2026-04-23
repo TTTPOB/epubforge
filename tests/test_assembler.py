@@ -1,6 +1,6 @@
 """Tests for assembler._pair_footnotes page-scoped pairing."""
 
-from epubforge.assembler import _is_continuation_plausible, _pair_footnotes
+from epubforge.assembler import _cjk_join, _is_continuation_plausible, _pair_footnotes
 from epubforge.ir.semantic import Block, Footnote, Heading, Paragraph, Provenance, Table
 
 
@@ -407,3 +407,80 @@ def test_salvage_duplicate_callouts_same_page() -> None:
     # One of them got the marker via main loop, the other via salvage
     assert "\x02fn-10-①\x03" in para1.text or "\x02fn-10-①\x03" in para2.text
     assert "\x02fn-10-①\x03" in para1.text and "\x02fn-10-①\x03" in para2.text
+
+
+# ---------------------------------------------------------------------------
+# TestCjkJoin — tests for the _cjk_join helper (epubforge-kg2.7)
+# ---------------------------------------------------------------------------
+
+
+class TestCjkJoin:
+    """Tests for _cjk_join: CJK/kana/hangul no-space joining and hyphen continuation."""
+
+    # Basic CJK Han join — no space between Chinese characters
+    def test_chinese_han_join(self) -> None:
+        assert _cjk_join("中文", "测试") == "中文测试"
+
+    # Hiragana join — no space
+    def test_hiragana_join(self) -> None:
+        assert _cjk_join("こんにち", "は世界") == "こんにちは世界"
+
+    # Katakana join — no space
+    def test_katakana_join(self) -> None:
+        assert _cjk_join("カタ", "カナ") == "カタカナ"
+
+    # Hangul (Korean) join — no space
+    def test_hangul_join(self) -> None:
+        assert _cjk_join("안녕", "하세요") == "안녕하세요"
+
+    # Fullwidth punctuation left boundary — no space
+    def test_fullwidth_punct_left(self) -> None:
+        # Fullwidth comma U+FF0C followed by Chinese text
+        assert _cjk_join("，", "这是") == "，这是"
+
+    # Fullwidth punctuation right boundary — no space
+    def test_fullwidth_punct_right(self) -> None:
+        # Chinese text followed by fullwidth period U+3002
+        assert _cjk_join("这是", "。") == "这是。"
+
+    # Latin hyphen continuation: drop hyphen, join without space
+    def test_latin_hyphen_continuation(self) -> None:
+        assert _cjk_join("hyphen-", "ated") == "hyphenated"
+
+    # Latin hyphen continuation: uppercase letter on right side
+    def test_latin_hyphen_continuation_uppercase(self) -> None:
+        assert _cjk_join("Anti-", "American") == "AntiAmerican"
+
+    # A legitimate mid-word hyphen that is NOT at boundary is not affected
+    # (The function only sees the last char of prev and first of cont)
+    def test_hyphen_not_at_end_untouched(self) -> None:
+        # "well-known" split as "well-kno" + "wn" — hyphen is internal, not at end
+        assert _cjk_join("well-kno", "wn") == "well-kno wn"
+
+    # Non-hyphen ending: ordinary Latin + Latin still gets a space
+    def test_latin_no_hyphen_gets_space(self) -> None:
+        assert _cjk_join("hello", "world") == "hello world"
+
+    # CJK left + Latin right: no space (CJK boundary wins)
+    def test_cjk_latin_boundary_no_space(self) -> None:
+        assert _cjk_join("文字", "Latin") == "文字Latin"
+
+    # Latin left + CJK right: no space (CJK boundary wins)
+    def test_latin_cjk_boundary_no_space(self) -> None:
+        assert _cjk_join("Latin", "文字") == "Latin文字"
+
+    # Empty left fragment — result is the right fragment unchanged
+    def test_empty_left(self) -> None:
+        assert _cjk_join("", "hello") == "hello"
+
+    # Empty right fragment — result is the left fragment unchanged
+    def test_empty_right(self) -> None:
+        assert _cjk_join("hello", "") == "hello"
+
+    # Trailing/leading whitespace is stripped before joining
+    def test_whitespace_stripped(self) -> None:
+        assert _cjk_join("hello  ", "  world") == "hello world"
+
+    # Hiragana left + Katakana right — no space (both are no-space scripts)
+    def test_hiragana_katakana_boundary(self) -> None:
+        assert _cjk_join("ひらがな", "カタカナ") == "ひらがなカタカナ"
