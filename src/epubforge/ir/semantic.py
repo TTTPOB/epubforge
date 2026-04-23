@@ -181,34 +181,6 @@ class Book(BaseModel):
     chapters: list[Chapter] = Field(default_factory=list)
 
 
-# --- stage 5.5 (toc refiner) schemas ---
-
-class TocRefineItem(BaseModel):
-    idx: int
-    level: int
-    text: str
-    merge_with_prev: bool = False
-
-
-class TocRefineOutput(BaseModel):
-    items: list[TocRefineItem]
-
-
-# --- stage 3 (cleaner) output schema ---
-
-class CleanBlock(BaseModel):
-    kind: Literal["paragraph", "heading", "footnote"]
-    text: str
-    level: int | None = None
-    callout: str | None = None
-
-
-class CleanOutput(BaseModel):
-    blocks: list[CleanBlock]
-    first_block_continues_prev_tail: bool = False
-    first_footnote_continues_prev_footnote: bool = False
-
-
 # --- VLM output schema (used as response_format) ---
 
 class _VLMBase(BaseModel):

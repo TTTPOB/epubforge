@@ -11,16 +11,14 @@ from __future__ import annotations
 
 import re
 
+from epubforge.audit._html import COLSPAN_RE, ROW_RE, TBODY_RE
 from epubforge.audit.models import AuditBundle, AuditIssue
 from epubforge.ir.semantic import Book, Table
 from epubforge.query import find_blocks
 
 
 THEAD_RE = re.compile(r"<thead\b[^>]*>.*?</thead>", re.IGNORECASE | re.DOTALL)
-TBODY_RE = re.compile(r"<tbody\b[^>]*>(.*?)</tbody>", re.IGNORECASE | re.DOTALL)
-ROW_RE = re.compile(r"<tr\b[^>]*>.*?</tr>", re.IGNORECASE | re.DOTALL)
 CELL_RE = re.compile(r"<t[dh]\b([^>]*)>", re.IGNORECASE)
-COLSPAN_RE = re.compile(r'colspan\s*=\s*["\']?(\d+)', re.IGNORECASE)
 
 # Column width drift threshold: flag when any tbody segment's column count
 # deviates from the reference (first segment) by more than this fraction.

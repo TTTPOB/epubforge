@@ -9,8 +9,6 @@ from epubforge.ir.semantic import Book
 
 EDITABLE_BOOK_PATH = Path("edit_state/book.json")
 LEGACY_BOOK_FILENAMES = (
-    "07_footnote_verified.json",
-    "06_proofread.json",
     "05_semantic.json",
     "05_semantic_raw.json",
 )

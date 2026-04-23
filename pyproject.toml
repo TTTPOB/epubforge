@@ -16,7 +16,6 @@ dependencies = [
     "rich>=13",
     "pydantic>=2.7",
     "pymupdf>=1.24",
-    "pillow>=10",
 ]
 
 [project.scripts]

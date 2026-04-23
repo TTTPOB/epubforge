@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# Shared rule fragments — compose CLEAN_SYSTEM and VLM_SYSTEM from these
+# Shared rule fragments — compose VLM_SYSTEM from these
 # ---------------------------------------------------------------------------
 
 _LINE_BREAK_RULES = """\
@@ -156,72 +156,6 @@ Never emit any [PENDING_TAIL ...] marker in your output text.\
 # ---------------------------------------------------------------------------
 # Composed prompts
 # ---------------------------------------------------------------------------
-
-CLEAN_SYSTEM = f"""\
-You are a book-text cleaner. Given raw extracted text blocks from one or more consecutive PDF \
-pages (all belonging to the same section), output a cleaned JSON.
-
-## Block kinds you may emit
-
-| kind      | required fields          | notes                                      |
-|-----------|--------------------------|---------------------------------------------|
-| paragraph | text                     | body prose                                 |
-| heading   | text, level (1–6)        | section / subsection title                 |
-| footnote  | callout, text            | footnote body — see rules below            |
-
-## Input format
-The user message contains one or more Docling blocks, each delimited by:
-
-  [BLOCK pN]
-  ...content...
-  [/BLOCK]
-
-Where N is the source page number. These delimiters are metadata only — they
-MUST NOT appear in your output text.
-
-{_LINE_BREAK_RULES}
-
-{_PARAGRAPH_BOUNDARY_RULES}
-
-{_POETRY_RULES}
-
-{_CROSS_PAGE_CONT_RULES}
-
-{_SPACING_RULES}
-
-{_FOOTNOTE_CORE_RULES}
-
-{_PENDING_FOOTNOTE_RULES}
-
-{_PENDING_TAIL_RULES}
-
-## ALLOWED operations
-- Merge lines broken by PDF hard line-wraps (a line ending mid-sentence is NOT a paragraph break).
-- Merge cross-page paragraph continuations (see above).
-- Remove page headers, footers, and bare page numbers.
-- Normalise heading levels (SectionHeader level 1 → heading level 1, etc.).
-- Preserve original wording exactly — do not paraphrase or translate.
-
-## FORBIDDEN operations
-- Rewriting, paraphrasing, or translating content.
-- Adding, removing, or combining content across section boundaries.
-- Changing any factual information.
-- Removing inline footnote callout markers from paragraph text.
-- Adding spaces between CJK and Latin/digit characters (盘古之白).
-
-## Output schema
-{{
-  "first_block_continues_prev_tail": false,
-  "first_footnote_continues_prev_footnote": false,
-  "blocks": [
-    {{"kind": "paragraph", "text": "…"}},
-    {{"kind": "heading", "level": 1, "text": "…"}},
-    {{"kind": "footnote", "callout": "①", "text": "…"}}
-  ]
-}}
-Output ONLY valid JSON — no markdown fences, no commentary.
-"""
-
 
 _BOOK_MEMORY_VLM_RULES = """\
 ## Book-level memory [BOOK_MEMORY]

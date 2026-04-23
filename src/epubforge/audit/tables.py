@@ -5,15 +5,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from epubforge.audit._html import COLSPAN_RE, ROW_RE, TBODY_RE
 from epubforge.audit.models import AuditBundle, AuditIssue
 from epubforge.query import find_blocks
 from epubforge.ir.semantic import Book, Table
 
 
-ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-TBODY_RE = re.compile(r"<tbody\b[^>]*>(.*?)</tbody>", re.IGNORECASE | re.DOTALL)
 CELL_RE = re.compile(r"<t[dh]\b([^>]*)>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
-COLSPAN_RE = re.compile(r'colspan\s*=\s*["\']?(\d+)', re.IGNORECASE)
 ROWSPAN_RE = re.compile(r'rowspan\s*=\s*["\']?(\d+)', re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
 
