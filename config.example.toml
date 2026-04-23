@@ -1,5 +1,7 @@
-# Copy this file to config.local.toml and fill in your secrets.
+# Example configuration for epubforge.
+# Pass this file via: uv run epubforge --config config.example.toml <command>
 # Settings here can be overridden by EPUBFORGE_* environment variables.
+# Unknown keys in any section are rejected (fail-fast).
 
 [llm]
 base_url        = "https://openrouter.ai/api/v1"
@@ -7,20 +9,16 @@ api_key         = ""  # required; or set EPUBFORGE_LLM_API_KEY
 model           = "anthropic/claude-haiku-4.5"
 timeout_seconds = 120
 # Wrap the system prompt with cache_control: ephemeral for Anthropic prompt caching.
-# Enabled by default. Safe on OpenRouter (works for Anthropic, ignored by Gemini & OpenAI
-# which use implicit caching). Disable only if a self-hosted gateway rejects the field.
+# Enabled by default. Safe on OpenRouter (ignored by Gemini & OpenAI which use implicit caching).
 # prompt_caching = true
 
 [vlm]
-# Falls back to [llm] values if this section is omitted.
+# Falls back to [llm] api_key if this section's api_key is not set.
 base_url        = "https://openrouter.ai/api/v1"
 api_key         = ""  # or set EPUBFORGE_VLM_API_KEY
 model           = "google/gemini-flash-3"
 timeout_seconds = 300   # VLM calls with images can be slow; keep >= 300
-# max_tokens    = 16384  # default 16384; increase if complex pages are truncated
-# Wrap the system prompt with cache_control: ephemeral for Anthropic prompt caching.
-# Enabled by default. Safe on OpenRouter (works for Anthropic, ignored by Gemini & OpenAI
-# which use implicit caching). Disable only if a self-hosted gateway rejects the field.
+max_tokens      = 16384  # default 16384; increase if complex pages are truncated
 # prompt_caching = true
 
 [runtime]
@@ -28,20 +26,16 @@ concurrency = 4
 cache_dir   = "work/.cache"
 work_dir    = "work"
 out_dir     = "out"
+log_level   = "INFO"   # DEBUG | INFO | WARNING
 
-[proofread]
-# Reasoning tokens for Phase 1 (per-chapter labeling, rolling context).
-# Passed as extra_body.reasoning.max_tokens. Set to 0 to disable reasoning.
-phase1_thinking_budget_tokens = 2000
+[editor]
+lease_ttl_seconds           = 1800   # chapter lease TTL in seconds
+book_exclusive_ttl_seconds  = 300    # book-wide exclusive lock TTL in seconds
+compact_threshold           = 50     # compact after N accepted ops
+max_loops                   = 50     # max agent loop iterations
 
-# Reasoning tokens for Phase 2 (global consistency audit over all edited blocks).
-# Phase 2 does cross-book comparison, so a higher budget may help.
-phase2_thinking_budget_tokens = 2000
-
-# Maximum approximate token count per LLM call in the proofread stage.
-# Applies to both phases: when content exceeds this, it is split into chunks.
-max_chunk_tokens = 100000
-
-# Character-to-token estimation ratio for chunking. CJK/JSON mixed content
-# is roughly 3 chars/token. Adjust only if your model tokenizes differently.
-chars_per_token = 3.0
+[extract]
+vlm_dpi                  = 200   # DPI for page rendering sent to VLM
+max_simple_batch_pages   = 8     # max pages per simple-page batch
+max_complex_batch_pages  = 12    # max pages per complex-page batch
+enable_book_memory       = true  # maintain rolling BookMemory across extraction units

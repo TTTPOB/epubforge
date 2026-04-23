@@ -7,7 +7,6 @@ from typer.testing import CliRunner
 from epubforge import pipeline
 from epubforge.cli import app
 from epubforge.config import Config, load_config
-from epubforge.editor.tool_surface import run_import_legacy
 from epubforge.epub_builder import build_epub, resolve_build_source
 from epubforge.io import EDITABLE_BOOK_PATH
 from epubforge.io import save_book
@@ -153,12 +152,6 @@ def test_load_config_reads_editor_section_and_env_overrides(tmp_path: Path, monk
 lease_ttl_seconds = 900
 compact_threshold = 12
 max_loops = 7
-
-[proofread]
-phase1_thinking_budget_tokens = 1
-
-[footnote_verify]
-thinking_budget_tokens = 2
 """.strip(),
         encoding="utf-8",
     )
@@ -166,9 +159,9 @@ thinking_budget_tokens = 2
 
     cfg = load_config(config_path)
 
-    assert cfg.editor_lease_ttl_seconds == 900
-    assert cfg.editor_compact_threshold == 33
-    assert cfg.editor_max_loops == 7
+    assert cfg.editor.lease_ttl_seconds == 900
+    assert cfg.editor.compact_threshold == 33
+    assert cfg.editor.max_loops == 7
 
 
 def test_synthetic_build_is_byte_equivalent_before_and_after_import_legacy_migration(tmp_path: Path) -> None:
@@ -185,7 +178,13 @@ def test_synthetic_build_is_byte_equivalent_before_and_after_import_legacy_migra
         registry_path=work_dir / "style_registry.json",
     )
 
-    assert run_import_legacy([str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"]) == 0
+    cli_runner = CliRunner()
+    import_result = cli_runner.invoke(
+        app,
+        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
+        catch_exceptions=False,
+    )
+    assert import_result.exit_code == 0, import_result.output
     assert resolve_build_source(work_dir) == work_dir / EDITABLE_BOOK_PATH
 
     build_epub(

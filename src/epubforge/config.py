@@ -1,184 +1,203 @@
+"""Epubforge configuration — pydantic-settings nested submodels with explicit env mapping."""
+
 from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _load_toml(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    with path.open("rb") as f:
-        return tomllib.load(f)
+# ---------------------------------------------------------------------------
+# Submodels — extra="forbid" so unknown TOML keys fail fast
+# ---------------------------------------------------------------------------
 
 
-@dataclass
-class Config:
-    llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_api_key: str = ""
-    llm_model: str = "anthropic/claude-haiku-4.5"
-    vlm_base_url: str = ""
-    vlm_api_key: str = ""
-    vlm_model: str = "google/gemini-flash-3"
-    llm_timeout: float = 300.0
-    vlm_timeout: float = 300.0
-    llm_max_tokens: int | None = None
-    vlm_max_tokens: int | None = None
-    llm_extra_body: dict[str, Any] = field(default_factory=dict)
-    vlm_extra_body: dict[str, Any] = field(default_factory=dict)
-    llm_prompt_caching: bool = True
-    vlm_prompt_caching: bool = True
+class ProviderSettings(BaseModel):
+    """Settings for a single LLM/VLM provider endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = "https://openrouter.ai/api/v1"
+    api_key: str | None = None
+    model: str = "anthropic/claude-haiku-4.5"
+    timeout_seconds: float = 300.0
+    max_tokens: int | None = None
+    prompt_caching: bool = True
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     concurrency: int = 4
-    cache_dir: Path = field(default_factory=lambda: Path("work/.cache"))
-    work_dir: Path = field(default_factory=lambda: Path("work"))
-    out_dir: Path = field(default_factory=lambda: Path("out"))
-    editor_lease_ttl_seconds: int = 1800
-    editor_compact_threshold: int = 50
-    editor_max_loops: int = 50
+    cache_dir: Path = Path("work/.cache")
+    work_dir: Path = Path("work")
+    out_dir: Path = Path("out")
+    log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
+
+
+class EditorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_ttl_seconds: int = 1800
+    book_exclusive_ttl_seconds: int = 300
+    compact_threshold: int = 50
+    max_loops: int = 50
+
+
+class ExtractSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     vlm_dpi: int = 200
     max_simple_batch_pages: int = 8
     max_complex_batch_pages: int = 12
     enable_book_memory: bool = True
 
+
+# ---------------------------------------------------------------------------
+# Top-level Config — extra="ignore" so unknown env vars don't raise
+# ---------------------------------------------------------------------------
+
+
+class Config(BaseSettings):
+    """Top-level application configuration assembled from defaults + TOML + env."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    llm: ProviderSettings = Field(default_factory=ProviderSettings)
+    vlm: ProviderSettings = Field(
+        default_factory=lambda: ProviderSettings(model="google/gemini-flash-3", max_tokens=16384)
+    )
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    editor: EditorSettings = Field(default_factory=EditorSettings)
+    extract: ExtractSettings = Field(default_factory=ExtractSettings)
+
     def require_llm(self) -> None:
-        if not self.llm_api_key:
+        if not self.llm.api_key:
             raise SystemExit("LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)")
 
     def require_vlm(self) -> None:
-        if not self.vlm_api_key:
+        resolved = self.resolved_vlm()
+        if not resolved.api_key:
             raise SystemExit("VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)")
 
+    def resolved_vlm(self) -> ProviderSettings:
+        """Return effective VLM settings, falling back to LLM for api_key.
+
+        api_key: vlm.api_key if not None, else llm.api_key
+        base_url: vlm.base_url (defaults to same as llm default; override via [vlm] or env)
+        All other fields: taken directly from vlm.
+        """
+        return ProviderSettings(
+            base_url=self.vlm.base_url,
+            api_key=self.vlm.api_key if self.vlm.api_key is not None else self.llm.api_key,
+            model=self.vlm.model,
+            timeout_seconds=self.vlm.timeout_seconds,
+            max_tokens=self.vlm.max_tokens,
+            prompt_caching=self.vlm.prompt_caching,
+            extra_body=self.vlm.extra_body,
+        )
+
     def book_work_dir(self, pdf_path: Path) -> Path:
-        return self.work_dir / pdf_path.stem
+        return self.runtime.work_dir / pdf_path.stem
 
     def book_out_path(self, pdf_path: Path) -> Path:
-        return self.out_dir / f"{pdf_path.stem}.epub"
+        return self.runtime.out_dir / f"{pdf_path.stem}.epub"
+
+
+# ---------------------------------------------------------------------------
+# Explicit env whitelist — maps env name → (section, field, cast_fn)
+# No env_nested_delimiter; each entry is a deliberate leaf-level override.
+# ---------------------------------------------------------------------------
+
+
+def _bool_env(v: str) -> bool:
+    return v.lower() in {"1", "true", "yes", "on"}
+
+
+_ENV_MAP: list[tuple[str, str, str, Any]] = [
+    # (env_name, section, field, cast)
+    ("EPUBFORGE_LLM_BASE_URL",                          "llm",     "base_url",                  str),
+    ("EPUBFORGE_LLM_API_KEY",                           "llm",     "api_key",                   str),
+    ("EPUBFORGE_LLM_MODEL",                             "llm",     "model",                     str),
+    ("EPUBFORGE_LLM_TIMEOUT",                           "llm",     "timeout_seconds",            float),
+    ("EPUBFORGE_LLM_MAX_TOKENS",                        "llm",     "max_tokens",                lambda v: None if v == "" else int(v)),
+    ("EPUBFORGE_LLM_PROMPT_CACHING",                    "llm",     "prompt_caching",            _bool_env),
+    ("EPUBFORGE_VLM_BASE_URL",                          "vlm",     "base_url",                  str),
+    ("EPUBFORGE_VLM_API_KEY",                           "vlm",     "api_key",                   str),
+    ("EPUBFORGE_VLM_MODEL",                             "vlm",     "model",                     str),
+    ("EPUBFORGE_VLM_TIMEOUT",                           "vlm",     "timeout_seconds",            float),
+    ("EPUBFORGE_VLM_MAX_TOKENS",                        "vlm",     "max_tokens",                lambda v: None if v == "" else int(v)),
+    ("EPUBFORGE_VLM_PROMPT_CACHING",                    "vlm",     "prompt_caching",            _bool_env),
+    ("EPUBFORGE_RUNTIME_CONCURRENCY",                   "runtime", "concurrency",               int),
+    ("EPUBFORGE_RUNTIME_CACHE_DIR",                     "runtime", "cache_dir",                 Path),
+    ("EPUBFORGE_RUNTIME_WORK_DIR",                      "runtime", "work_dir",                  Path),
+    ("EPUBFORGE_RUNTIME_OUT_DIR",                       "runtime", "out_dir",                   Path),
+    ("EPUBFORGE_RUNTIME_LOG_LEVEL",                     "runtime", "log_level",                 str),
+    ("EPUBFORGE_EDITOR_LEASE_TTL_SECONDS",              "editor",  "lease_ttl_seconds",         int),
+    ("EPUBFORGE_EDITOR_BOOK_EXCLUSIVE_TTL_SECONDS",     "editor",  "book_exclusive_ttl_seconds", int),
+    ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD",              "editor",  "compact_threshold",         int),
+    ("EPUBFORGE_EDITOR_MAX_LOOPS",                      "editor",  "max_loops",                 int),
+    ("EPUBFORGE_EXTRACT_VLM_DPI",                       "extract", "vlm_dpi",                   int),
+    ("EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES",        "extract", "max_simple_batch_pages",    int),
+    ("EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES",       "extract", "max_complex_batch_pages",   int),
+    ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),  # legacy env name kept
+]
+
+_SECTION_MODELS = {
+    "llm": ProviderSettings,
+    "vlm": ProviderSettings,
+    "runtime": RuntimeSettings,
+    "editor": EditorSettings,
+    "extract": ExtractSettings,
+}
+
+
+def _apply_env_overrides(base: dict[str, Any]) -> dict[str, Any]:
+    """Apply env vars as leaf-level overrides onto a nested dict scaffold.
+
+    Leaf-merge: only the touched field changes; sibling fields are untouched.
+    """
+    for env_name, section, field, cast in _ENV_MAP:
+        v = os.environ.get(env_name)
+        if v is None:
+            continue
+        section_data = base.setdefault(section, {})
+        section_data[field] = cast(v)
+    return base
 
 
 def load_config(config_path: Path | None = None) -> Config:
-    # Layer 1: built-in defaults (via dataclass defaults)
-    cfg = Config()
+    """Load configuration from defaults + optional explicit TOML + env overrides.
 
-    # Layer 2+3: explicit path OR config.toml then config.local.toml
-    toml_paths = (config_path,) if config_path else (Path("config.toml"), Path("config.local.toml"))
-    for toml_path in toml_paths:
-        data = _load_toml(toml_path)
-        llm = data.get("llm") or {}
-        vlm = data.get("vlm") or {}
-        rt = data.get("runtime") or {}
+    Args:
+        config_path: If provided, read this TOML file (must exist).
+                     If None: defaults + env only — does NOT scan cwd for
+                     config.toml / config.local.toml.
+    """
+    base: dict[str, Any] = {}
 
-        if isinstance(llm, dict):
-            if "base_url" in llm:
-                cfg.llm_base_url = str(llm["base_url"])
-            if "api_key" in llm:
-                cfg.llm_api_key = str(llm["api_key"])
-            if "model" in llm:
-                cfg.llm_model = str(llm["model"])
-            if "timeout_seconds" in llm:
-                cfg.llm_timeout = float(llm["timeout_seconds"])  # type: ignore[arg-type]
-            if "max_tokens" in llm:
-                cfg.llm_max_tokens = int(llm["max_tokens"])  # type: ignore[arg-type]
-            if "extra_body" in llm and isinstance(llm["extra_body"], dict):
-                cfg.llm_extra_body = dict(llm["extra_body"])  # type: ignore[arg-type]
-            if "prompt_caching" in llm:
-                cfg.llm_prompt_caching = bool(llm["prompt_caching"])
+    if config_path is not None:
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}. "
+                "Specify a valid path via --config or omit the flag to use defaults + env only."
+            )
+        with config_path.open("rb") as fh:
+            toml_data = tomllib.load(fh)
+        # Accept only known top-level sections; unknown keys at the top level are silently
+        # ignored (Config.model_config extra="ignore" handles this at parse time too).
+        for key in ("llm", "vlm", "runtime", "editor", "extract"):
+            if key in toml_data:
+                base[key] = dict(toml_data[key])
 
-        if isinstance(vlm, dict):
-            if "base_url" in vlm:
-                cfg.vlm_base_url = str(vlm["base_url"])
-            if "api_key" in vlm:
-                cfg.vlm_api_key = str(vlm["api_key"])
-            if "model" in vlm:
-                cfg.vlm_model = str(vlm["model"])
-            if "timeout_seconds" in vlm:
-                cfg.vlm_timeout = float(vlm["timeout_seconds"])  # type: ignore[arg-type]
-            if "max_tokens" in vlm:
-                cfg.vlm_max_tokens = int(vlm["max_tokens"])  # type: ignore[arg-type]
-            if "extra_body" in vlm and isinstance(vlm["extra_body"], dict):
-                cfg.vlm_extra_body = dict(vlm["extra_body"])  # type: ignore[arg-type]
-            if "prompt_caching" in vlm:
-                cfg.vlm_prompt_caching = bool(vlm["prompt_caching"])
+    _apply_env_overrides(base)
 
-        if isinstance(rt, dict):
-            if "concurrency" in rt:
-                cfg.concurrency = int(rt["concurrency"])  # type: ignore[arg-type]
-            if "cache_dir" in rt:
-                cfg.cache_dir = Path(str(rt["cache_dir"]))
-            if "work_dir" in rt:
-                cfg.work_dir = Path(str(rt["work_dir"]))
-            if "out_dir" in rt:
-                cfg.out_dir = Path(str(rt["out_dir"]))
-
-        editor = data.get("editor") or {}
-        if isinstance(editor, dict):
-            if "lease_ttl_seconds" in editor:
-                cfg.editor_lease_ttl_seconds = int(editor["lease_ttl_seconds"])  # type: ignore[arg-type]
-            if "compact_threshold" in editor:
-                cfg.editor_compact_threshold = int(editor["compact_threshold"])  # type: ignore[arg-type]
-            if "max_loops" in editor:
-                cfg.editor_max_loops = int(editor["max_loops"])  # type: ignore[arg-type]
-
-        ex = data.get("extract") or {}
-        if isinstance(ex, dict):
-            if "vlm_dpi" in ex:
-                cfg.vlm_dpi = int(ex["vlm_dpi"])  # type: ignore[arg-type]
-            if "max_simple_batch_pages" in ex:
-                cfg.max_simple_batch_pages = int(ex["max_simple_batch_pages"])  # type: ignore[arg-type]
-            if "max_complex_batch_pages" in ex:
-                cfg.max_complex_batch_pages = int(ex["max_complex_batch_pages"])  # type: ignore[arg-type]
-            if "enable_book_memory" in ex:
-                cfg.enable_book_memory = bool(ex["enable_book_memory"])
-
-    # Layer 4: environment variables (highest priority)
-    if v := os.environ.get("EPUBFORGE_LLM_BASE_URL"):
-        cfg.llm_base_url = v
-    if v := os.environ.get("EPUBFORGE_LLM_API_KEY"):
-        cfg.llm_api_key = v
-    if v := os.environ.get("EPUBFORGE_LLM_MODEL"):
-        cfg.llm_model = v
-    if v := os.environ.get("EPUBFORGE_VLM_BASE_URL"):
-        cfg.vlm_base_url = v
-    if v := os.environ.get("EPUBFORGE_VLM_API_KEY"):
-        cfg.vlm_api_key = v
-    if v := os.environ.get("EPUBFORGE_VLM_MODEL"):
-        cfg.vlm_model = v
-    if v := os.environ.get("EPUBFORGE_LLM_TIMEOUT"):
-        cfg.llm_timeout = float(v)
-    if v := os.environ.get("EPUBFORGE_VLM_TIMEOUT"):
-        cfg.vlm_timeout = float(v)
-    if v := os.environ.get("EPUBFORGE_LLM_MAX_TOKENS"):
-        cfg.llm_max_tokens = int(v)
-    if v := os.environ.get("EPUBFORGE_VLM_MAX_TOKENS"):
-        cfg.vlm_max_tokens = int(v)
-    if v := os.environ.get("EPUBFORGE_LLM_PROMPT_CACHING"):
-        cfg.llm_prompt_caching = v.lower() not in {"0", "false", "no"}
-    if v := os.environ.get("EPUBFORGE_VLM_PROMPT_CACHING"):
-        cfg.vlm_prompt_caching = v.lower() not in {"0", "false", "no"}
-    if v := os.environ.get("EPUBFORGE_CONCURRENCY"):
-        cfg.concurrency = int(v)
-    if v := os.environ.get("EPUBFORGE_CACHE_DIR"):
-        cfg.cache_dir = Path(v)
-    if v := os.environ.get("EPUBFORGE_EDITOR_LEASE_TTL_SECONDS"):
-        cfg.editor_lease_ttl_seconds = int(v)
-    if v := os.environ.get("EPUBFORGE_EDITOR_COMPACT_THRESHOLD"):
-        cfg.editor_compact_threshold = int(v)
-    if v := os.environ.get("EPUBFORGE_EDITOR_MAX_LOOPS"):
-        cfg.editor_max_loops = int(v)
-    if v := os.environ.get("EPUBFORGE_VLM_DPI"):
-        cfg.vlm_dpi = int(v)
-    if v := os.environ.get("EPUBFORGE_MAX_SIMPLE_BATCH_PAGES"):
-        cfg.max_simple_batch_pages = int(v)
-    if v := os.environ.get("EPUBFORGE_MAX_COMPLEX_BATCH_PAGES"):
-        cfg.max_complex_batch_pages = int(v)
-    if v := os.environ.get("EPUBFORGE_ENABLE_BOOK_MEMORY"):
-        cfg.enable_book_memory = v.lower() not in {"0", "false", "no"}
-
-    # vlm falls back to llm when not explicitly set
-    if not cfg.vlm_base_url:
-        cfg.vlm_base_url = cfg.llm_base_url
-    if not cfg.vlm_api_key:
-        cfg.vlm_api_key = cfg.llm_api_key
-
-    return cfg
+    # Rebuild each section as the appropriate submodel so unknown keys raise early.
+    # Top-level Config with extra="ignore" is intentional for env robustness.
+    return Config(**base)

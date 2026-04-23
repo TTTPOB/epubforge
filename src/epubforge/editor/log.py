@@ -183,12 +183,14 @@ def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
     archive_path = paths.archive_root / archive_name
     archive_path.mkdir(parents=True, exist_ok=True)
 
+    from epubforge.editor.state import atomic_write_text  # lazy: avoid circular import
+
     current_log = read_current_log(paths.root)
     if paths.current.exists():
         shutil.copyfile(paths.current, archive_path / CURRENT_LOG)
     else:
-        (archive_path / CURRENT_LOG).write_text("", encoding="utf-8")
-    (archive_path / BOOK_FILE).write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        atomic_write_text(archive_path / CURRENT_LOG, "")
+    atomic_write_text(archive_path / BOOK_FILE, book.model_dump_json(indent=2))
 
     relative_archive = archive_path.relative_to(paths.root)
     for envelope in current_log:
@@ -214,7 +216,7 @@ def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
     )
 
     paths.current.parent.mkdir(parents=True, exist_ok=True)
-    paths.current.write_text(marker.model_dump_json() + "\n", encoding="utf-8")
+    atomic_write_text(paths.current, marker.model_dump_json() + "\n")  # noqa: F821  (imported above)
     return marker
 
 

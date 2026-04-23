@@ -20,8 +20,8 @@ SCANNER_PROMPT = """你是 epubforge 编辑系统的 scanner subagent。
 当前 book.op_log_version={book_version}，produce 的每条 op envelope 必须写 base_version={book_version}。
 当前 memory 快照：{memory_snapshot}
 
-如需临时脚本，先调 `python -m epubforge.editor.run-script {work_dir} --write <desc>` 获取 scratch 路径，
-写代码后再调 `python -m epubforge.editor.run-script {work_dir} --exec <path>` 执行。
+如需临时脚本，先调 `epubforge editor run-script {work_dir} --write <desc>` 获取 scratch 路径，
+写代码后再调 `epubforge editor run-script {work_dir} --exec <path>` 执行。
 
 输出格式：JSON，包含 `ops` / `memory_patches` / `open_questions` / `notes`。
 """

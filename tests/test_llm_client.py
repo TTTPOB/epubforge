@@ -12,7 +12,7 @@ from openai import BadRequestError
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
-from epubforge.config import Config
+from epubforge.config import Config, ProviderSettings, RuntimeSettings
 from epubforge.llm.client import LLMClient, _apply_cache_control
 from epubforge.observability import get_tracker
 
@@ -23,9 +23,8 @@ class _DummyOutput(BaseModel):
 
 def _make_client(tmp_path, *, use_vlm: bool = False) -> LLMClient:
     cfg = Config(
-        llm_base_url="https://example.com/v1",
-        llm_api_key="test-key",
-        cache_dir=tmp_path / ".cache",
+        llm=ProviderSettings(base_url="https://example.com/v1", api_key="test-key"),
+        runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
     )
     return LLMClient(cfg, use_vlm=use_vlm)
 
@@ -212,30 +211,25 @@ class TestJsonObjectFallback:
 
 class TestVlmDefaultMaxTokens:
     def test_vlm_max_tokens_defaults_to_16384(self, tmp_path) -> None:
+        # The VLM default_factory sets max_tokens=16384; not overriding here means default applies
         cfg = Config(
-            vlm_base_url="https://example.com/v1",
-            vlm_api_key="test-key",
-            vlm_max_tokens=None,
-            cache_dir=tmp_path / ".cache",
+            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         client = LLMClient(cfg, use_vlm=True)
         assert client.max_tokens == 16384
 
     def test_vlm_max_tokens_respects_explicit_config(self, tmp_path) -> None:
         cfg = Config(
-            vlm_base_url="https://example.com/v1",
-            vlm_api_key="test-key",
-            vlm_max_tokens=8192,
-            cache_dir=tmp_path / ".cache",
+            vlm=ProviderSettings(base_url="https://example.com/v1", api_key="test-key", max_tokens=8192),
+            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         client = LLMClient(cfg, use_vlm=True)
         assert client.max_tokens == 8192
 
     def test_llm_max_tokens_unchanged(self, tmp_path) -> None:
         cfg = Config(
-            llm_api_key="test-key",
-            llm_max_tokens=None,
-            cache_dir=tmp_path / ".cache",
+            llm=ProviderSettings(api_key="test-key", max_tokens=None),
+            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         client = LLMClient(cfg, use_vlm=False)
         assert client.max_tokens is None
@@ -334,10 +328,12 @@ class TestPromptCaching:
     def test_cache_key_stable_across_flag_toggle(self, tmp_path) -> None:
         msgs = _sys_user_msgs("You are helpful.")
         cfg_on = Config(
-            llm_api_key="k", cache_dir=tmp_path / ".cache", llm_prompt_caching=True
+            llm=ProviderSettings(api_key="k", prompt_caching=True),
+            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         cfg_off = Config(
-            llm_api_key="k", cache_dir=tmp_path / ".cache", llm_prompt_caching=False
+            llm=ProviderSettings(api_key="k", prompt_caching=False),
+            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         client_on = LLMClient(cfg_on)
         client_off = LLMClient(cfg_off)

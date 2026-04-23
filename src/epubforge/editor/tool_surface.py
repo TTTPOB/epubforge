@@ -1,4 +1,4 @@
-"""Stable CLI tool surface for editor orchestration commands."""
+"""Stable business-logic surface for editor orchestration commands."""
 
 from __future__ import annotations
 
@@ -6,12 +6,14 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
+from epubforge.config import Config
 from epubforge.editor.apply import ApplyError, apply_envelope
-from epubforge.editor.cli_support import CommandError, JsonArgumentParser, emit_json, emit_text
+from epubforge.editor.cli_support import CommandError, emit_json, emit_text
 from epubforge.editor.doctor import DoctorReport, build_doctor_report
 from epubforge.editor.leases import LeaseState
 from epubforge.editor.log import (
@@ -57,10 +59,6 @@ class DoctorContext(BaseModel):
     report: DoctorReport
 
 
-def _parser(command: str, description: str) -> JsonArgumentParser:
-    return JsonArgumentParser(prog=f"python -m epubforge.editor.{command}", description=description)
-
-
 def _timestamp() -> str:
     from datetime import UTC, datetime
 
@@ -104,12 +102,8 @@ def _resolve_issues(values: list[str] | None) -> list[str]:
     return values
 
 
-def run_init(argv: list[str] | None = None) -> int:
-    parser = _parser("init", "Initialize edit_state from 05_semantic.json.")
-    parser.add_argument("work")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_init(work: Path, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_uninitialized(paths)
     source = default_init_source(paths)
@@ -137,33 +131,27 @@ def run_init(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_import_legacy(argv: list[str] | None = None) -> int:
-    parser = _parser("import-legacy", "Initialize edit_state from a legacy artifact.")
-    parser.add_argument("work")
-    parser.add_argument("--from", dest="source", required=True)
-    parser.add_argument("--assume-verified", action="store_true")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_import_legacy(work: Path, source: str, assume_verified: bool, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_uninitialized(paths)
-    source = source_artifact_path(paths, args.source)
-    if not source.exists():
-        raise CommandError(f"missing legacy artifact: {source}")
+    source_path = source_artifact_path(paths, source)
+    if not source_path.exists():
+        raise CommandError(f"missing legacy artifact: {source_path}")
 
     now = _timestamp()
-    book = initialize_book_state(load_book(source), initialized_at=now)
+    book = initialize_book_state(load_book(source_path), initialized_at=now)
     memory = EditMemory.create(
         book_id=book_id_from_paths(paths),
         updated_at=now,
         updated_by="editor.import-legacy",
         chapter_uids=chapter_uids(book),
     ).with_legacy_import(
-        imported_from=source.name,
+        imported_from=source_path.name,
         imported_at=now,
         updated_by="editor.import-legacy",
         chapter_uids=chapter_uids(book),
-        assume_verified=args.assume_verified,
+        assume_verified=assume_verified,
     )
     write_initial_state(paths, book=book, memory=memory, leases=LeaseState())
 
@@ -193,13 +181,8 @@ def run_import_legacy(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_doctor(argv: list[str] | None = None) -> int:
-    parser = _parser("doctor", "Run doctor detectors and readiness evaluation.")
-    parser.add_argument("work")
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_doctor(work: Path, output_json: bool, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
 
@@ -223,18 +206,13 @@ def run_doctor(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_propose_op(argv: list[str] | None = None) -> int:
-    parser = _parser("propose-op", "Validate OpEnvelope[] from stdin and append to staging.jsonl.")
-    parser.add_argument("work")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_propose_op(work: Path, payload_json: str, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
 
-    raw = sys.stdin.read()
     try:
-        payload = json.loads(raw)
+        payload = json.loads(payload_json)
     except json.JSONDecodeError as exc:
         raise CommandError(f"stdin must be JSON: {exc.msg}")
     if not isinstance(payload, list):
@@ -262,12 +240,8 @@ def run_propose_op(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_apply_queue(argv: list[str] | None = None) -> int:
-    parser = _parser("apply-queue", "Apply staged envelopes to book.json and edit log.")
-    parser.add_argument("work")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_apply_queue(work: Path, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
 
@@ -321,29 +295,23 @@ def run_apply_queue(argv: list[str] | None = None) -> int:
 
     save_leases(paths, lease_state)
     clear_staging(paths)
-    payload: dict[str, object] = {"applied": applied_count, "rejected": rejected_count, "new_version": book.op_log_version}
+    result_payload: dict[str, object] = {"applied": applied_count, "rejected": rejected_count, "new_version": book.op_log_version}
     if errors:
-        payload["errors"] = errors
-    emit_json(payload)
+        result_payload["errors"] = errors
+    emit_json(result_payload)
     return 0 if rejected_count == 0 else 1
 
 
-def run_acquire_lease(argv: list[str] | None = None) -> int:
-    parser = _parser("acquire-lease", "Acquire a chapter lease.")
-    parser.add_argument("work")
-    parser.add_argument("--chapter", required=True)
-    parser.add_argument("--agent", required=True)
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--ttl", type=int, default=1800)
-    args = parser.parse_args(argv)
+def run_acquire_lease(work: Path, chapter: str, agent: str, task: str, ttl: int | None, cfg: Config) -> int:
+    resolved_ttl = ttl if ttl is not None else cfg.editor.lease_ttl_seconds
 
-    paths = resolve_editor_paths(args.work)
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     book = load_editable_book(paths)
-    chapter_uid = _chapter_uid_or_error(book, args.chapter)
+    chapter_uid = _chapter_uid_or_error(book, chapter)
     state = load_lease_state(paths)
-    lease = state.acquire_chapter(chapter_uid, args.agent, args.task, ttl=args.ttl, now=_timestamp())
+    lease = state.acquire_chapter(chapter_uid, agent, task, ttl=resolved_ttl, now=_timestamp())
     save_leases(paths, state)
     if lease is None:
         raise CommandError("chapter lease unavailable", raw_stdout="null")
@@ -351,18 +319,12 @@ def run_acquire_lease(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_release_lease(argv: list[str] | None = None) -> int:
-    parser = _parser("release-lease", "Release a chapter lease.")
-    parser.add_argument("work")
-    parser.add_argument("--chapter", required=True)
-    parser.add_argument("--agent", required=True)
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_release_lease(work: Path, chapter: str, agent: str, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     state = load_lease_state(paths)
-    released = state.release_chapter(args.chapter, args.agent, now=_timestamp())
+    released = state.release_chapter(chapter, agent, now=_timestamp())
     save_leases(paths, state)
     if released is None:
         raise CommandError("chapter lease not held by agent")
@@ -370,19 +332,20 @@ def run_release_lease(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_acquire_book_lock(argv: list[str] | None = None) -> int:
-    parser = _parser("acquire-book-lock", "Acquire the book-wide exclusive lease.")
-    parser.add_argument("work")
-    parser.add_argument("--agent", required=True)
-    parser.add_argument("--reason", required=True, choices=["topology_op", "compact", "init"])
-    parser.add_argument("--ttl", type=int, default=300)
-    args = parser.parse_args(argv)
+def run_acquire_book_lock(
+    work: Path,
+    agent: str,
+    reason: Literal["topology_op", "compact", "init"],
+    ttl: int | None,
+    cfg: Config,
+) -> int:
+    resolved_ttl = ttl if ttl is not None else cfg.editor.book_exclusive_ttl_seconds
 
-    paths = resolve_editor_paths(args.work)
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     state = load_lease_state(paths)
-    lease = state.acquire_book_exclusive(args.agent, args.reason, ttl=args.ttl, now=_timestamp())
+    lease = state.acquire_book_exclusive(agent, reason, ttl=resolved_ttl, now=_timestamp())
     save_leases(paths, state)
     if lease is None:
         raise CommandError("book-exclusive lease unavailable", raw_stdout="null")
@@ -390,17 +353,12 @@ def run_acquire_book_lock(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_release_book_lock(argv: list[str] | None = None) -> int:
-    parser = _parser("release-book-lock", "Release the book-wide exclusive lease.")
-    parser.add_argument("work")
-    parser.add_argument("--agent", required=True)
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_release_book_lock(work: Path, agent: str, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     state = load_lease_state(paths)
-    released = state.release_book_exclusive(args.agent, now=_timestamp())
+    released = state.release_book_exclusive(agent, now=_timestamp())
     save_leases(paths, state)
     if released is None:
         raise CommandError("book-exclusive lease not held by agent")
@@ -408,26 +366,27 @@ def run_release_book_lock(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_run_script(argv: list[str] | None = None) -> int:
-    parser = _parser("run-script", "Allocate or execute scratch scripts.")
-    parser.add_argument("work")
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--write")
-    mode.add_argument("--exec", dest="exec_path")
-    parser.add_argument("--agent", default="agent")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_run_script(
+    work: Path,
+    write: str | None,
+    exec_path: str | None,
+    agent: str,
+    cfg: Config,
+) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
 
-    if args.write is not None:
-        path = write_script_stub(allocate_script_path(paths.work_dir, args.write, agent_id=args.agent))
+    if write is not None:
+        path = write_script_stub(allocate_script_path(paths.work_dir, write, agent_id=agent))
         emit_json({"path": str(path), "scratch_dir": str(paths.scratch_dir)})
         return 0
 
+    if exec_path is None:
+        raise CommandError("either --write or --exec must be provided")
+
     try:
-        result = run_script(args.exec_path, work_dir=paths.work_dir)
+        result = run_script(exec_path, work_dir=paths.work_dir)
     except (ValueError, FileNotFoundError) as exc:
         raise CommandError(str(exc)) from exc
     if result.stdout:
@@ -437,12 +396,8 @@ def run_run_script(argv: list[str] | None = None) -> int:
     return result.returncode
 
 
-def run_compact(argv: list[str] | None = None) -> int:
-    parser = _parser("compact", "Compact the accepted edit log into an archive snapshot.")
-    parser.add_argument("work")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_compact(work: Path, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     state = load_lease_state(paths)
@@ -456,17 +411,12 @@ def run_compact(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_snapshot(argv: list[str] | None = None) -> int:
-    parser = _parser("snapshot", "Copy current edit_state into snapshots/<tag>/.")
-    parser.add_argument("work")
-    parser.add_argument("--tag")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_snapshot(work: Path, tag: str | None, cfg: Config) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
-    tag = args.tag or _timestamp().replace(":", "-")
-    destination = paths.snapshots_dir / tag
+    resolved_tag = tag or _timestamp().replace(":", "-")
+    destination = paths.snapshots_dir / resolved_tag
     if destination.exists():
         raise CommandError(f"snapshot already exists: {destination}")
     destination.mkdir(parents=True, exist_ok=False)
@@ -482,28 +432,27 @@ def run_snapshot(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_render_prompt(argv: list[str] | None = None) -> int:
-    parser = _parser("render-prompt", "Render a subagent prompt with current book.op_log_version and memory snapshot.")
-    parser.add_argument("work")
-    parser.add_argument("--kind", required=True, choices=["scanner", "fixer", "reviewer"])
-    parser.add_argument("--chapter", required=True)
-    parser.add_argument("--issues", action="append")
-    args = parser.parse_args(argv)
-
-    paths = resolve_editor_paths(args.work)
+def run_render_prompt(
+    work: Path,
+    kind: Literal["scanner", "fixer", "reviewer"],
+    chapter: str,
+    issues: list[str] | None,
+    cfg: Config,
+) -> int:
+    paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
     book = load_editable_book(paths)
-    _chapter_uid_or_error(book, args.chapter)
+    _chapter_uid_or_error(book, chapter)
     memory = load_editor_memory(paths)
     prompt = render_prompt(
-        kind=args.kind,
+        kind=kind,
         book=book,
         memory=memory,
         work_dir=paths.work_dir,
         book_path=paths.book_path,
-        chapter_uid=args.chapter,
-        issues=_resolve_issues(args.issues),
+        chapter_uid=chapter,
+        issues=_resolve_issues(issues),
     )
     emit_text(prompt)
     return 0

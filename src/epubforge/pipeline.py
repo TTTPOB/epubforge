@@ -5,12 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from rich.console import Console
-
 from epubforge.config import Config
 from epubforge.observability import get_tracker, stage_timer
 
-console = Console()
 log = logging.getLogger(__name__)
 
 
@@ -20,7 +17,7 @@ def _stage_path(work: Path, name: str) -> Path:
 
 def _skip(path: Path, force: bool, label: str) -> bool:
     if path.exists() and not force:
-        console.print(f"[dim]skip {label} — reusing {path} (pass --force-rerun to re-run)[/dim]")
+        log.info("skip %s — reusing %s (pass --force-rerun to re-run)", label, path)
         return True
     return False
 
@@ -54,10 +51,10 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "parse"):
         return
     work.mkdir(parents=True, exist_ok=True)
-    console.print(f"[bold]Stage 1:[/bold] parsing {pdf_path.name}…")
+    log.info("Stage 1: parsing %s...", pdf_path.name)
     with stage_timer(log, "1 parse"):
         parse_pdf(pdf_path, out, images_dir=work / "images")
-    console.print(f"  → {out}")
+    log.info("  -> %s", out)
 
 
 def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
@@ -68,10 +65,10 @@ def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out = _stage_path(work, "02_pages.json")
     if _skip(out, force, "classify"):
         return
-    console.print("[bold]Stage 2:[/bold] classifying pages…")
+    log.info("Stage 2: classifying pages…")
     with stage_timer(log, "2 classify"):
         classify_pages(raw, out)
-    console.print(f"  → {out}")
+    log.info("  -> %s", out)
 
 
 def run_extract(
@@ -88,10 +85,10 @@ def run_extract(
     pages_json = _stage_path(work, "02_pages.json")
     out_dir = work / "03_extract"
     out_dir.mkdir(parents=True, exist_ok=True)
-    console.print("[bold]Stage 3:[/bold] extracting (VLM)…")
+    log.info("Stage 3: extracting (VLM)…")
     with stage_timer(log, "3 extract"):
         extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
-    console.print(f"  → {out_dir}/")
+    log.info("  -> %s/", out_dir)
 
 
 def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
@@ -101,10 +98,10 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     out = _stage_path(work, "05_semantic_raw.json")
     if _skip(out, force, "assemble"):
         return
-    console.print("[bold]Stage 4:[/bold] assembling Semantic IR…")
+    log.info("Stage 4: assembling Semantic IR…")
     with stage_timer(log, "4 assemble"):
         assemble(work, out)
-    console.print(f"  → {out}")
+    log.info("  -> %s", out)
 
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     from epubforge.epub_builder import build_epub, resolve_build_source
@@ -112,11 +109,11 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     work = cfg.book_work_dir(pdf_path)
     semantic = resolve_build_source(work)
     registry = _stage_path(work, "style_registry.json")
-    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    cfg.runtime.out_dir.mkdir(parents=True, exist_ok=True)
     out = cfg.book_out_path(pdf_path)
     if _skip(out, force, "build"):
         return
-    console.print("[bold]Stage 8:[/bold] building EPUB…")
+    log.info("Stage 5: building EPUB...")
     with stage_timer(log, "8 build"):
         build_epub(
             semantic,
@@ -124,4 +121,4 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             images_dir=work / "images",
             registry_path=registry if registry.exists() else None,
         )
-    console.print(f"  → {out}")
+    log.info("  -> %s", out)

@@ -34,8 +34,8 @@ uv run epubforge run fixtures/example.pdf
 
 如果只做 ingestion，到这里为止。进入编辑层有两种入口：
 
-- 已有可作为编辑基线的 `05_semantic.json`：用 `python -m epubforge.editor.init`
-- 只有 `05_semantic_raw.json` 或其他 legacy artifact：用 `python -m epubforge.editor.import-legacy --from ...`
+- 已有可作为编辑基线的 `05_semantic.json`：用 `epubforge editor init`
+- 只有 `05_semantic_raw.json` 或其他 legacy artifact：用 `epubforge editor import-legacy --from ...`
 
 ## Ingestion Pipeline
 
@@ -82,21 +82,30 @@ uv run epubforge run fixtures/example.pdf --pages 1-20
 
 ## Agentic Editing Layer
 
-编辑层的稳定命令面不挂在 `epubforge` 主 CLI 下，而是以下列模块形式调用：
+编辑层的稳定命令面通过 `epubforge editor <cmd>` 调用，所有命令均需通过根 `--config <path>` 传入配置文件（或省略以使用 defaults + env）：
 
-- `python -m epubforge.editor.init`
-- `python -m epubforge.editor.import-legacy`
-- `python -m epubforge.editor.doctor`
-- `python -m epubforge.editor.propose-op`
-- `python -m epubforge.editor.apply-queue`
-- `python -m epubforge.editor.acquire-lease`
-- `python -m epubforge.editor.release-lease`
-- `python -m epubforge.editor.acquire-book-lock`
-- `python -m epubforge.editor.release-book-lock`
-- `python -m epubforge.editor.run-script`
-- `python -m epubforge.editor.compact`
-- `python -m epubforge.editor.snapshot`
-- `python -m epubforge.editor.render-prompt`
+- `epubforge editor init`
+- `epubforge editor import-legacy`
+- `epubforge editor doctor`
+- `epubforge editor propose-op`
+- `epubforge editor apply-queue`
+- `epubforge editor acquire-lease`
+- `epubforge editor release-lease`
+- `epubforge editor acquire-book-lock`
+- `epubforge editor release-book-lock`
+- `epubforge editor run-script`
+- `epubforge editor compact`
+- `epubforge editor snapshot`
+- `epubforge editor render-prompt`
+
+示例：
+
+```bash
+uv run epubforge --config config.toml editor init work/mybook
+uv run epubforge --config config.toml editor doctor work/mybook
+uv run epubforge --config config.toml editor propose-op work/mybook < ops.json
+uv run epubforge --config config.toml editor apply-queue work/mybook
+```
 
 详细工作流见 [agentic-editing-howto.md](./agentic-editing-howto.md)。
 
@@ -140,11 +149,13 @@ out/
 
 ## 配置
 
+配置加载方式：通过 `--config <path>` 显式指定 TOML 文件，或仅使用 defaults + 环境变量（不指定 `--config` 时不会隐式读取任何 TOML 文件）。
+
 配置优先级：
 
-1. 环境变量
-2. `config.local.toml`
-3. `config.toml`
+1. CLI `--log-level` / 其他 CLI override
+2. 环境变量（`EPUBFORGE_*`）
+3. `--config <path>` 指定的 TOML 文件
 4. 内建默认值
 
 ### 最小配置
@@ -201,8 +212,8 @@ max_loops = 50
 EPUBFORGE_LLM_API_KEY=sk-or-...
 EPUBFORGE_LLM_MODEL=anthropic/claude-haiku-4.5
 EPUBFORGE_VLM_MODEL=google/gemini-2.5-flash-preview
-EPUBFORGE_CONCURRENCY=4
-EPUBFORGE_LOG_LEVEL=INFO
+EPUBFORGE_RUNTIME_CONCURRENCY=4
+EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
 EPUBFORGE_LLM_PROMPT_CACHING=1
 ```
 

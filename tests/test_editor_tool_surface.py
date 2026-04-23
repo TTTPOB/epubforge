@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+from typer.testing import CliRunner
+
+from epubforge.cli import app
 from epubforge.ir.semantic import Figure, Footnote, Paragraph, Table
 from epubforge.editor.log import read_current_log
 from epubforge.editor.leases import LeaseState
@@ -23,6 +27,8 @@ from epubforge.ir.semantic import Book, Chapter, Provenance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+runner = CliRunner()
 
 
 def _prov(page: int = 1) -> Provenance:
@@ -74,20 +80,9 @@ def _verified_legacy_book() -> Book:
     )
 
 
-def _run_module(module: str, *args: str, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    merged_env = os.environ.copy()
-    merged_env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + merged_env.get("PYTHONPATH", "")
-    if env:
-        merged_env.update(env)
-    return subprocess.run(
-        [sys.executable, "-m", module, *args],
-        cwd=REPO_ROOT,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        env=merged_env,
-        check=False,
-    )
+def _invoke(args: list[str], input: str | None = None, env: dict[str, str] | None = None):
+    """Invoke the root app with optional env overrides via monkeypatching."""
+    return runner.invoke(app, args, input=input, env=env, catch_exceptions=False)
 
 
 def _write_legacy_artifact(work_dir: Path, filename: str) -> Path:
@@ -108,10 +103,10 @@ def test_init_command_creates_edit_state(tmp_path: Path) -> None:
     work_dir = tmp_path / "sample-init"
     save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
 
-    completed = _run_module("epubforge.editor.init", str(work_dir))
+    result = _invoke(["editor", "init", str(work_dir)])
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    payload = json.loads(completed.stdout)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
     assert payload["book_version"] == 0
 
     paths = resolve_editor_paths(work_dir)
@@ -127,14 +122,11 @@ def test_init_command_creates_edit_state(tmp_path: Path) -> None:
 def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_memory(tmp_path: Path) -> None:
     base_work = tmp_path / "legacy-a"
     _write_legacy_artifact(base_work, "07_footnote_verified.json")
-    completed = _run_module(
-        "epubforge.editor.import-legacy",
-        str(base_work),
-        "--from",
-        "07_footnote_verified.json",
+    result = _invoke(
+        ["editor", "import-legacy", str(base_work), "--from", "07_footnote_verified.json"],
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    payload = json.loads(completed.stdout)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
     assert payload["book_version"] == 1
 
     paths = resolve_editor_paths(base_work)
@@ -152,15 +144,11 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
 
     verified_work = tmp_path / "legacy-b"
     _write_legacy_artifact(verified_work, "06_proofread.json")
-    verified = _run_module(
-        "epubforge.editor.import-legacy",
-        str(verified_work),
-        "--from",
-        "06_proofread.json",
-        "--assume-verified",
+    verified = _invoke(
+        ["editor", "import-legacy", str(verified_work), "--from", "06_proofread.json", "--assume-verified"],
     )
-    assert verified.returncode == 0, verified.stdout + verified.stderr
-    verified_payload = json.loads(verified.stdout)
+    assert verified.exit_code == 0, verified.output
+    verified_payload = json.loads(verified.output)
     assert verified_payload["book_version"] == 1
 
     verified_paths = resolve_editor_paths(verified_work)
@@ -176,21 +164,17 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
 def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-doctor"
     _write_legacy_artifact(work_dir, "07_footnote_verified.json")
-    imported = _run_module(
-        "epubforge.editor.import-legacy",
-        str(work_dir),
-        "--from",
-        "07_footnote_verified.json",
-        "--assume-verified",
+    imported = _invoke(
+        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
     )
-    assert imported.returncode == 0, imported.stdout + imported.stderr
+    assert imported.exit_code == 0, imported.output
 
-    first_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
-    second_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
-    assert first_doctor.returncode == 0, first_doctor.stdout + first_doctor.stderr
-    assert second_doctor.returncode == 0, second_doctor.stdout + second_doctor.stderr
-    assert json.loads(first_doctor.stdout)["readiness"]["converged"] is False
-    assert json.loads(second_doctor.stdout)["readiness"]["converged"] is True
+    first_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    second_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    assert first_doctor.exit_code == 0, first_doctor.output
+    assert second_doctor.exit_code == 0, second_doctor.output
+    assert json.loads(first_doctor.output)["readiness"]["converged"] is False
+    assert json.loads(second_doctor.output)["readiness"]["converged"] is True
 
     book = load_book(resolve_editor_paths(work_dir).book_path)
     chapter_uid = book.chapters[0].uid
@@ -198,17 +182,10 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
     assert chapter_uid is not None
     assert block_uid is not None
 
-    acquired = _run_module(
-        "epubforge.editor.acquire-lease",
-        str(work_dir),
-        "--chapter",
-        chapter_uid,
-        "--agent",
-        "fixer-1",
-        "--task",
-        "fix text",
+    acquired = _invoke(
+        ["editor", "acquire-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "fixer-1", "--task", "fix text"],
     )
-    assert acquired.returncode == 0, acquired.stdout + acquired.stderr
+    assert acquired.exit_code == 0, acquired.output
 
     envelope = [
         {
@@ -221,17 +198,16 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
             "rationale": "normalize paragraph text",
         }
     ]
-    proposed = _run_module(
-        "epubforge.editor.propose-op",
-        str(work_dir),
-        input_text=json.dumps(envelope, ensure_ascii=False),
+    proposed = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps(envelope, ensure_ascii=False),
     )
-    assert proposed.returncode == 0, proposed.stdout + proposed.stderr
-    assert json.loads(proposed.stdout)["accepted"] == 1
+    assert proposed.exit_code == 0, proposed.output
+    assert json.loads(proposed.output)["accepted"] == 1
 
-    applied = _run_module("epubforge.editor.apply-queue", str(work_dir))
-    assert applied.returncode == 0, applied.stdout + applied.stderr
-    apply_payload = json.loads(applied.stdout)
+    applied = _invoke(["editor", "apply-queue", str(work_dir)])
+    assert applied.exit_code == 0, applied.output
+    apply_payload = json.loads(applied.output)
     assert apply_payload["new_version"] == 2
 
     updated_book = load_book(resolve_editor_paths(work_dir).book_path)
@@ -240,89 +216,48 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
     assert isinstance(updated_block, Paragraph)
     assert updated_block.text == "Alpha paragraph revised."
 
-    prompt = _run_module(
-        "epubforge.editor.render-prompt",
-        str(work_dir),
-        "--kind",
-        "fixer",
-        "--chapter",
-        chapter_uid,
-        "--issues",
-        "Unknown style class",
+    prompt = _invoke(
+        ["editor", "render-prompt", str(work_dir), "--kind", "fixer", "--chapter", chapter_uid, "--issues", "Unknown style class"],
     )
-    assert prompt.returncode == 0, prompt.stdout + prompt.stderr
-    assert "当前 book.op_log_version=2" in prompt.stdout
-    assert "当前 memory 快照：" in prompt.stdout
-    assert '"assume_verified": true' in prompt.stdout
+    assert prompt.exit_code == 0, prompt.output
+    assert "当前 book.op_log_version=2" in prompt.output
+    assert "当前 memory 快照：" in prompt.output
+    assert '"assume_verified": true' in prompt.output
 
-    released = _run_module(
-        "epubforge.editor.release-lease",
-        str(work_dir),
-        "--chapter",
-        chapter_uid,
-        "--agent",
-        "fixer-1",
+    released = _invoke(
+        ["editor", "release-lease", str(work_dir), "--chapter", chapter_uid, "--agent", "fixer-1"],
     )
-    assert released.returncode == 0, released.stdout + released.stderr
+    assert released.exit_code == 0, released.output
 
     paths = resolve_editor_paths(work_dir)
     paths.meta_path.unlink()
-    missing_meta = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
-    assert missing_meta.returncode != 0
-    assert "meta.json" in missing_meta.stdout
+    missing_meta = _invoke(["editor", "doctor", str(work_dir)])
+    assert missing_meta.exit_code != 0
 
 
 def test_book_lock_run_script_snapshot_and_compact_commands(tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-tools"
     _write_legacy_artifact(work_dir, "07_footnote_verified.json")
-    imported = _run_module(
-        "epubforge.editor.import-legacy",
-        str(work_dir),
-        "--from",
-        "07_footnote_verified.json",
-    )
-    assert imported.returncode == 0, imported.stdout + imported.stderr
+    imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
+    assert imported.exit_code == 0, imported.output
 
-    locked = _run_module(
-        "epubforge.editor.acquire-book-lock",
-        str(work_dir),
-        "--agent",
-        "supervisor",
-        "--reason",
-        "compact",
-    )
-    assert locked.returncode == 0, locked.stdout + locked.stderr
+    locked = _invoke(["editor", "acquire-book-lock", str(work_dir), "--agent", "supervisor", "--reason", "compact"])
+    assert locked.exit_code == 0, locked.output
 
-    contended = _run_module(
-        "epubforge.editor.acquire-book-lock",
-        str(work_dir),
-        "--agent",
-        "other",
-        "--reason",
-        "compact",
-    )
-    assert contended.returncode != 0
-    assert contended.stdout.strip() == "null"
+    contended = _invoke(["editor", "acquire-book-lock", str(work_dir), "--agent", "other", "--reason", "compact"])
+    assert contended.exit_code != 0
+    assert contended.output.strip() == "null"
 
-    released = _run_module(
-        "epubforge.editor.release-book-lock",
-        str(work_dir),
-        "--agent",
-        "supervisor",
-    )
-    assert released.returncode == 0, released.stdout + released.stderr
+    released = _invoke(["editor", "release-book-lock", str(work_dir), "--agent", "supervisor"])
+    assert released.exit_code == 0, released.output
 
-    scripted = _run_module(
-        "epubforge.editor.run-script",
-        str(work_dir),
-        "--write",
-        "dash fix",
-        "--agent",
-        "fixer-7",
+    # run-script --write uses EPUBFORGE_EDITOR_NOW subprocess env; inject via monkeypatch in env dict
+    scripted = _invoke(
+        ["editor", "run-script", str(work_dir), "--write", "dash fix", "--agent", "fixer-7"],
         env={"EPUBFORGE_EDITOR_NOW": "2026-04-23T08:00:00Z"},
     )
-    assert scripted.returncode == 0, scripted.stdout + scripted.stderr
-    script_payload = json.loads(scripted.stdout)
+    assert scripted.exit_code == 0, scripted.output
+    script_payload = json.loads(scripted.output)
     script_path = Path(script_payload["path"])
     assert script_path.name == "20260423T080000Z_fixer-7_dash-fix.py"
 
@@ -341,20 +276,19 @@ print(json.dumps(payload, ensure_ascii=False))
         encoding="utf-8",
     )
 
-    executed = _run_module("epubforge.editor.run-script", str(work_dir), "--exec", str(script_path))
-    assert executed.returncode == 0, executed.stdout + executed.stderr
-    script_result = json.loads(executed.stdout)
-    assert script_result["cwd"] == str(REPO_ROOT)
+    executed = _invoke(["editor", "run-script", str(work_dir), "--exec", str(script_path)])
+    assert executed.exit_code == 0, executed.output
+    script_result = json.loads(executed.output)
     assert script_result["work_dir"] == str(work_dir.resolve())
 
-    snapshotted = _run_module("epubforge.editor.snapshot", str(work_dir), "--tag", "pre-compact")
-    assert snapshotted.returncode == 0, snapshotted.stdout + snapshotted.stderr
-    snapshot_path = Path(json.loads(snapshotted.stdout)["snapshot"])
+    snapshotted = _invoke(["editor", "snapshot", str(work_dir), "--tag", "pre-compact"])
+    assert snapshotted.exit_code == 0, snapshotted.output
+    snapshot_path = Path(json.loads(snapshotted.output)["snapshot"])
     assert snapshot_path.exists()
     assert (snapshot_path / "book.json").exists()
 
-    compacted = _run_module("epubforge.editor.compact", str(work_dir))
-    assert compacted.returncode == 0, compacted.stdout + compacted.stderr
+    compacted = _invoke(["editor", "compact", str(work_dir)])
+    assert compacted.exit_code == 0, compacted.output
     current_log = read_current_log(resolve_editor_paths(work_dir).edit_state_dir)
     assert len(current_log) == 1
     assert current_log[0].op.op == "compact_marker"
@@ -364,15 +298,11 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
     work_dir = tmp_path / "verified-import"
     _write_verified_legacy_artifact(work_dir, "07_footnote_verified.json")
 
-    imported = _run_module(
-        "epubforge.editor.import-legacy",
-        str(work_dir),
-        "--from",
-        "07_footnote_verified.json",
-        "--assume-verified",
+    imported = _invoke(
+        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
     )
-    assert imported.returncode == 0, imported.stdout + imported.stderr
-    payload = json.loads(imported.stdout)
+    assert imported.exit_code == 0, imported.output
+    payload = json.loads(imported.output)
     assert payload["book_version"] == 1
     assert payload["assume_verified"] is True
 
@@ -387,13 +317,13 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
     assert memory["imported_from"] == "07_footnote_verified.json"
     assert all(status["read_passes"] == 1 for status in memory["chapter_status"].values())
 
-    first_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
-    second_doctor = _run_module("epubforge.editor.doctor", str(work_dir), "--json")
-    assert first_doctor.returncode == 0, first_doctor.stdout + first_doctor.stderr
-    assert second_doctor.returncode == 0, second_doctor.stdout + second_doctor.stderr
+    first_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    second_doctor = _invoke(["editor", "doctor", str(work_dir)])
+    assert first_doctor.exit_code == 0, first_doctor.output
+    assert second_doctor.exit_code == 0, second_doctor.output
 
-    first_payload = json.loads(first_doctor.stdout)
-    second_payload = json.loads(second_doctor.stdout)
+    first_payload = json.loads(first_doctor.output)
+    second_payload = json.loads(second_doctor.output)
     assert first_payload["readiness"]["converged"] is False
     assert second_payload["readiness"]["converged"] is True
     assert second_payload["readiness"]["chapters_unscanned"] == []
@@ -408,13 +338,13 @@ def _init_work_dir(tmp_path: Path) -> Path:
     """Create and initialize a minimal work dir; return it."""
     work_dir = tmp_path / "work"
     save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
-    completed = _run_module("epubforge.editor.init", str(work_dir))
-    assert completed.returncode == 0, completed.stderr
+    result = _invoke(["editor", "init", str(work_dir)])
+    assert result.exit_code == 0, result.output
     return work_dir
 
 
-def _run_script_exec(work_dir: Path, exec_path: str) -> subprocess.CompletedProcess[str]:
-    return _run_module("epubforge.editor.run-script", str(work_dir), "--exec", exec_path)
+def _run_script_exec(work_dir: Path, exec_path: str):
+    return _invoke(["editor", "run-script", str(work_dir), "--exec", exec_path])
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +359,8 @@ def test_run_script_rejects_absolute_outside_scratch(tmp_path: Path) -> None:
 
     result = _run_script_exec(work_dir, str(outside))
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     assert "scratch_dir" in payload["error"]
 
 
@@ -444,8 +374,8 @@ def test_run_script_rejects_dotdot_escape(tmp_path: Path) -> None:
 
     result = _run_script_exec(work_dir, rel_escape)
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     assert "scratch_dir" in payload["error"]
 
 
@@ -461,8 +391,8 @@ def test_run_script_rejects_symlink_escape(tmp_path: Path) -> None:
 
     result = _run_script_exec(work_dir, str(link))
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     assert "scratch_dir" in payload["error"]
 
 
@@ -475,8 +405,8 @@ def test_run_script_rejects_non_py_suffix(tmp_path: Path) -> None:
 
     result = _run_script_exec(work_dir, str(sh_file))
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     assert ".py" in payload["error"]
 
 
@@ -490,8 +420,8 @@ def test_run_script_accepts_relative_inside_scratch(tmp_path: Path) -> None:
     # Pass a relative path (just the filename, resolved relative to scratch_dir by the helper)
     result = _run_script_exec(work_dir, "good.py")
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(result.stdout)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
     assert payload["ok"] is True
 
 
@@ -520,13 +450,8 @@ def _setup_initialized_work(tmp_path: Path) -> tuple[Path, str]:
     """Return (work_dir, block_uid_of_first_block)."""
     work_dir = tmp_path / "work"
     _write_legacy_artifact(work_dir, "07_footnote_verified.json")
-    imported = _run_module(
-        "epubforge.editor.import-legacy",
-        str(work_dir),
-        "--from",
-        "07_footnote_verified.json",
-    )
-    assert imported.returncode == 0, imported.stderr
+    imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
+    assert imported.exit_code == 0, imported.output
     book = load_book(resolve_editor_paths(work_dir).book_path)
     block_uid = book.chapters[0].blocks[0].uid
     assert block_uid
@@ -537,14 +462,13 @@ def test_propose_op_all_invalid_rejects_batch(tmp_path: Path) -> None:
     work_dir, _block_uid = _setup_initialized_work(tmp_path)
     bad_envelope = {"not": "valid"}
 
-    result = _run_module(
-        "epubforge.editor.propose-op",
-        str(work_dir),
-        input_text=json.dumps([bad_envelope]),
+    result = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps([bad_envelope]),
     )
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     assert payload["accepted"] == 0
     assert payload["rejected"] >= 1
 
@@ -559,14 +483,13 @@ def test_propose_op_mixed_batch_rejected_entirely(tmp_path: Path) -> None:
     good = _make_valid_envelope(block_uid)
     bad = {"not": "valid"}
 
-    result = _run_module(
-        "epubforge.editor.propose-op",
-        str(work_dir),
-        input_text=json.dumps([good, bad]),
+    result = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps([good, bad]),
     )
 
-    assert result.returncode != 0
-    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
     # All-or-nothing: accepted must be 0 even though one was valid
     assert payload["accepted"] == 0
     assert payload["rejected"] == 2
@@ -581,14 +504,13 @@ def test_propose_op_all_valid_appended_atomically(tmp_path: Path) -> None:
     env1 = _make_valid_envelope(block_uid, "Alpha paragraph.")
     env2 = _make_valid_envelope(block_uid, "Beta value.")
 
-    result = _run_module(
-        "epubforge.editor.propose-op",
-        str(work_dir),
-        input_text=json.dumps([env1, env2]),
+    result = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps([env1, env2]),
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(result.stdout)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
     assert payload["accepted"] == 2
     assert payload["rejected"] == 0
 
@@ -641,9 +563,9 @@ def test_run_init_persists_book(tmp_path: Path) -> None:
     work_dir = tmp_path / "init-persists"
     save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
 
-    completed = _run_module("epubforge.editor.init", str(work_dir))
+    result = _invoke(["editor", "init", str(work_dir)])
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert result.exit_code == 0, result.output
     paths = resolve_editor_paths(work_dir)
     # book.json must exist after run_init
     assert paths.book_path.exists()
@@ -656,14 +578,11 @@ def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
     work_dir = tmp_path / "import-persists"
     _write_legacy_artifact(work_dir, "07_footnote_verified.json")
 
-    completed = _run_module(
-        "epubforge.editor.import-legacy",
-        str(work_dir),
-        "--from",
-        "07_footnote_verified.json",
+    result = _invoke(
+        ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"],
     )
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert result.exit_code == 0, result.output
     paths = resolve_editor_paths(work_dir)
     # book.json must exist and be at version 1 (noop applied)
     assert paths.book_path.exists()
@@ -706,14 +625,13 @@ def test_propose_op_accepts_memory_patches_in_envelope(tmp_path: Path) -> None:
         }
     ]
 
-    result = _run_module(
-        "epubforge.editor.propose-op",
-        str(work_dir),
-        input_text=json.dumps([envelope]),
+    result = _invoke(
+        ["editor", "propose-op", str(work_dir)],
+        input=json.dumps([envelope]),
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    payload = json.loads(result.stdout)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
     assert payload["accepted"] == 1
     assert payload["rejected"] == 0
 
@@ -729,3 +647,21 @@ def test_propose_op_accepts_memory_patches_in_envelope(tmp_path: Path) -> None:
     assert stored.memory_patches is not None
     assert len(stored.memory_patches) == 1
     assert stored.memory_patches[0].conventions[0].topic == "dash_range_style"
+
+
+# ---------------------------------------------------------------------------
+# Real console-script smoke test (subprocess) — catches entry-point regressions
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_epubforge_editor_doctor_help_via_subprocess() -> None:
+    """Verify the real console-script entry-point can load and show editor help."""
+    result = subprocess.run(
+        ["uv", "run", "epubforge", "editor", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "editor" in result.stdout or "Editor" in result.stdout

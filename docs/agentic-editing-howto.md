@@ -4,23 +4,23 @@
 
 这份文档面向 supervisor。目标不是教人手改 JSON，而是说明如何围绕当前稳定命令面运行编辑循环。
 
-当前稳定 command surface 只有这些：
+当前稳定 command surface 通过 `epubforge editor <cmd>` 调用，配置文件通过根 `--config <path>` 指定（省略时使用 defaults + env）：
 
-- `python -m epubforge.editor.init`
-- `python -m epubforge.editor.import-legacy`
-- `python -m epubforge.editor.doctor`
-- `python -m epubforge.editor.propose-op`
-- `python -m epubforge.editor.apply-queue`
-- `python -m epubforge.editor.acquire-lease`
-- `python -m epubforge.editor.release-lease`
-- `python -m epubforge.editor.acquire-book-lock`
-- `python -m epubforge.editor.release-book-lock`
-- `python -m epubforge.editor.run-script`
-- `python -m epubforge.editor.compact`
-- `python -m epubforge.editor.snapshot`
-- `python -m epubforge.editor.render-prompt`
+- `epubforge editor init`
+- `epubforge editor import-legacy`
+- `epubforge editor doctor`
+- `epubforge editor propose-op`
+- `epubforge editor apply-queue`
+- `epubforge editor acquire-lease`
+- `epubforge editor release-lease`
+- `epubforge editor acquire-book-lock`
+- `epubforge editor release-book-lock`
+- `epubforge editor run-script`
+- `epubforge editor compact`
+- `epubforge editor snapshot`
+- `epubforge editor render-prompt`
 
-没有 `epubforge edit` 总入口，也没有 `refine-toc`、`proofread`、`footnote-verify` 这类运行时 stage。
+`python -m epubforge.editor.*` 入口已废除。配置通过顶层 root callback 的 `--config` 一次性注入，所有子命令共享同一 `AppContext`。没有 `refine-toc`、`proofread`、`footnote-verify` 这类运行时 stage。
 
 ## 角色分工
 
@@ -91,7 +91,7 @@
 - 生成 `edit_state/book.json`
 - 生成 `meta.json`、`memory.json`、`leases.json`
 - 初始化空的 `edit_log.jsonl` 和 `staging.jsonl`
-- 为 chapter / block 补全稳定 uid，并把 `book.version` 置为 0
+- 为 chapter / block 补全稳定 uid，并把 `book.op_log_version` 置为 0
 
 ### `import-legacy`
 
@@ -137,7 +137,7 @@ supervisor 每一轮都应先读 doctor 结果，再决定本轮开 scanner、fi
 
 ### 3. 用 `render-prompt` 生成上下文
 
-`render-prompt <work> --kind scanner|fixer|reviewer --chapter <uid>` 会把当前 `book.version`、memory 快照和 chapter 信息渲染成稳定提示词。
+`render-prompt <work> --kind scanner|fixer|reviewer --chapter <uid>` 会把当前 `book.op_log_version`、memory 快照和 chapter 信息渲染成稳定提示词。
 
 fixer / reviewer 可以额外通过 `--issues` 传入本轮关注的问题列表。
 

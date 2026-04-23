@@ -72,8 +72,8 @@ def extract(
     units = _build_units(
         pages_data,
         anchors,
-        max_simple_batch=cfg.max_simple_batch_pages,
-        max_complex_batch=cfg.max_complex_batch_pages,
+        max_simple_batch=cfg.extract.max_simple_batch_pages,
+        max_complex_batch=cfg.extract.max_complex_batch_pages,
     )
 
     vlm_client = LLMClient(cfg, use_vlm=True)
@@ -122,13 +122,13 @@ def extract(
                 idx + 1, len(units), unit.pages,
             )
 
-            memory_arg = book_memory if cfg.enable_book_memory else None
+            memory_arg = book_memory if cfg.extract.enable_book_memory else None
             blocks, flag, fn_flag, unit_audit_notes, new_memory = _process_vlm_unit(
                 unit, fitz_doc, anchors, pending_tail, pending_footnote,
-                vlm_client, memory_arg, cfg.vlm_dpi,
+                vlm_client, memory_arg, cfg.extract.vlm_dpi,
             )
 
-            if cfg.enable_book_memory and new_memory is not None:
+            if cfg.extract.enable_book_memory and new_memory is not None:
                 book_memory = new_memory
                 book_memory_path.write_text(
                     book_memory.model_dump_json(indent=2), encoding="utf-8"

@@ -114,20 +114,19 @@ class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
     def __init__(self, cfg: Config, *, use_vlm: bool = False) -> None:
-        self.base_url = (cfg.vlm_base_url if use_vlm else cfg.llm_base_url).rstrip("/")
-        self.model = cfg.vlm_model if use_vlm else cfg.llm_model
+        provider = cfg.resolved_vlm() if use_vlm else cfg.llm
+        self.base_url = provider.base_url.rstrip("/")
+        self.model = provider.model
         self._kind = "VLM" if use_vlm else "LLM"
-        self.timeout = cfg.vlm_timeout if use_vlm else cfg.llm_timeout
-        self.max_tokens = cfg.vlm_max_tokens if use_vlm else cfg.llm_max_tokens
-        if use_vlm and self.max_tokens is None:
-            self.max_tokens = 16384
-        self.extra_body: dict[str, Any] = (cfg.vlm_extra_body if use_vlm else cfg.llm_extra_body)
-        self.prompt_caching = cfg.vlm_prompt_caching if use_vlm else cfg.llm_prompt_caching
-        self.cache_dir = cfg.cache_dir
-        api_key = cfg.vlm_api_key if use_vlm else cfg.llm_api_key
+        self.timeout = provider.timeout_seconds
+        self.max_tokens = provider.max_tokens
+        self.extra_body: dict[str, Any] = provider.extra_body
+        self.prompt_caching = provider.prompt_caching
+        self.cache_dir = cfg.runtime.cache_dir
+        api_key = provider.api_key
         self._client = OpenAI(
             base_url=self.base_url,
-            api_key=api_key,
+            api_key=api_key or "",
             timeout=self.timeout,
             max_retries=2,
         )
