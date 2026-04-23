@@ -171,7 +171,7 @@ class Chapter(BaseModel):
 
 
 class Book(BaseModel):
-    version: int = 0
+    op_log_version: int = 0
     initialized_at: str = ""
     uid_seed: str = ""
     title: str

@@ -415,9 +415,9 @@ def _check_preconditions(book: Book, preconditions: Iterable[Precondition], *, o
 
         if precondition.kind == "version_at_least":
             assert precondition.min_version is not None
-            if book.version < precondition.min_version:
+            if book.op_log_version < precondition.min_version:
                 raise ApplyError(
-                    f"precondition failed: book.version={book.version} < {precondition.min_version}",
+                    f"precondition failed: book.op_log_version={book.op_log_version} < {precondition.min_version}",
                     op_id,
                 )
             continue
@@ -1077,7 +1077,7 @@ def _build_inverse_envelope(
         op_id=inverse_op_id,
         ts=ts,
         agent_id="supervisor-revert",
-        base_version=book.version,
+        base_version=book.op_log_version,
         preconditions=preconditions,
         op=_build_inverse_op(book, target),
         rationale=f"inverse of op {target.op_id} (requested by revert op {revert_request.op_id})",
@@ -1112,9 +1112,9 @@ def apply_envelope(
         raise ValueError(f"unsupported apply mode {mode}")
     if env.op_id in existing_op_ids:
         raise ApplyError("duplicate op_id", env.op_id)
-    if env.base_version > book.version:
+    if env.base_version > book.op_log_version:
         raise ApplyError(
-            f"future-version rejection: base_version={env.base_version} > book.version={book.version}",
+            f"future-version rejection: base_version={env.base_version} > book.op_log_version={book.op_log_version}",
             env.op_id,
         )
 
@@ -1124,16 +1124,16 @@ def apply_envelope(
     default_applied_at = env.applied_at or now()
 
     if isinstance(env.op, CompactMarker):
-        if env.applied_version is not None and env.applied_version != working.version:
-            raise ApplyError("compact_marker applied_version does not match current book.version", env.op_id)
+        if env.applied_version is not None and env.applied_version != working.op_log_version:
+            raise ApplyError("compact_marker applied_version does not match current book.op_log_version", env.op_id)
         applied_at = default_applied_at
-        applied = env.model_copy(update={"applied_version": working.version, "applied_at": applied_at})
+        applied = env.model_copy(update={"applied_version": working.op_log_version, "applied_at": applied_at})
         return ApplyResult(book=working, accepted_envelopes=(applied,), memory=working_memory)
 
     if isinstance(env.op, RevertOp):
         if replay:
             applied_at = default_applied_at
-            applied = env.model_copy(update={"applied_version": working.version, "applied_at": applied_at})
+            applied = env.model_copy(update={"applied_version": working.op_log_version, "applied_at": applied_at})
             return ApplyResult(book=working, accepted_envelopes=(applied,), memory=working_memory)
 
         if resolve_target is None:
@@ -1149,7 +1149,7 @@ def apply_envelope(
 
         _check_preconditions(working, env.preconditions, op_id=env.op_id)
         revert_applied_at = default_applied_at
-        applied_revert = env.model_copy(update={"applied_version": working.version, "applied_at": revert_applied_at})
+        applied_revert = env.model_copy(update={"applied_version": working.op_log_version, "applied_at": revert_applied_at})
         inverse, backref = _build_inverse_envelope(
             working,
             target,
@@ -1188,9 +1188,9 @@ def apply_envelope(
     _check_preconditions(working, env.preconditions, op_id=env.op_id)
     _check_new_uid_collisions(working, env.op, op_id=env.op_id)
     updated = _apply_op(working, env.op, op_id=env.op_id)
-    updated.version += 1
+    updated.op_log_version += 1
     applied_at = default_applied_at
-    applied = env.model_copy(update={"applied_version": updated.version, "applied_at": applied_at})
+    applied = env.model_copy(update={"applied_version": updated.op_log_version, "applied_at": applied_at})
     if env.applied_version is not None and env.applied_version != applied.applied_version:
         raise ApplyError("envelope applied_version does not match replay result", env.op_id)
     if working_memory is not None and _is_topology_op(env.op):

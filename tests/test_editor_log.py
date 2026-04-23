@@ -113,7 +113,7 @@ def test_compact_archives_log_builds_index_and_keeps_revertable_history(tmp_path
     revert_env = _env(RevertOp(op="revert", target_op_id=insert_env.op_id), base_version=1)
     reverted = apply_and_log(inserted.book, edit_dir, revert_env, now="2026-04-23T08:00:03Z")
 
-    assert reverted.book.version == 2
+    assert reverted.book.op_log_version == 2
     assert [block.uid for block in reverted.book.chapters[0].blocks] == ["p-1"]
     current_log = read_current_log(edit_dir)
     assert [entry.op.op for entry in current_log] == ["compact_marker", "revert", "delete_block"]

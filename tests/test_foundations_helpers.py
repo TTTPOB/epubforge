@@ -62,7 +62,7 @@ def test_load_book_accepts_legacy_pipeline_artifact(tmp_path: Path) -> None:
     book = load_book(tmp_path)
 
     assert book.title == "Legacy"
-    assert book.version == 0
+    assert book.op_log_version == 0
     assert book.initialized_at == ""
     assert book.uid_seed == ""
     assert book.chapters[0].uid is None

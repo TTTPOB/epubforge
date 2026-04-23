@@ -95,7 +95,7 @@ class TestBook:
         restored = Book.model_validate_json(b.model_dump_json())
         assert restored.chapters[0].title == "Ch1"
         assert restored.chapters[0].blocks[0].provenance.source == "llm"
-        assert restored.version == 0
+        assert restored.op_log_version == 0
         assert restored.uid_seed == ""
 
     def test_block_discriminator(self) -> None:
@@ -200,14 +200,14 @@ class TestUidHelpers:
         )
         book = Book(
             title="Book",
-            version=2,
+            op_log_version=2,
             initialized_at="2026-04-23T00:00:00Z",
             uid_seed="seed-1",
             chapters=[chapter],
         )
         assert book.chapters[0].uid == "ch-1"
         assert book.chapters[0].blocks[0].uid == "p-1"
-        assert book.version == 2
+        assert book.op_log_version == 2
 
 
 class TestAssemblerPagePropagation:

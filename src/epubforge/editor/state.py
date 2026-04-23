@@ -162,7 +162,7 @@ def initialize_book_state(book: Book, *, initialized_at: str, uid_seed: str | No
         chapters.append(next_chapter)
     return book.model_copy(
         update={
-            "version": 0,
+            "op_log_version": 0,
             "initialized_at": initialized_at,
             "uid_seed": seed,
             "chapters": chapters,

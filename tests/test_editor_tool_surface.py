@@ -116,7 +116,7 @@ def test_init_command_creates_edit_state(tmp_path: Path) -> None:
 
     paths = resolve_editor_paths(work_dir)
     book = load_book(paths.book_path)
-    assert book.version == 0
+    assert book.op_log_version == 0
     assert book.uid_seed
     meta = json.loads(paths.meta_path.read_text(encoding="utf-8"))
     assert meta == {"initialized_at": book.initialized_at, "uid_seed": book.uid_seed}
@@ -139,7 +139,7 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
 
     paths = resolve_editor_paths(base_work)
     book = load_book(paths.book_path)
-    assert book.version == 1
+    assert book.op_log_version == 1
     base_meta = json.loads(paths.meta_path.read_text(encoding="utf-8"))
     assert base_meta == {"initialized_at": book.initialized_at, "uid_seed": book.uid_seed}
     memory = json.loads(paths.memory_path.read_text(encoding="utf-8"))
@@ -168,7 +168,7 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
     verified_meta = json.loads(verified_paths.meta_path.read_text(encoding="utf-8"))
     assert verified_meta == {"initialized_at": verified_book.initialized_at, "uid_seed": verified_book.uid_seed}
     verified_memory = json.loads(verified_paths.memory_path.read_text(encoding="utf-8"))
-    assert verified_book.version == 1
+    assert verified_book.op_log_version == 1
     assert verified_memory["assume_verified"] is True
     assert all(status["read_passes"] == 1 for status in verified_memory["chapter_status"].values())
 
@@ -235,7 +235,7 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
     assert apply_payload["new_version"] == 2
 
     updated_book = load_book(resolve_editor_paths(work_dir).book_path)
-    assert updated_book.version == 2
+    assert updated_book.op_log_version == 2
     updated_block = updated_book.chapters[0].blocks[0]
     assert isinstance(updated_block, Paragraph)
     assert updated_block.text == "Alpha paragraph revised."
@@ -251,7 +251,7 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
         "Unknown style class",
     )
     assert prompt.returncode == 0, prompt.stdout + prompt.stderr
-    assert "当前 book.version=2" in prompt.stdout
+    assert "当前 book.op_log_version=2" in prompt.stdout
     assert "当前 memory 快照：" in prompt.stdout
     assert '"assume_verified": true' in prompt.stdout
 
@@ -379,7 +379,7 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
     paths = resolve_editor_paths(work_dir)
     book = load_book(paths.book_path)
     memory = json.loads(paths.memory_path.read_text(encoding="utf-8"))
-    assert book.version == 1
+    assert book.op_log_version == 1
     assert all(chapter.uid for chapter in book.chapters)
     assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
     assert memory["assume_verified"] is True
@@ -648,7 +648,7 @@ def test_run_init_persists_book(tmp_path: Path) -> None:
     # book.json must exist after run_init
     assert paths.book_path.exists()
     book = load_book(paths.book_path)
-    assert book.version == 0
+    assert book.op_log_version == 0
     assert book.uid_seed
 
 
@@ -668,7 +668,7 @@ def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
     # book.json must exist and be at version 1 (noop applied)
     assert paths.book_path.exists()
     book = load_book(paths.book_path)
-    assert book.version == 1
+    assert book.op_log_version == 1
     # edit log must exist via paths.current_log_path (no hardcoded filename)
     assert paths.current_log_path.exists()
     current_log = read_current_log(paths.edit_state_dir)

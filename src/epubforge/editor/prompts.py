@@ -17,7 +17,7 @@ SCANNER_PROMPT = """你是 epubforge 编辑系统的 scanner subagent。
 3. 只在非常确定的小修改时产 EditOp；复杂修改留给 fixer
 4. 更新 chapter_status[{chapter_uid}].read_passes += 1
 
-当前 book.version={book_version}，produce 的每条 op envelope 必须写 base_version={book_version}。
+当前 book.op_log_version={book_version}，produce 的每条 op envelope 必须写 base_version={book_version}。
 当前 memory 快照：{memory_snapshot}
 
 如需临时脚本，先调 `python -m epubforge.editor.run-script {work_dir} --write <desc>` 获取 scratch 路径，
@@ -37,7 +37,7 @@ FIXER_PROMPT = """你是 epubforge 编辑系统的 fixer subagent。
 - 复杂判断要基于 memory.conventions；不要臆断
 - 所有 op 的 base_version 必须等于当前 book_version={book_version}
 
-当前 book.version={book_version}
+当前 book.op_log_version={book_version}
 当前 memory 快照：{memory_snapshot}
 当前 chapter 标题：{chapter_title}
 当前 book.json：{book_path}
@@ -54,7 +54,7 @@ REVIEWER_PROMPT = """你是 epubforge 编辑系统的 reviewer subagent。
 - 你只能给出审查意见、OpenQuestion 或必要的修正 op
 - 所有 op 的 base_version 必须等于当前 book_version={book_version}
 
-当前 book.version={book_version}
+当前 book.op_log_version={book_version}
 当前 chapter：{chapter_uid} / {chapter_title}
 当前 memory 快照：{memory_snapshot}
 当前 book.json：{book_path}
@@ -99,7 +99,7 @@ def render_prompt(
 
     return template.format(
         book_path=book_path,
-        book_version=book.version,
+        book_version=book.op_log_version,
         chapter_title=chapter.title,
         chapter_uid=chapter_uid,
         issues_and_hints=_issues_block(issues),

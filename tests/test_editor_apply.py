@@ -116,7 +116,7 @@ def test_apply_basic_path_increments_version() -> None:
     block = result.book.chapters[0].blocks[0]
     assert isinstance(block, Paragraph)
     assert block.text == "Beta"
-    assert result.book.version == 1
+    assert result.book.op_log_version == 1
     assert result.accepted_envelopes[0].applied_version == 1
     assert result.accepted_envelopes[0].applied_at == "2026-04-23T08:00:01Z"
 
@@ -162,7 +162,7 @@ def test_noop_compact_marker_and_revert_semantics() -> None:
         _env(NoopOp(op="noop", purpose="milestone"), base_version=0),
         now=lambda: "2026-04-23T08:00:01Z",
     )
-    assert noop_result.book.version == 1
+    assert noop_result.book.op_log_version == 1
 
     compact_result = apply_envelope(
         noop_result.book,
@@ -177,7 +177,7 @@ def test_noop_compact_marker_and_revert_semantics() -> None:
         ),
         now=lambda: "2026-04-23T08:00:02Z",
     )
-    assert compact_result.book.version == 1
+    assert compact_result.book.op_log_version == 1
     assert compact_result.accepted_envelopes[0].applied_version == 1
 
     insert_env = _env(
@@ -209,7 +209,7 @@ def test_noop_compact_marker_and_revert_semantics() -> None:
     assert inverse.base_version == 2
     assert inverse.preconditions[0].kind == "block_exists"
     assert inverse.preconditions[0].block_uid == "p-2"
-    assert revert_result.book.version == 3
+    assert revert_result.book.op_log_version == 3
     assert [block.uid for block in revert_result.book.chapters[0].blocks] == ["p-1", "h-1", "fn-1"]
 
 
@@ -274,7 +274,7 @@ def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> N
 
     assert revert_result.accepted_envelopes[0].applied_version == 1
     assert revert_result.accepted_envelopes[1].applied_version == 2
-    assert replayed.version == revert_result.accepted_envelopes[1].applied_version
+    assert replayed.op_log_version == revert_result.accepted_envelopes[1].applied_version
     assert [block.uid for block in replayed.chapters[0].blocks] == ["p-1", "h-1", "fn-1"]
 
 
@@ -746,7 +746,7 @@ class TestSplitMergedTableApply:
             _env(_split_merged_table_op(), base_version=0),
             now=lambda: "2026-04-23T08:00:01Z",
         )
-        assert result.book.version == 1
+        assert result.book.op_log_version == 1
 
     def test_split_three_segments_produces_three_blocks(self) -> None:
         book = _table_book()
@@ -820,7 +820,7 @@ def test_apply_queue_merges_memory_patch_via_merge_edit_memory() -> None:
     block = result.book.chapters[0].blocks[0]
     assert isinstance(block, Paragraph)
     assert block.text == "Patched"
-    assert result.book.version == 1
+    assert result.book.op_log_version == 1
 
     # Accepted log grew by one.
     assert len(result.accepted_envelopes) == 1
@@ -866,7 +866,7 @@ def test_apply_queue_rejects_envelope_when_memory_merge_fails() -> None:
     assert "simulated merge failure" in exc_info.value.reason
 
     # Book was not mutated (still version 0, text still "Alpha").
-    assert book.version == 0
+    assert book.op_log_version == 0
     block = book.chapters[0].blocks[0]
     assert isinstance(block, Paragraph)
     assert block.text == "Alpha"

@@ -68,7 +68,7 @@ def _normalize_legacy_payload(payload: object) -> None:
     if not isinstance(payload, dict):
         raise TypeError("Book artifact must decode to a JSON object")
 
-    payload.setdefault("version", 0)
+    payload.setdefault("op_log_version", 0)
     payload.setdefault("initialized_at", "")
     payload.setdefault("uid_seed", "")
 

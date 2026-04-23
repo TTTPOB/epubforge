@@ -201,15 +201,15 @@ def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
         op_id=str(uuid4()),
         ts=ts,
         agent_id="supervisor-compact",
-        base_version=book.version,
+        base_version=book.op_log_version,
         op=CompactMarker(
             op="compact_marker",
-            compacted_at_version=book.version,
+            compacted_at_version=book.op_log_version,
             archive_path=str(relative_archive),
             archived_op_count=len(current_log),
         ),
         rationale=f"compact log into {relative_archive}",
-        applied_version=book.version,
+        applied_version=book.op_log_version,
         applied_at=ts,
     )
 

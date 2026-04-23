@@ -130,7 +130,7 @@ def run_init(argv: list[str] | None = None) -> int:
         {
             "initialized_at": book.initialized_at,
             "uid_seed": book.uid_seed,
-            "book_version": book.version,
+            "book_version": book.op_log_version,
             "book_path": str(paths.book_path),
         }
     )
@@ -185,7 +185,7 @@ def run_import_legacy(argv: list[str] | None = None) -> int:
         {
             "initialized_at": imported_book.initialized_at,
             "uid_seed": imported_book.uid_seed,
-            "book_version": imported_book.version,
+            "book_version": imported_book.op_log_version,
             "assume_verified": memory.assume_verified,
             "book_path": str(paths.book_path),
         }
@@ -208,7 +208,7 @@ def run_doctor(argv: list[str] | None = None) -> int:
     previous = _load_doctor_context(paths.doctor_context_path)
     new_applied_op_count = 0
     if previous is not None:
-        new_applied_op_count = max(0, book.version - previous.book_version)
+        new_applied_op_count = max(0, book.op_log_version - previous.book_version)
     report = build_doctor_report(
         memory=memory,
         book=book,
@@ -218,7 +218,7 @@ def run_doctor(argv: list[str] | None = None) -> int:
     )
     paths.audit_dir.mkdir(parents=True, exist_ok=True)
     paths.doctor_report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
-    _save_doctor_context(paths.doctor_context_path, book_version=book.version, memory=memory, report=report)
+    _save_doctor_context(paths.doctor_context_path, book_version=book.op_log_version, memory=memory, report=report)
     emit_json(report.model_dump(mode="json"))
     return 0
 
@@ -280,7 +280,7 @@ def run_apply_queue(argv: list[str] | None = None) -> int:
     if not staged:
         save_leases(paths, lease_state)
         clear_staging(paths)
-        emit_json({"applied": 0, "rejected": 0, "new_version": book.version})
+        emit_json({"applied": 0, "rejected": 0, "new_version": book.op_log_version})
         return 0
 
     known_ids = known_op_ids(paths.edit_state_dir)
@@ -321,7 +321,7 @@ def run_apply_queue(argv: list[str] | None = None) -> int:
 
     save_leases(paths, lease_state)
     clear_staging(paths)
-    payload: dict[str, object] = {"applied": applied_count, "rejected": rejected_count, "new_version": book.version}
+    payload: dict[str, object] = {"applied": applied_count, "rejected": rejected_count, "new_version": book.op_log_version}
     if errors:
         payload["errors"] = errors
     emit_json(payload)
@@ -483,7 +483,7 @@ def run_snapshot(argv: list[str] | None = None) -> int:
 
 
 def run_render_prompt(argv: list[str] | None = None) -> int:
-    parser = _parser("render-prompt", "Render a subagent prompt with current book.version and memory snapshot.")
+    parser = _parser("render-prompt", "Render a subagent prompt with current book.op_log_version and memory snapshot.")
     parser.add_argument("work")
     parser.add_argument("--kind", required=True, choices=["scanner", "fixer", "reviewer"])
     parser.add_argument("--chapter", required=True)
