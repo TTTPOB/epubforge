@@ -12,6 +12,7 @@ from epubforge.audit.models import (
 )
 from epubforge.audit.punctuation import detect_dash_inventory
 from epubforge.audit.structure import KNOWN_STYLE_CLASSES, detect_structure_issues
+from epubforge.audit.table_merge import detect_table_merge_issues
 from epubforge.audit.tables import detect_table_issues
 from epubforge.ir.semantic import Book
 
@@ -20,6 +21,7 @@ def run_all_detectors(book: Book) -> AuditBundle:
     return merge_bundles(
         detect_dash_inventory(book),
         detect_table_issues(book),
+        detect_table_merge_issues(book),
         detect_footnote_issues(book),
         detect_structure_issues(book),
         detect_invariant_issues(book),
@@ -38,5 +40,6 @@ __all__ = [
     "detect_invariant_issues",
     "detect_structure_issues",
     "detect_table_issues",
+    "detect_table_merge_issues",
     "run_all_detectors",
 ]
