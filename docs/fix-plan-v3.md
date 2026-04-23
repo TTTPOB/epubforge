@@ -237,9 +237,9 @@ multi_page_was: bool
 **测试**：
 
 - `tests/test_audit_table_merge.py`
-  - `test_detect_width_drift`
-  - `test_detect_header_reintroduced`
-  - `test_detect_orphan_continuation`
+  - `test_detect_width_drift`：fixture 为 `multi_page=True` 的 Table，列宽偏移超过阈值
+  - `test_detect_header_reintroduced`：fixture 为 `multi_page=True` 的 Table，合并后仍含重复 `<thead>`
+  - `test_detect_orphan_continuation`：fixture 为 `continuation=True` 且 `multi_page=False` 的 Table（即 assembler `_merge_continued_tables()` 找不到前驱表、原样保留的孤儿块）；不可使用 `multi_page=True` 的 Table 作为输入，否则永远触发不到 orphan 路径
 - `tests/test_editor_ops.py`
   - 只验证修订后 op schema 的长度/必填字段约束
 - `tests/test_editor_apply.py`
