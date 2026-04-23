@@ -54,7 +54,7 @@
 
 - `src/epubforge/editor/scratch.py`
   - `run_script()`：改为 `_resolve_within_scratch(raw, scratch_dir)`。
-  - `allocate_script_path()`：可以保留内部防御式 assertion，但不要再把它当成一个需要专门构造的测试入口。
+  - `allocate_script_path()`：函数内部的防御式 `assert` 语句可以保留，但**不在测试文件中**为其单独构造 `test_allocate_script_path_assertion` 用例——该函数没有可注入外部路径的接口，该断言在当前 API 下无法被外部合法触发。
 - `src/epubforge/editor/tool_surface.py`
   - `run_run_script()`：将 path validation failure 统一翻成 `CommandError`。
 - `tests/test_editor_tool_surface.py`
