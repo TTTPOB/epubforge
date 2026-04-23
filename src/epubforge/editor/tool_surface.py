@@ -125,6 +125,7 @@ def run_init(argv: list[str] | None = None) -> int:
         chapter_uids=chapter_uids(book),
     )
     write_initial_state(paths, book=book, memory=memory, leases=LeaseState())
+    save_book(book, paths.work_dir)
     emit_json(
         {
             "initialized_at": book.initialized_at,

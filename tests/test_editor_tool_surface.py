@@ -9,7 +9,15 @@ from uuid import uuid4
 
 from epubforge.ir.semantic import Figure, Footnote, Paragraph, Table
 from epubforge.editor.log import read_current_log
-from epubforge.editor.state import resolve_editor_paths
+from epubforge.editor.leases import LeaseState
+from epubforge.editor.memory import EditMemory
+from epubforge.editor.state import (
+    chapter_uids,
+    book_id_from_paths,
+    initialize_book_state,
+    resolve_editor_paths,
+    write_initial_state,
+)
 from epubforge.io import load_book, save_book
 from epubforge.ir.semantic import Book, Chapter, Provenance
 
@@ -588,3 +596,81 @@ def test_propose_op_all_valid_appended_atomically(tmp_path: Path) -> None:
     staging = paths.edit_state_dir / "staging.jsonl"
     lines = [ln for ln in staging.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert len(lines) == 2
+
+
+# ---------------------------------------------------------------------------
+# §1.2 write_initial_state decoupling tests
+# ---------------------------------------------------------------------------
+
+
+def _make_book_and_memory(work_dir: Path) -> tuple[Book, EditMemory]:
+    """Create an initialized book and matching memory for a work_dir."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    book = initialize_book_state(_legacy_book(), initialized_at=now)
+    paths = resolve_editor_paths(work_dir)
+    memory = EditMemory.create(
+        book_id=book_id_from_paths(paths),
+        updated_at=now,
+        updated_by="test",
+        chapter_uids=chapter_uids(book),
+    )
+    return book, memory
+
+
+def test_write_initial_state_does_not_touch_book_json(tmp_path: Path) -> None:
+    work_dir = tmp_path / "wis-no-book"
+    work_dir.mkdir()
+    paths = resolve_editor_paths(work_dir)
+    book, memory = _make_book_and_memory(work_dir)
+
+    write_initial_state(paths, book=book, memory=memory, leases=LeaseState())
+
+    # book.json must NOT be created by write_initial_state
+    assert not paths.book_path.exists()
+    # meta, memory, leases, log, staging must all exist
+    assert paths.meta_path.exists()
+    assert paths.memory_path.exists()
+    assert paths.leases_path.exists()
+    assert paths.current_log_path.exists()
+    assert paths.staging_path.exists()
+
+
+def test_run_init_persists_book(tmp_path: Path) -> None:
+    work_dir = tmp_path / "init-persists"
+    save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
+
+    completed = _run_module("epubforge.editor.init", str(work_dir))
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    paths = resolve_editor_paths(work_dir)
+    # book.json must exist after run_init
+    assert paths.book_path.exists()
+    book = load_book(paths.book_path)
+    assert book.version == 0
+    assert book.uid_seed
+
+
+def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
+    work_dir = tmp_path / "import-persists"
+    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+
+    completed = _run_module(
+        "epubforge.editor.import-legacy",
+        str(work_dir),
+        "--from",
+        "07_footnote_verified.json",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    paths = resolve_editor_paths(work_dir)
+    # book.json must exist and be at version 1 (noop applied)
+    assert paths.book_path.exists()
+    book = load_book(paths.book_path)
+    assert book.version == 1
+    # edit log must exist via paths.current_log_path (no hardcoded filename)
+    assert paths.current_log_path.exists()
+    current_log = read_current_log(paths.edit_state_dir)
+    assert len(current_log) == 1
+    assert current_log[0].op.op == "noop"

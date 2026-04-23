@@ -16,7 +16,7 @@ from epubforge.editor.leases import LeaseState
 from epubforge.editor.log import CURRENT_LOG, resolve_edit_log_paths
 from epubforge.editor.memory import EditMemory
 from epubforge.editor.ops import OpEnvelope
-from epubforge.io import load_book, save_book
+from epubforge.io import load_book
 from epubforge.ir.semantic import (
     Block,
     Book,
@@ -241,11 +241,15 @@ def write_initial_state(
     memory: EditMemory,
     leases: LeaseState | None = None,
 ) -> None:
+    """Create directory skeleton and write meta/memory/leases/log/staging.
+
+    Does NOT write book.json — the caller is responsible for calling save_book
+    after this function returns.
+    """
     paths.edit_state_dir.mkdir(parents=True, exist_ok=True)
     paths.audit_dir.mkdir(parents=True, exist_ok=True)
     paths.scratch_dir.mkdir(parents=True, exist_ok=True)
     paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
-    save_book(book, paths.work_dir)
     atomic_write_model(paths.meta_path, build_editor_meta(book))
     atomic_write_model(paths.memory_path, memory)
     atomic_write_model(paths.leases_path, leases or LeaseState())
