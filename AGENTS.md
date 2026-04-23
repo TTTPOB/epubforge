@@ -3,73 +3,237 @@
 ## Project Overview
 
 LLM/VLM-assisted PDF → EPUB pipeline for books and academic theses.
-Seven-stage pipeline: parse → classify → extract → assemble → refine-toc → proofread → build.
+The system has two main subsystems: a **5-stage ingestion pipeline** that converts a PDF
+into a Semantic IR `Book`, and an **editor subsystem** that applies agent-driven operations
+to a `Book` stored in `edit_state/`.
 
-Each stage writes to `work/<book_name>/0N_*.json` and is independently re-runnable.
-LLM/VLM calls are cached in `work/.cache/` (key = sha256 of model+prompt+image).
+Each pipeline stage writes to `work/<book_name>/0N_*.json` and is independently
+re-runnable. LLM/VLM calls are cached in `work/.cache/` (key = sha256 of model +
+prompt + image).
 
 ## Pipeline Stages
 
-| # | CLI flag `--from` | Command | Input | Output |
-|---|-------------------|---------|-------|--------|
-| 1 | `--from 1` | `parse` | PDF | `01_raw.json` (Docling JSON) |
-| 2 | `--from 2` | `classify` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
-| 3 | `--from 3` | `extract` | `01_raw.json` + `02_pages.json` | `03_extract/unit_*.json` (LLM+VLM blocks) |
-| 4 | `--from 4` | `assemble` | `03_extract/` | `05_semantic_raw.json` (Semantic IR) |
-| 5 | `--from 5` | `refine-toc` | `05_semantic_raw.json` | `05_semantic.json` (refined headings) |
-| 6 | `--from 6` | `proofread` | `05_semantic.json` | `06_proofread.json` (Phase1+Phase2 edits) |
-| 7 | `--from 7` | `build` | `06_proofread.json` | `out/<name>.epub` |
+| Stage | Name | CLI / `--from` | Input | Output |
+|-------|------|----------------|-------|--------|
+| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON) |
+| 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
+| 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` | `03_extract/unit_*.json` (LLM+VLM blocks) |
+| 4 | assemble | `assemble` / `--from 4` | `03_extract/` | `05_semantic_raw.json` (Semantic IR) |
+| 5 | build | `build` | `edit_state/book.json` or `05_semantic.json` | `out/<name>.epub` |
+
+> Note: `pipeline.py` has a lingering `stage_timer(log, "8 build")` label at line 117
+> (a pre-D6 artifact). This is cosmetic only — the stage is Stage 5 per D6=B.
+> CLI `--from` accepts `max=4` (build is not re-runnable via `--from`).
+
+All stages accept `--force-rerun` (`-f`) to re-run even when output exists.
 
 ## Observability
 
-All stages and every LLM/VLM request emit INFO-level logs. By default logs are written to
-`work/<book>/logs/run-<timestamp>.log` (plain text, grep-friendly) and also to stderr via
-RichHandler (coloured, aligned).
+All stages and every LLM/VLM request emit INFO-level logs. Logs are written to
+`work/<book>/logs/run-<timestamp>.log` and to stderr via RichHandler.
 
-CLI flags:
-- `--log-level / -L` — set level (DEBUG/INFO/WARNING); env `EPUBFORGE_LOG_LEVEL`
-- `--log-file` — override log file path (default: auto-generated per run)
+CLI flags: `--log-level / -L` (DEBUG/INFO/WARNING); `--log-file` (override log file path).
 
-Per-request log lines include: kind (LLM/VLM), req_id (first 8 chars of cache key),
-model, format name, message count, char count, image count, cache HIT/MISS, elapsed
-time, finish reason, prompt+completion token counts, and `cached=<N>` (provider-side
-cached input tokens, non-zero when prompt caching is active). Each stage emits a summary
-line on completion showing elapsed time, total requests, cache hit rate, tokens used,
-and `cache_read=<N>` (aggregate cached tokens for the stage, omitted when zero).
+Per-request log lines include: kind (LLM/VLM), req_id, model, cache HIT/MISS, elapsed,
+tokens, and `cached=<N>` (provider-side cached tokens). Each stage emits a summary line
+on completion.
 
-System prompts are wrapped with `cache_control: ephemeral` on the wire for Anthropic
-prompt caching (OpenRouter/Anthropic direct). Gemini 2.5/3 and OpenAI use implicit
-caching and ignore the field. Disk cache keys hash the pre-transform messages, so
-toggling `prompt_caching` never invalidates `work/.cache/`. Disable per-model with
-`[llm] prompt_caching = false` or env `EPUBFORGE_LLM_PROMPT_CACHING=0`.
+System prompts use `cache_control: ephemeral` for Anthropic prompt caching; other
+providers use implicit caching. Disable per-model with `[llm] prompt_caching = false` or
+`EPUBFORGE_LLM_PROMPT_CACHING=0`.
 
-## Two-Layer IR
+## Editor Subsystem
 
-- **Raw IR**: Docling `DoclingDocument` JSON (lossless, never modified)
-- **Semantic IR**: Pydantic v2 models in `src/epubforge/ir/semantic.py`
-  `Book → Chapter → Block[Paragraph|Heading|Footnote|Figure|Table|Equation]`
-  Each block carries `provenance: {page, bbox, source: "llm"|"vlm"|"passthrough"}`
+The editor subsystem provides agent-driven, auditable mutations to a `Book`.
+All state lives under `edit_state/` inside the book's work directory.
 
-## Config (env vars / .env)
+### `edit_state/` layout
 
 ```
-EPUBFORGE_LLM_BASE_URL   default: https://openrouter.ai/api/v1
-EPUBFORGE_LLM_API_KEY    required when using LLM stages
-EPUBFORGE_LLM_MODEL      default: anthropic/claude-haiku-4.5
-EPUBFORGE_VLM_BASE_URL   default: same as LLM
-EPUBFORGE_VLM_API_KEY    required when using VLM stage
-EPUBFORGE_VLM_MODEL      default: google/gemini-flash-3
-EPUBFORGE_CONCURRENCY    default: 4
-EPUBFORGE_CACHE_DIR      default: work/.cache
+edit_state/
+  book.json          # current Book (Semantic IR)
+  edit_log.jsonl     # append-only log of applied OpEnvelopes
+  memory.json        # BookMemory (rolling per-book facts)
+  leases.json        # chapter leases + book-wide exclusive lock
+  staging.jsonl      # pending (not-yet-applied) envelopes
+  meta.json          # init metadata
+  audit/             # doctor report + context JSON
+  scratch/           # temporary scripts allocated by run-script
+  snapshots/         # archived edit_state copies (tagged)
 ```
 
-## Key Conventions
+### OpEnvelope / apply_envelope semantics
 
-- All stages accept `--force-rerun` (`-f`) to re-run even if output exists
-- All stages skip if output already present (idempotent); pass `--force-rerun` to override
-- VLM output must be structured JSON matching `VLMPageOutput` schema in `ir/semantic.py`
-- Never rewrite content — LLM only merges line breaks, removes headers/footers, normalises headings
-- `fixtures/` holds test PDFs (gitignored `*.pdf`); run `uv run epubforge run fixtures/<name>.pdf`
+An `OpEnvelope` (defined in `editor/ops.py`) carries:
+- `op_id`: UUID4 identifier for this envelope
+- `base_version`: the `Book.op_log_version` the op was authored against
+- `applied_version`: set after application (must be >= `base_version`)
+- `op`: the single `EditOp` payload
+- `memory_patches`: optional list of `MemoryPatch` to apply to `BookMemory`
+- `agent_id`, `applied_at`, `preconditions`, etc.
+
+`apply_envelope` (`editor/apply.py`) is **transactional**: it begins with
+`working = book.model_copy(deep=True)` (line 1121). Any op failure or
+`memory_patches` failure raises and discards `working`, returning the original
+`book` unchanged. On success, `book.op_log_version` is incremented.
+
+`Book.op_log_version: int` is the op-log version — incremented by each successful
+`apply_envelope` call, and paired with `OpEnvelope.base_version` / `applied_version`.
+It is **not** an IR schema version.
+
+Full JSON schema: see `editor/ops.py` (ops and envelope definitions),
+`editor/memory.py` (MemoryPatch), and `editor/_validators.py` (shared invariants).
+
+### `epubforge editor <cmd>` commands
+
+All 13 commands are available via `epubforge editor <cmd>`. Each command receives
+effective config from `ctx.find_root().obj.config` (injected by the root Typer callback).
+
+| Command | Purpose |
+|---------|---------|
+| `init` | Initialize `edit_state/` from `05_semantic.json` |
+| `import-legacy` | Initialize `edit_state/` from a legacy artifact |
+| `doctor` | Run audit detectors and print readiness report |
+| `propose-op` | Validate `OpEnvelope[]` from stdin and append to `staging.jsonl` |
+| `apply-queue` | Apply staged envelopes from `staging.jsonl` to `book.json` and edit log |
+| `acquire-lease` | Acquire a chapter-level lease |
+| `release-lease` | Release a chapter-level lease |
+| `acquire-book-lock` | Acquire the book-wide exclusive lock |
+| `release-book-lock` | Release the book-wide exclusive lock |
+| `run-script` | Allocate or execute scratch scripts in `edit_state/scratch/` |
+| `compact` | Compact the accepted edit log into an archive snapshot |
+| `snapshot` | Copy current `edit_state/` into `snapshots/<tag>/` |
+| `render-prompt` | Render a subagent prompt with current `op_log_version` and memory |
+
+Example usage:
+```bash
+epubforge --config config.example.toml editor init work/mybook
+epubforge --config config.example.toml editor doctor work/mybook
+epubforge --config config.example.toml editor propose-op work/mybook < ops.json
+epubforge --config config.example.toml editor apply-queue work/mybook
+```
+
+## Audit Subsystem
+
+Audit detectors are in `src/epubforge/audit/`. Each returns an `AuditBundle`.
+
+| Function | Module | Detects |
+|----------|--------|---------|
+| `detect_structure_issues` | `audit/structure.py` | Structural anomalies (heading levels, empty chapters, etc.) |
+| `detect_table_merge_issues` | `audit/table_merge.py` | Problems in cross-page table merges |
+| `detect_footnote_issues` | `audit/footnotes.py` | Orphan / unpaired footnotes |
+| `detect_dash_inventory` | `audit/punctuation.py` | Dash / punctuation inventory |
+| `detect_table_issues` | `audit/tables.py` | Malformed table HTML |
+| `detect_invariant_issues` | `audit/invariants.py` | Book-level invariant violations |
+
+## Semantic IR
+
+Core classes are in `src/epubforge/ir/semantic.py` (and `ir/book_memory.py`):
+
+- `Book` — root; holds `op_log_version`, `title`, `authors`, `chapters`
+- `Chapter` — holds `blocks: list[Block]`
+- `Block` — discriminated union: `Paragraph | Heading | Footnote | Figure | Table | Equation`
+- `Heading` — heading block with `level` and `text`
+- `Footnote` — callout + text; `paired` and `orphan` flags
+- `Figure` — caption + optional image ref
+- `Table` — `html`, `table_title`, `caption`; `multi_page: bool` (True when merged from
+  cross-page continuations); `merge_record: TableMergeRecord | None`
+- `TableMergeRecord` — provenance for merged tables: `segment_html`, `segment_pages`,
+  `segment_order`, `column_widths` (recorded at assemble time before uid init)
+- `Provenance` — `{page, bbox, source: "llm"|"vlm"|"passthrough"}`
+- `BookMemory` — rolling per-book facts: `footnote_callouts`, `attribution_templates`,
+  `epigraph_chapters`, `punctuation_quirks`, `running_headers`, `chapter_heading_style`,
+  `notes` (in `ir/book_memory.py`)
+- `VLMPageOutput` — VLM response per page; `VLMGroupOutput.updated_book_memory` carries
+  accumulated `BookMemory` increments from a multi-page VLM batch
+
+## Config
+
+Configuration uses `pydantic-settings` with **nested submodels**. The TOML structure
+mirrors the Python model structure exactly.
+
+### Loading rules
+
+- TOML config path **must** be explicitly passed via `--config <path>`; there is no
+  implicit scan of `config.toml` or `config.local.toml` in the cwd.
+- `load_config(None)` uses defaults + env vars only (no TOML).
+- `load_config(Path(...))` reads that single TOML file; fails if it does not exist.
+- `EPUBFORGE_CONFIG_PATH` and automatic `.env` scanning are **not** supported.
+- `resolved_vlm()` on `Config` is the single normalization entry for the effective VLM
+  configuration (fallback: inherits `llm.api_key` when `vlm.api_key` is not set).
+
+### Submodels
+
+| Submodel | TOML section | Purpose |
+|----------|-------------|---------|
+| `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
+| `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
+| `EditorSettings` | `[editor]` | Lease TTLs, compact threshold, max loops |
+| `ExtractSettings` | `[extract]` | VLM DPI, batch sizes, book memory toggle |
+
+Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
+
+### Environment variables (full whitelist)
+
+Env vars use an explicit leaf-level mapping — they override individual fields without
+overwriting sibling fields in the same submodel.
+
+**`[llm]` submodel:**
+```
+EPUBFORGE_LLM_BASE_URL          llm.base_url
+EPUBFORGE_LLM_API_KEY           llm.api_key
+EPUBFORGE_LLM_MODEL             llm.model
+EPUBFORGE_LLM_TIMEOUT           llm.timeout_seconds
+EPUBFORGE_LLM_MAX_TOKENS        llm.max_tokens  (empty string → None)
+EPUBFORGE_LLM_PROMPT_CACHING    llm.prompt_caching  (1/true/yes/on = True)
+```
+
+**`[vlm]` submodel:**
+```
+EPUBFORGE_VLM_BASE_URL          vlm.base_url
+EPUBFORGE_VLM_API_KEY           vlm.api_key
+EPUBFORGE_VLM_MODEL             vlm.model
+EPUBFORGE_VLM_TIMEOUT           vlm.timeout_seconds
+EPUBFORGE_VLM_MAX_TOKENS        vlm.max_tokens
+EPUBFORGE_VLM_PROMPT_CACHING    vlm.prompt_caching
+```
+
+**`[runtime]` submodel:**
+```
+EPUBFORGE_RUNTIME_CONCURRENCY   runtime.concurrency
+EPUBFORGE_RUNTIME_CACHE_DIR     runtime.cache_dir
+EPUBFORGE_RUNTIME_WORK_DIR      runtime.work_dir
+EPUBFORGE_RUNTIME_OUT_DIR       runtime.out_dir
+EPUBFORGE_RUNTIME_LOG_LEVEL     runtime.log_level
+```
+
+**`[editor]` submodel:**
+```
+EPUBFORGE_EDITOR_LEASE_TTL_SECONDS          editor.lease_ttl_seconds
+EPUBFORGE_EDITOR_BOOK_EXCLUSIVE_TTL_SECONDS editor.book_exclusive_ttl_seconds
+EPUBFORGE_EDITOR_COMPACT_THRESHOLD          editor.compact_threshold
+EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
+```
+
+**`[extract]` submodel:**
+```
+EPUBFORGE_EXTRACT_VLM_DPI                   extract.vlm_dpi
+EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES    extract.max_simple_batch_pages
+EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES   extract.max_complex_batch_pages
+EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory  (legacy name)
+```
+
+### Test-only / scratch subprocess injection
+
+These vars are injected by the editor subsystem's scratch runner (`editor/scratch.py`)
+and are intended for test isolation or subprocess context injection only:
+
+```
+EPUBFORGE_EDITOR_NOW       Override current timestamp (scratch.py)
+EPUBFORGE_PROJECT_ROOT     Injected into scratch subprocess env
+EPUBFORGE_WORK_DIR         Injected into scratch subprocess env
+EPUBFORGE_EDIT_STATE_DIR   Injected into scratch subprocess env
+```
 
 # Agent Instructions
 

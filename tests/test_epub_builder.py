@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,12 +12,8 @@ from epubforge.epub_builder import _render_chapter, build_epub
 from epubforge.ir.semantic import Book, Chapter, Figure, Footnote, Paragraph, Provenance
 
 
-def _prov(page: int, source: str = "vlm") -> Provenance:
-    return Provenance(page=page, source=source)  # type: ignore[arg-type]
-
-
-def _figure(page: int, caption: str = "") -> Figure:
-    return Figure(caption=caption, provenance=_prov(page))
+def _figure(prov: Callable[..., Provenance], page: int, caption: str = "") -> Figure:
+    return Figure(caption=caption, provenance=prov(page, source="vlm"))
 
 
 # ---------------------------------------------------------------------------
@@ -24,9 +21,9 @@ def _figure(page: int, caption: str = "") -> Figure:
 # ---------------------------------------------------------------------------
 
 
-def test_render_chapter_figure_resolved() -> None:
+def test_render_chapter_figure_resolved(prov) -> None:
     """Figure with resolved filename renders <img src='images/...'>."""
-    fig = _figure(5, "A chart")
+    fig = _figure(prov, 5, "A chart")
     chapter = Chapter(title="Ch1", blocks=[fig])
     fname = "p0005_foo.png"
     body_html, _ = _render_chapter(chapter, "chap0000", {id(fig): fname})
@@ -34,24 +31,24 @@ def test_render_chapter_figure_resolved() -> None:
     assert "figcaption" in body_html
 
 
-def test_render_chapter_figure_unresolved() -> None:
+def test_render_chapter_figure_unresolved(prov) -> None:
     """Figure with no disk match renders <figcaption> but no <img>."""
-    fig = _figure(7, "A chart")
+    fig = _figure(prov, 7, "A chart")
     chapter = Chapter(title="Ch1", blocks=[fig])
     body_html, _ = _render_chapter(chapter, "chap0000", {})
     assert "<img" not in body_html
     assert "figcaption" in body_html
 
 
-def test_build_epub_includes_images(tmp_path: Path) -> None:
+def test_build_epub_includes_images(prov, tmp_path: Path) -> None:
     """build_epub packages image files and writes <img> references into chapter HTML."""
     images_dir = tmp_path / "images"
     images_dir.mkdir()
     (images_dir / "p0005_foo.png").write_bytes(b"PNG1")
     (images_dir / "p0005_bar.png").write_bytes(b"PNG2")
 
-    fig1 = _figure(5, "Figure 1")
-    fig2 = _figure(5, "Figure 2")
+    fig1 = _figure(prov, 5, "Figure 1")
+    fig2 = _figure(prov, 5, "Figure 2")
     book = Book(title="Test", chapters=[Chapter(title="Ch1", blocks=[fig1, fig2])])
 
     semantic = tmp_path / "semantic.json"
@@ -76,17 +73,15 @@ def test_build_epub_includes_images(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_chapter_footnotes_numbered() -> None:
+def test_render_chapter_footnotes_numbered(prov) -> None:
     """Footnotes are numbered 1, 2, 3 per chapter regardless of original callout."""
-    prov = lambda page: _prov(page, "llm")
+    fn1 = Footnote(callout="①", text="Note 1", paired=True, provenance=prov(1, source="llm"))
+    fn2 = Footnote(callout="*", text="Note 2", paired=True, provenance=prov(2, source="llm"))
+    fn3 = Footnote(callout="②", text="Note 3", paired=True, provenance=prov(3, source="llm"))
 
-    fn1 = Footnote(callout="①", text="Note 1", paired=True, provenance=prov(1))
-    fn2 = Footnote(callout="*", text="Note 2", paired=True, provenance=prov(2))
-    fn3 = Footnote(callout="②", text="Note 3", paired=True, provenance=prov(3))
-
-    p1 = Paragraph(text=f"Text \x02fn-1-①\x03 more", provenance=prov(1))
-    p2 = Paragraph(text=f"Text \x02fn-2-*\x03 more", provenance=prov(2))
-    p3 = Paragraph(text=f"Text \x02fn-3-②\x03 more", provenance=prov(3))
+    p1 = Paragraph(text=f"Text \x02fn-1-①\x03 more", provenance=prov(1, source="llm"))
+    p2 = Paragraph(text=f"Text \x02fn-2-*\x03 more", provenance=prov(2, source="llm"))
+    p3 = Paragraph(text=f"Text \x02fn-3-②\x03 more", provenance=prov(3, source="llm"))
 
     chapter = Chapter(title="Ch1", blocks=[p1, fn1, p2, fn2, p3, fn3])
     body_html, fn_html = _render_chapter(chapter, "ch1", {})
@@ -106,9 +101,9 @@ def test_render_chapter_footnotes_numbered() -> None:
     assert 'id="ch1-fn3"' in fn_html
 
 
-def test_build_epub_no_images_dir(tmp_path: Path) -> None:
+def test_build_epub_no_images_dir(prov, tmp_path: Path) -> None:
     """build_epub without images_dir emits no <img> tags but still builds epub."""
-    fig = _figure(5, "A chart")
+    fig = _figure(prov, 5, "A chart")
     book = Book(title="Test", chapters=[Chapter(title="Ch1", blocks=[fig])])
 
     semantic = tmp_path / "semantic.json"

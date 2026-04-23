@@ -16,14 +16,12 @@ from epubforge.editor.log import (
     resolve_edit_log_paths,
 )
 from epubforge.editor.ops import InsertBlock, OpEnvelope, RevertOp, SetText
+from collections.abc import Callable
+
 from epubforge.ir.semantic import Book, Chapter, Paragraph, Provenance
 
 
-def _prov(page: int = 1) -> Provenance:
-    return Provenance(page=page, source="passthrough")
-
-
-def _book() -> Book:
+def _book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         version=0,
         initialized_at="2026-04-23T08:00:00Z",
@@ -33,7 +31,7 @@ def _book() -> Book:
             Chapter(
                 uid="ch-1",
                 title="Chapter 1",
-                blocks=[Paragraph(uid="p-1", text="Alpha", provenance=_prov())],
+                blocks=[Paragraph(uid="p-1", text="Alpha", provenance=prov())],
             )
         ],
     )
@@ -53,10 +51,10 @@ def _env(op, *, base_version: int, op_id: str | None = None, preconditions: list
     )
 
 
-def test_apply_and_log_writes_accepted_and_rejected_entries(tmp_path: Path) -> None:
+def test_apply_and_log_writes_accepted_and_rejected_entries(prov, tmp_path: Path) -> None:
     edit_dir = tmp_path / "edit_state"
     result = apply_and_log(
-        _book(),
+        _book(prov),
         edit_dir,
         _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=0),
         now="2026-04-23T08:00:01Z",
@@ -81,7 +79,7 @@ def test_apply_and_log_writes_accepted_and_rejected_entries(tmp_path: Path) -> N
     assert len(read_current_log(edit_dir)) == 1
 
 
-def test_compact_archives_log_builds_index_and_keeps_revertable_history(tmp_path: Path) -> None:
+def test_compact_archives_log_builds_index_and_keeps_revertable_history(prov, tmp_path: Path) -> None:
     edit_dir = tmp_path / "edit_state"
     insert_env = _env(
         InsertBlock(
@@ -90,11 +88,11 @@ def test_compact_archives_log_builds_index_and_keeps_revertable_history(tmp_path
             after_uid="p-1",
             block_kind="paragraph",
             new_block_uid="p-2",
-            block_data={"text": "Inserted", "role": "body", "provenance": _prov().model_dump(mode="json")},
+            block_data={"text": "Inserted", "role": "body", "provenance": prov().model_dump(mode="json")},
         ),
         base_version=0,
     )
-    inserted = apply_and_log(_book(), edit_dir, insert_env, now="2026-04-23T08:00:01Z")
+    inserted = apply_and_log(_book(prov), edit_dir, insert_env, now="2026-04-23T08:00:01Z")
 
     marker = compact_log(edit_dir, inserted.book, ts="2026-04-23T08:00:02Z")
     current_log = read_current_log(edit_dir)
@@ -123,7 +121,7 @@ def test_compact_archives_log_builds_index_and_keeps_revertable_history(tmp_path
     assert "reverted_by" not in (located.archive_path / "edit_log.jsonl").read_text(encoding="utf-8")
 
 
-def test_duplicate_revert_is_rejected_without_mutating_append_only_log(tmp_path: Path) -> None:
+def test_duplicate_revert_is_rejected_without_mutating_append_only_log(prov, tmp_path: Path) -> None:
     edit_dir = tmp_path / "edit_state"
     target_env = _env(
         SetText(op="set_text", block_uid="p-1", field="text", value="Beta"),
@@ -132,7 +130,7 @@ def test_duplicate_revert_is_rejected_without_mutating_append_only_log(tmp_path:
             {"kind": "field_equals", "block_uid": "p-1", "field": "text", "expected": "Alpha"},
         ],
     )
-    applied = apply_and_log(_book(), edit_dir, target_env, now="2026-04-23T08:00:01Z")
+    applied = apply_and_log(_book(prov), edit_dir, target_env, now="2026-04-23T08:00:01Z")
     first_revert = apply_and_log(
         applied.book,
         edit_dir,
@@ -161,7 +159,7 @@ def test_duplicate_revert_is_rejected_without_mutating_append_only_log(tmp_path:
     assert "already been reverted" in rejected_after
 
 
-def test_cross_compact_revert_rejects_stale_target_effect_after_later_edits(tmp_path: Path) -> None:
+def test_cross_compact_revert_rejects_stale_target_effect_after_later_edits(prov, tmp_path: Path) -> None:
     edit_dir = tmp_path / "edit_state"
     first_edit = _env(
         SetText(op="set_text", block_uid="p-1", field="text", value="Beta"),
@@ -170,7 +168,7 @@ def test_cross_compact_revert_rejects_stale_target_effect_after_later_edits(tmp_
             {"kind": "field_equals", "block_uid": "p-1", "field": "text", "expected": "Alpha"},
         ],
     )
-    updated = apply_and_log(_book(), edit_dir, first_edit, now="2026-04-23T08:00:01Z")
+    updated = apply_and_log(_book(prov), edit_dir, first_edit, now="2026-04-23T08:00:01Z")
     compact_log(edit_dir, updated.book, ts="2026-04-23T08:00:02Z")
 
     second_edit = _env(

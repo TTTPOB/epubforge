@@ -22,6 +22,8 @@ from epubforge.editor.state import (
     resolve_editor_paths,
     write_initial_state,
 )
+from collections.abc import Callable
+
 from epubforge.io import load_book, save_book
 from epubforge.ir.semantic import Book, Chapter, Provenance
 
@@ -31,26 +33,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()
 
 
-def _prov(page: int = 1) -> Provenance:
-    return Provenance(page=page, source="passthrough")
-
-
-def _legacy_book() -> Book:
+def _legacy_book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         title="Legacy Sample",
         chapters=[
             Chapter(
                 title="Chapter 1",
                 blocks=[
-                    Paragraph(text="Alpha paragraph.", provenance=_prov(1)),
-                    Paragraph(text="Beta paragraph.", provenance=_prov(1)),
+                    Paragraph(text="Alpha paragraph.", provenance=prov(1)),
+                    Paragraph(text="Beta paragraph.", provenance=prov(1)),
                 ],
             )
         ],
     )
 
 
-def _verified_legacy_book() -> Book:
+def _verified_legacy_book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         title="Verified Synthetic",
         chapters=[
@@ -60,21 +58,21 @@ def _verified_legacy_book() -> Book:
                     Paragraph(
                         text="Intro \x02fn-1-①\x03 text.",
                         style_class="epigraph",
-                        provenance=_prov(1),
+                        provenance=prov(1),
                     ),
-                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=_prov(1)),
-                    Figure(caption="Synthetic figure", provenance=_prov(1)),
+                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=prov(1)),
+                    Figure(caption="Synthetic figure", provenance=prov(1)),
                     Table(
                         html="<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></tbody></table>",
                         table_title="Table 1",
                         caption="Synthetic table",
-                        provenance=_prov(1),
+                        provenance=prov(1),
                     ),
                 ],
             ),
             Chapter(
                 title="Chapter 2",
-                blocks=[Paragraph(text="Clean follow-up paragraph.", provenance=_prov(2))],
+                blocks=[Paragraph(text="Clean follow-up paragraph.", provenance=prov(2))],
             ),
         ],
     )
@@ -85,23 +83,23 @@ def _invoke(args: list[str], input: str | None = None, env: dict[str, str] | Non
     return runner.invoke(app, args, input=input, env=env, catch_exceptions=False)
 
 
-def _write_legacy_artifact(work_dir: Path, filename: str) -> Path:
+def _write_legacy_artifact(prov: Callable[..., Provenance], work_dir: Path, filename: str) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact = work_dir / filename
-    save_book(_legacy_book(), artifact, allow_legacy=True)
+    save_book(_legacy_book(prov), artifact, allow_legacy=True)
     return artifact
 
 
-def _write_verified_legacy_artifact(work_dir: Path, filename: str) -> Path:
+def _write_verified_legacy_artifact(prov: Callable[..., Provenance], work_dir: Path, filename: str) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact = work_dir / filename
-    save_book(_verified_legacy_book(), artifact, allow_legacy=True)
+    save_book(_verified_legacy_book(prov), artifact, allow_legacy=True)
     return artifact
 
 
-def test_init_command_creates_edit_state(tmp_path: Path) -> None:
+def test_init_command_creates_edit_state(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "sample-init"
-    save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
+    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
 
     result = _invoke(["editor", "init", str(work_dir)])
 
@@ -119,9 +117,9 @@ def test_init_command_creates_edit_state(tmp_path: Path) -> None:
     assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
 
 
-def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_memory(tmp_path: Path) -> None:
+def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_memory(prov, tmp_path: Path) -> None:
     base_work = tmp_path / "legacy-a"
-    _write_legacy_artifact(base_work, "07_footnote_verified.json")
+    _write_legacy_artifact(prov, base_work, "07_footnote_verified.json")
     result = _invoke(
         ["editor", "import-legacy", str(base_work), "--from", "07_footnote_verified.json"],
     )
@@ -143,7 +141,7 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
     assert current_log[0].op.purpose == "legacy_baseline"
 
     verified_work = tmp_path / "legacy-b"
-    _write_legacy_artifact(verified_work, "06_proofread.json")
+    _write_legacy_artifact(prov, verified_work, "06_proofread.json")
     verified = _invoke(
         ["editor", "import-legacy", str(verified_work), "--from", "06_proofread.json", "--assume-verified"],
     )
@@ -161,9 +159,9 @@ def test_import_legacy_writes_noop_baseline_and_assume_verified_only_changes_mem
     assert all(status["read_passes"] == 1 for status in verified_memory["chapter_status"].values())
 
 
-def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Path) -> None:
+def test_doctor_propose_apply_queue_and_render_prompt_work_together(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-doctor"
-    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
     imported = _invoke(
         ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
     )
@@ -235,9 +233,9 @@ def test_doctor_propose_apply_queue_and_render_prompt_work_together(tmp_path: Pa
     assert missing_meta.exit_code != 0
 
 
-def test_book_lock_run_script_snapshot_and_compact_commands(tmp_path: Path) -> None:
+def test_book_lock_run_script_snapshot_and_compact_commands(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "legacy-tools"
-    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
     imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
     assert imported.exit_code == 0, imported.output
 
@@ -294,9 +292,9 @@ print(json.dumps(payload, ensure_ascii=False))
     assert current_log[0].op.op == "compact_marker"
 
 
-def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_doctor_rounds(tmp_path: Path) -> None:
+def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_doctor_rounds(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "verified-import"
-    _write_verified_legacy_artifact(work_dir, "07_footnote_verified.json")
+    _write_verified_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
 
     imported = _invoke(
         ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json", "--assume-verified"],
@@ -334,10 +332,10 @@ def test_import_legacy_assume_verified_synthetic_regression_converges_after_two_
 # ---------------------------------------------------------------------------
 
 
-def _init_work_dir(tmp_path: Path) -> Path:
+def _init_work_dir(prov: Callable[..., Provenance], tmp_path: Path) -> Path:
     """Create and initialize a minimal work dir; return it."""
     work_dir = tmp_path / "work"
-    save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
+    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
     result = _invoke(["editor", "init", str(work_dir)])
     assert result.exit_code == 0, result.output
     return work_dir
@@ -352,8 +350,8 @@ def _run_script_exec(work_dir: Path, exec_path: str):
 # ---------------------------------------------------------------------------
 
 
-def test_run_script_rejects_absolute_outside_scratch(tmp_path: Path) -> None:
-    work_dir = _init_work_dir(tmp_path)
+def test_run_script_rejects_absolute_outside_scratch(prov, tmp_path: Path) -> None:
+    work_dir = _init_work_dir(prov, tmp_path)
     outside = tmp_path / "evil.py"
     outside.write_text("pass\n", encoding="utf-8")
 
@@ -364,8 +362,8 @@ def test_run_script_rejects_absolute_outside_scratch(tmp_path: Path) -> None:
     assert "scratch_dir" in payload["error"]
 
 
-def test_run_script_rejects_dotdot_escape(tmp_path: Path) -> None:
-    work_dir = _init_work_dir(tmp_path)
+def test_run_script_rejects_dotdot_escape(prov, tmp_path: Path) -> None:
+    work_dir = _init_work_dir(prov, tmp_path)
     paths = resolve_editor_paths(work_dir)
     # Create a real .py file one level above scratch_dir
     escape_target = paths.scratch_dir.parent / "escape.py"
@@ -379,8 +377,8 @@ def test_run_script_rejects_dotdot_escape(tmp_path: Path) -> None:
     assert "scratch_dir" in payload["error"]
 
 
-def test_run_script_rejects_symlink_escape(tmp_path: Path) -> None:
-    work_dir = _init_work_dir(tmp_path)
+def test_run_script_rejects_symlink_escape(prov, tmp_path: Path) -> None:
+    work_dir = _init_work_dir(prov, tmp_path)
     paths = resolve_editor_paths(work_dir)
     # Create a real .py file outside scratch and a symlink inside scratch pointing to it
     real_script = tmp_path / "real_outside.py"
@@ -396,8 +394,8 @@ def test_run_script_rejects_symlink_escape(tmp_path: Path) -> None:
     assert "scratch_dir" in payload["error"]
 
 
-def test_run_script_rejects_non_py_suffix(tmp_path: Path) -> None:
-    work_dir = _init_work_dir(tmp_path)
+def test_run_script_rejects_non_py_suffix(prov, tmp_path: Path) -> None:
+    work_dir = _init_work_dir(prov, tmp_path)
     paths = resolve_editor_paths(work_dir)
     paths.scratch_dir.mkdir(parents=True, exist_ok=True)
     sh_file = paths.scratch_dir / "script.sh"
@@ -410,8 +408,8 @@ def test_run_script_rejects_non_py_suffix(tmp_path: Path) -> None:
     assert ".py" in payload["error"]
 
 
-def test_run_script_accepts_relative_inside_scratch(tmp_path: Path) -> None:
-    work_dir = _init_work_dir(tmp_path)
+def test_run_script_accepts_relative_inside_scratch(prov, tmp_path: Path) -> None:
+    work_dir = _init_work_dir(prov, tmp_path)
     paths = resolve_editor_paths(work_dir)
     paths.scratch_dir.mkdir(parents=True, exist_ok=True)
     good_script = paths.scratch_dir / "good.py"
@@ -446,10 +444,10 @@ def _make_valid_envelope(block_uid: str, text_value: str = "Alpha paragraph.") -
     }
 
 
-def _setup_initialized_work(tmp_path: Path) -> tuple[Path, str]:
+def _setup_initialized_work(prov: Callable[..., Provenance], tmp_path: Path) -> tuple[Path, str]:
     """Return (work_dir, block_uid_of_first_block)."""
     work_dir = tmp_path / "work"
-    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
     imported = _invoke(["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"])
     assert imported.exit_code == 0, imported.output
     book = load_book(resolve_editor_paths(work_dir).book_path)
@@ -458,8 +456,8 @@ def _setup_initialized_work(tmp_path: Path) -> tuple[Path, str]:
     return work_dir, block_uid
 
 
-def test_propose_op_all_invalid_rejects_batch(tmp_path: Path) -> None:
-    work_dir, _block_uid = _setup_initialized_work(tmp_path)
+def test_propose_op_all_invalid_rejects_batch(prov, tmp_path: Path) -> None:
+    work_dir, _block_uid = _setup_initialized_work(prov, tmp_path)
     bad_envelope = {"not": "valid"}
 
     result = _invoke(
@@ -478,8 +476,8 @@ def test_propose_op_all_invalid_rejects_batch(tmp_path: Path) -> None:
     assert not staging.exists() or staging.read_text(encoding="utf-8").strip() == ""
 
 
-def test_propose_op_mixed_batch_rejected_entirely(tmp_path: Path) -> None:
-    work_dir, block_uid = _setup_initialized_work(tmp_path)
+def test_propose_op_mixed_batch_rejected_entirely(prov, tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(prov, tmp_path)
     good = _make_valid_envelope(block_uid)
     bad = {"not": "valid"}
 
@@ -499,8 +497,8 @@ def test_propose_op_mixed_batch_rejected_entirely(tmp_path: Path) -> None:
     assert not staging.exists() or staging.read_text(encoding="utf-8").strip() == ""
 
 
-def test_propose_op_all_valid_appended_atomically(tmp_path: Path) -> None:
-    work_dir, block_uid = _setup_initialized_work(tmp_path)
+def test_propose_op_all_valid_appended_atomically(prov, tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(prov, tmp_path)
     env1 = _make_valid_envelope(block_uid, "Alpha paragraph.")
     env2 = _make_valid_envelope(block_uid, "Beta value.")
 
@@ -525,12 +523,12 @@ def test_propose_op_all_valid_appended_atomically(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_book_and_memory(work_dir: Path) -> tuple[Book, EditMemory]:
+def _make_book_and_memory(prov: Callable[..., Provenance], work_dir: Path) -> tuple[Book, EditMemory]:
     """Create an initialized book and matching memory for a work_dir."""
     from datetime import UTC, datetime
 
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    book = initialize_book_state(_legacy_book(), initialized_at=now)
+    book = initialize_book_state(_legacy_book(prov), initialized_at=now)
     paths = resolve_editor_paths(work_dir)
     memory = EditMemory.create(
         book_id=book_id_from_paths(paths),
@@ -541,11 +539,11 @@ def _make_book_and_memory(work_dir: Path) -> tuple[Book, EditMemory]:
     return book, memory
 
 
-def test_write_initial_state_does_not_touch_book_json(tmp_path: Path) -> None:
+def test_write_initial_state_does_not_touch_book_json(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "wis-no-book"
     work_dir.mkdir()
     paths = resolve_editor_paths(work_dir)
-    book, memory = _make_book_and_memory(work_dir)
+    book, memory = _make_book_and_memory(prov, work_dir)
 
     write_initial_state(paths, book=book, memory=memory, leases=LeaseState())
 
@@ -559,9 +557,9 @@ def test_write_initial_state_does_not_touch_book_json(tmp_path: Path) -> None:
     assert paths.staging_path.exists()
 
 
-def test_run_init_persists_book(tmp_path: Path) -> None:
+def test_run_init_persists_book(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "init-persists"
-    save_book(_legacy_book(), work_dir / "05_semantic.json", allow_legacy=True)
+    save_book(_legacy_book(prov), work_dir / "05_semantic.json", allow_legacy=True)
 
     result = _invoke(["editor", "init", str(work_dir)])
 
@@ -574,9 +572,9 @@ def test_run_init_persists_book(tmp_path: Path) -> None:
     assert book.uid_seed
 
 
-def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
+def test_run_import_legacy_persists_book_and_log(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "import-persists"
-    _write_legacy_artifact(work_dir, "07_footnote_verified.json")
+    _write_legacy_artifact(prov, work_dir, "07_footnote_verified.json")
 
     result = _invoke(
         ["editor", "import-legacy", str(work_dir), "--from", "07_footnote_verified.json"],
@@ -600,8 +598,8 @@ def test_run_import_legacy_persists_book_and_log(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_propose_op_accepts_memory_patches_in_envelope(tmp_path: Path) -> None:
-    work_dir, block_uid = _setup_initialized_work(tmp_path)
+def test_propose_op_accepts_memory_patches_in_envelope(prov, tmp_path: Path) -> None:
+    work_dir, block_uid = _setup_initialized_work(prov, tmp_path)
 
     envelope = _make_valid_envelope(block_uid)
     envelope["memory_patches"] = [

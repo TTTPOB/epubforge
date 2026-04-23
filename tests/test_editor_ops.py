@@ -8,10 +8,6 @@ from pydantic import ValidationError
 from epubforge.editor.ops import InsertBlock, OpEnvelope, SplitMergedTable
 
 
-def _prov(page: int = 1) -> dict[str, object]:
-    return {"page": page, "source": "passthrough"}
-
-
 def _base_envelope(op: dict[str, object], **overrides: object) -> dict[str, object]:
     env: dict[str, object] = {
         "op_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -27,7 +23,7 @@ def _base_envelope(op: dict[str, object], **overrides: object) -> dict[str, obje
 
 
 class TestOpEnvelopeRoundTrip:
-    def test_round_trip_with_insert_block(self) -> None:
+    def test_round_trip_with_insert_block(self, prov) -> None:
         env = OpEnvelope.model_validate(
             _base_envelope(
                 {
@@ -39,7 +35,7 @@ class TestOpEnvelopeRoundTrip:
                     "block_data": {
                         "text": "Inserted paragraph.",
                         "role": "body",
-                        "provenance": _prov(),
+                        "provenance": prov().model_dump(mode="json"),
                     },
                 },
                 preconditions=[
@@ -147,11 +143,11 @@ class TestValidators:
             )
 
     @pytest.mark.parametrize("field", ["uid", "kind"])
-    def test_insert_block_rejects_block_data_identity_fields(self, field: str) -> None:
+    def test_insert_block_rejects_block_data_identity_fields(self, prov, field: str) -> None:
         block_data = {
             "text": "Inserted paragraph.",
             "role": "body",
-            "provenance": _prov(),
+            "provenance": prov().model_dump(mode="json"),
             field: "bad-value",
         }
 
@@ -298,7 +294,7 @@ class TestValidators:
                 )
             )
 
-    def test_irreversible_flag_is_derived_for_topology_and_all_merge_blocks(self) -> None:
+    def test_irreversible_flag_is_derived_for_topology_and_all_merge_blocks(self, prov) -> None:
         relocate_env = OpEnvelope.model_validate(
             _base_envelope(
                 {
@@ -332,14 +328,14 @@ class TestValidators:
                             "uid": "blk-1",
                             "text": "First",
                             "role": "body",
-                            "provenance": _prov(),
+                            "provenance": prov().model_dump(mode="json"),
                         },
                         {
                             "kind": "paragraph",
                             "uid": "blk-2",
                             "text": "Second",
                             "role": "body",
-                            "provenance": _prov(),
+                            "provenance": prov().model_dump(mode="json"),
                         },
                     ],
                 }
@@ -350,7 +346,7 @@ class TestValidators:
         assert merge_env.irreversible is True
         assert merge_with_snapshot_env.irreversible is True
 
-    def test_merge_blocks_snapshot_must_align_with_source_uids(self) -> None:
+    def test_merge_blocks_snapshot_must_align_with_source_uids(self, prov) -> None:
         with pytest.raises(ValidationError):
             OpEnvelope.model_validate(
                 _base_envelope(
@@ -365,14 +361,14 @@ class TestValidators:
                                 "uid": "blk-2",
                                 "text": "Second",
                                 "role": "body",
-                                "provenance": _prov(),
+                                "provenance": prov().model_dump(mode="json"),
                             },
                             {
                                 "kind": "paragraph",
                                 "uid": "blk-1",
                                 "text": "First",
                                 "role": "body",
-                                "provenance": _prov(),
+                                "provenance": prov().model_dump(mode="json"),
                             },
                         ],
                     }

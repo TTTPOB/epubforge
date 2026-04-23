@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -32,11 +33,7 @@ from epubforge.editor.ops import (
 from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table, TableMergeRecord
 
 
-def _prov(page: int = 1) -> Provenance:
-    return Provenance(page=page, source="passthrough")
-
-
-def _book() -> Book:
+def _book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         version=0,
         initialized_at="2026-04-23T08:00:00Z",
@@ -47,16 +44,16 @@ def _book() -> Book:
                 uid="ch-1",
                 title="Chapter 1",
                 blocks=[
-                    Paragraph(uid="p-1", text="Alpha", provenance=_prov()),
-                    Heading(uid="h-1", text="Heading", level=2, id="sec-1", provenance=_prov()),
-                    Footnote(uid="fn-1", callout="①", text="Note", paired=False, orphan=False, provenance=_prov()),
+                    Paragraph(uid="p-1", text="Alpha", provenance=prov()),
+                    Heading(uid="h-1", text="Heading", level=2, id="sec-1", provenance=prov()),
+                    Footnote(uid="fn-1", callout="①", text="Note", paired=False, orphan=False, provenance=prov()),
                 ],
             )
         ],
     )
 
 
-def _topology_book() -> Book:
+def _topology_book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         version=0,
         initialized_at="2026-04-23T08:00:00Z",
@@ -67,16 +64,16 @@ def _topology_book() -> Book:
                 uid="ch-1",
                 title="Chapter 1",
                 blocks=[
-                    Paragraph(uid="p-1", text="Alpha", provenance=_prov(1)),
-                    Paragraph(uid="p-2", text="Beta", provenance=_prov(1)),
+                    Paragraph(uid="p-1", text="Alpha", provenance=prov(1)),
+                    Paragraph(uid="p-2", text="Beta", provenance=prov(1)),
                 ],
             ),
             Chapter(
                 uid="ch-2",
                 title="Chapter 2",
                 blocks=[
-                    Paragraph(uid="p-3", text="Gamma", provenance=_prov(2)),
-                    Paragraph(uid="p-4", text="Delta", provenance=_prov(2)),
+                    Paragraph(uid="p-3", text="Gamma", provenance=prov(2)),
+                    Paragraph(uid="p-4", text="Delta", provenance=prov(2)),
                 ],
             ),
         ],
@@ -106,9 +103,9 @@ def _env(op, *, base_version: int, op_id: str | None = None, preconditions: list
     )
 
 
-def test_apply_basic_path_increments_version() -> None:
+def test_apply_basic_path_increments_version(prov) -> None:
     result = apply_envelope(
-        _book(),
+        _book(prov),
         _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=0),
         now=lambda: "2026-04-23T08:00:01Z",
     )
@@ -121,17 +118,17 @@ def test_apply_basic_path_increments_version() -> None:
     assert result.accepted_envelopes[0].applied_at == "2026-04-23T08:00:01Z"
 
 
-def test_apply_rejects_duplicate_future_precondition_and_uid_collision() -> None:
+def test_apply_rejects_duplicate_future_precondition_and_uid_collision(prov) -> None:
     env = _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=0)
     with pytest.raises(ApplyError, match="duplicate op_id"):
-        apply_envelope(_book(), env, existing_op_ids={env.op_id})
+        apply_envelope(_book(prov), env, existing_op_ids={env.op_id})
 
     with pytest.raises(ApplyError, match="future-version rejection"):
-        apply_envelope(_book(), _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=1))
+        apply_envelope(_book(prov), _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=1))
 
     with pytest.raises(ApplyError, match="precondition failed"):
         apply_envelope(
-            _book(),
+            _book(prov),
             _env(
                 SetText(op="set_text", block_uid="p-1", field="text", value="Beta"),
                 base_version=0,
@@ -141,7 +138,7 @@ def test_apply_rejects_duplicate_future_precondition_and_uid_collision() -> None
 
     with pytest.raises(ApplyError, match="new block uid collision"):
         apply_envelope(
-            _book(),
+            _book(prov),
             _env(
                 InsertBlock(
                     op="insert_block",
@@ -149,16 +146,16 @@ def test_apply_rejects_duplicate_future_precondition_and_uid_collision() -> None
                     after_uid="p-1",
                     block_kind="paragraph",
                     new_block_uid="p-1",
-                    block_data={"text": "Inserted", "role": "body", "provenance": _prov().model_dump(mode="json")},
+                    block_data={"text": "Inserted", "role": "body", "provenance": prov().model_dump(mode="json")},
                 ),
                 base_version=0,
             ),
         )
 
 
-def test_noop_compact_marker_and_revert_semantics() -> None:
+def test_noop_compact_marker_and_revert_semantics(prov) -> None:
     noop_result = apply_envelope(
-        _book(),
+        _book(prov),
         _env(NoopOp(op="noop", purpose="milestone"), base_version=0),
         now=lambda: "2026-04-23T08:00:01Z",
     )
@@ -187,7 +184,7 @@ def test_noop_compact_marker_and_revert_semantics() -> None:
             after_uid="p-1",
             block_kind="paragraph",
             new_block_uid="p-2",
-            block_data={"text": "Inserted", "role": "body", "provenance": _prov().model_dump(mode="json")},
+            block_data={"text": "Inserted", "role": "body", "provenance": prov().model_dump(mode="json")},
         ),
         base_version=1,
     )
@@ -213,7 +210,7 @@ def test_noop_compact_marker_and_revert_semantics() -> None:
     assert [block.uid for block in revert_result.book.chapters[0].blocks] == ["p-1", "h-1", "fn-1"]
 
 
-def test_revert_target_effect_preconditions_block_later_edits() -> None:
+def test_revert_target_effect_preconditions_block_later_edits(prov) -> None:
     insert_env = _env(
         InsertBlock(
             op="insert_block",
@@ -221,11 +218,11 @@ def test_revert_target_effect_preconditions_block_later_edits() -> None:
             after_uid="p-1",
             block_kind="paragraph",
             new_block_uid="p-2",
-            block_data={"text": "Inserted", "role": "body", "provenance": _prov().model_dump(mode="json")},
+            block_data={"text": "Inserted", "role": "body", "provenance": prov().model_dump(mode="json")},
         ),
         base_version=0,
     )
-    inserted = apply_envelope(_book(), insert_env, now=lambda: "2026-04-23T08:00:01Z")
+    inserted = apply_envelope(_book(prov), insert_env, now=lambda: "2026-04-23T08:00:01Z")
     deleted = apply_envelope(
         inserted.book,
         _env(DeleteBlock(op="delete_block", block_uid="p-2"), base_version=1),
@@ -243,8 +240,8 @@ def test_revert_target_effect_preconditions_block_later_edits() -> None:
         )
 
 
-def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> None:
-    baseline = _book()
+def test_apply_log_replays_inverse_and_skips_revert_request(prov, tmp_path: Path) -> None:
+    baseline = _book(prov)
     insert_env = _env(
         InsertBlock(
             op="insert_block",
@@ -252,7 +249,7 @@ def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> N
             after_uid="p-1",
             block_kind="paragraph",
             new_block_uid="p-2",
-            block_data={"text": "Inserted", "role": "body", "provenance": _prov().model_dump(mode="json")},
+            block_data={"text": "Inserted", "role": "body", "provenance": prov().model_dump(mode="json")},
         ),
         base_version=0,
     )
@@ -270,7 +267,7 @@ def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> N
     lines = [env.model_dump_json() for env in (*insert_result.accepted_envelopes, *revert_result.accepted_envelopes)]
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    replayed = apply_log(_book(), log_path)
+    replayed = apply_log(_book(prov), log_path)
 
     assert revert_result.accepted_envelopes[0].applied_version == 1
     assert revert_result.accepted_envelopes[1].applied_version == 2
@@ -315,8 +312,8 @@ def test_apply_log_replays_inverse_and_skips_revert_request(tmp_path: Path) -> N
         ),
     ],
 )
-def test_revert_supports_set_ops(op, preconditions, assertion) -> None:
-    applied = apply_envelope(_book(), _env(op, base_version=0, preconditions=preconditions), now=lambda: "2026-04-23T08:00:01Z")
+def test_revert_supports_set_ops(prov, op, preconditions, assertion) -> None:
+    applied = apply_envelope(_book(prov), _env(op, base_version=0, preconditions=preconditions), now=lambda: "2026-04-23T08:00:01Z")
     revert = apply_envelope(
         applied.book,
         _env(RevertOp(op="revert", target_op_id=applied.accepted_envelopes[0].op_id), base_version=1),
@@ -331,12 +328,12 @@ def test_revert_supports_set_ops(op, preconditions, assertion) -> None:
     assert revert.accepted_envelopes[1].base_version == 1
 
 
-def test_revert_supports_split_block_and_at_sentence_max_splits() -> None:
-    book = _book()
+def test_revert_supports_split_block_and_at_sentence_max_splits(prov) -> None:
+    book = _book(prov)
     book.chapters[0].blocks[0] = Paragraph(
         uid="p-1",
         text="Alpha. Beta. Gamma. Delta.",
-        provenance=_prov(),
+        provenance=prov(),
     )
     split = SplitBlock(
         op="split_block",
@@ -373,18 +370,18 @@ def test_revert_supports_split_block_and_at_sentence_max_splits() -> None:
     assert restored.text == "Alpha. Beta. Gamma. Delta."
 
 
-def test_revert_rejects_merge_blocks_even_with_original_blocks_snapshot() -> None:
+def test_revert_rejects_merge_blocks_even_with_original_blocks_snapshot(prov) -> None:
     merge = MergeBlocks(
         op="merge_blocks",
         block_uids=["p-1", "p-2"],
         join="concat",
         original_blocks=[
-            {"kind": "paragraph", "uid": "p-1", "text": "Alpha", "role": "body", "provenance": _prov().model_dump(mode="json")},
-            {"kind": "paragraph", "uid": "p-2", "text": "Beta", "role": "body", "provenance": _prov().model_dump(mode="json")},
+            {"kind": "paragraph", "uid": "p-1", "text": "Alpha", "role": "body", "provenance": prov().model_dump(mode="json")},
+            {"kind": "paragraph", "uid": "p-2", "text": "Beta", "role": "body", "provenance": prov().model_dump(mode="json")},
         ],
     )
-    book = _book()
-    book.chapters[0].blocks.insert(1, Paragraph(uid="p-2", text="Beta", provenance=_prov()))
+    book = _book(prov)
+    book.chapters[0].blocks.insert(1, Paragraph(uid="p-2", text="Beta", provenance=prov()))
     applied = apply_envelope(book, _env(merge, base_version=0), now=lambda: "2026-04-23T08:00:01Z")
 
     assert applied.accepted_envelopes[0].irreversible is True
@@ -398,18 +395,18 @@ def test_revert_rejects_merge_blocks_even_with_original_blocks_snapshot() -> Non
         )
 
 
-def test_apply_rejects_intra_chapter_op_without_matching_lease() -> None:
+def test_apply_rejects_intra_chapter_op_without_matching_lease(prov) -> None:
     with pytest.raises(ApplyError, match="chapter lease"):
         apply_envelope(
-            _book(),
+            _book(prov),
             _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=0),
             lease_state=LeaseState(),
             now=lambda: "2026-04-23T08:00:01Z",
         )
 
 
-def test_apply_rejects_topology_op_without_book_lock() -> None:
-    book = _topology_book()
+def test_apply_rejects_topology_op_without_book_lock(prov) -> None:
+    book = _topology_book(prov)
     memory = _memory_for(book)
     op = MergeChapters(
         op="merge_chapters",
@@ -432,8 +429,8 @@ def test_apply_rejects_topology_op_without_book_lock() -> None:
         )
 
 
-def test_merge_chapters_migrates_chapter_status_into_new_uid() -> None:
-    book = _topology_book()
+def test_merge_chapters_migrates_chapter_status_into_new_uid(prov) -> None:
+    book = _topology_book(prov)
     memory = _memory_for(book).model_copy(
         update={
             "chapter_status": {
@@ -490,8 +487,8 @@ def test_merge_chapters_migrates_chapter_status_into_new_uid() -> None:
     assert merged.notes == "alpha notes\nbeta notes"
 
 
-def test_split_chapter_preserves_old_status_and_creates_fresh_new_status() -> None:
-    book = _topology_book()
+def test_split_chapter_preserves_old_status_and_creates_fresh_new_status(prov) -> None:
+    book = _topology_book(prov)
     memory = _memory_for(book).model_copy(
         update={
             "chapter_status": {
@@ -538,8 +535,8 @@ def test_split_chapter_preserves_old_status_and_creates_fresh_new_status() -> No
     assert new_status.notes == "split from ch-1"
 
 
-def test_relocate_block_keeps_existing_chapter_uids_and_status_map() -> None:
-    book = _topology_book()
+def test_relocate_block_keeps_existing_chapter_uids_and_status_map(prov) -> None:
+    book = _topology_book(prov)
     memory = _memory_for(book)
     leases = LeaseState()
     assert leases.acquire_book_exclusive("agent-1", "topology_op", now="2026-04-23T08:00:00Z") is not None
@@ -572,7 +569,7 @@ def test_relocate_block_keeps_existing_chapter_uids_and_status_map() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _table_book() -> Book:
+def _table_book(prov: Callable[..., Provenance]) -> Book:
     """Book with a multi_page Table that has two merged segments."""
     merged_html = (
         "<table>"
@@ -591,12 +588,12 @@ def _table_book() -> Book:
                 uid="ch-1",
                 title="Chapter 1",
                 blocks=[
-                    Paragraph(uid="p-before", text="Before table.", provenance=_prov(2)),
+                    Paragraph(uid="p-before", text="Before table.", provenance=prov(2)),
                     Table(
                         uid="tbl-merged",
                         html=merged_html,
                         multi_page=True,
-                        provenance=_prov(3),
+                        provenance=prov(3),
                         merge_record=TableMergeRecord(
                             segment_html=[
                                 "<tr><td>Row A</td></tr>",
@@ -607,7 +604,7 @@ def _table_book() -> Book:
                             column_widths=[1, 1],
                         ),
                     ),
-                    Paragraph(uid="p-after", text="After table.", provenance=_prov(4)),
+                    Paragraph(uid="p-after", text="After table.", provenance=prov(4)),
                 ],
             )
         ],
@@ -630,8 +627,8 @@ def _split_merged_table_op(block_uid: str = "tbl-merged") -> dict[str, object]:
 class TestSplitMergedTableApply:
     """Apply-layer tests for SplitMergedTable op (PR-D §1.5b)."""
 
-    def test_split_replaces_merged_block_with_two_segment_blocks(self) -> None:
-        book = _table_book()
+    def test_split_replaces_merged_block_with_two_segment_blocks(self, prov) -> None:
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -644,8 +641,8 @@ class TestSplitMergedTableApply:
         assert isinstance(blocks[2], Table)
         assert isinstance(blocks[3], Paragraph)
 
-    def test_split_segment_html_and_pages_are_correct(self) -> None:
-        book = _table_book()
+    def test_split_segment_html_and_pages_are_correct(self, prov) -> None:
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -658,9 +655,9 @@ class TestSplitMergedTableApply:
         assert seg1.html == "<table><tbody><tr><td>Row B</td></tr></tbody></table>"
         assert seg1.provenance.page == 4
 
-    def test_split_new_blocks_have_unique_runtime_uids(self) -> None:
+    def test_split_new_blocks_have_unique_runtime_uids(self, prov) -> None:
         """New block uids are generated at apply time; they must not equal the original."""
-        book = _table_book()
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -674,9 +671,9 @@ class TestSplitMergedTableApply:
         assert seg0.uid is not None
         assert seg1.uid is not None
 
-    def test_split_does_not_assert_original_uid_restored(self) -> None:
+    def test_split_does_not_assert_original_uid_restored(self, prov) -> None:
         """Regression: apply must not try to reuse pre-merge constituent uids."""
-        book = _table_book()
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -688,8 +685,8 @@ class TestSplitMergedTableApply:
         assert seg0.uid not in ("tbl-seg-0-pre-merge", "tbl-seg-1-pre-merge")
         assert seg1.uid not in ("tbl-seg-0-pre-merge", "tbl-seg-1-pre-merge")
 
-    def test_split_first_segment_is_not_continuation(self) -> None:
-        book = _table_book()
+    def test_split_first_segment_is_not_continuation(self, prov) -> None:
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -700,8 +697,8 @@ class TestSplitMergedTableApply:
         assert seg0.continuation is False
         assert seg1.continuation is True
 
-    def test_split_sets_multi_page_false_on_new_blocks(self) -> None:
-        book = _table_book()
+    def test_split_sets_multi_page_false_on_new_blocks(self, prov) -> None:
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -712,15 +709,15 @@ class TestSplitMergedTableApply:
         assert seg0.multi_page is False
         assert seg1.multi_page is False
 
-    def test_split_requires_target_block_to_be_multi_page(self) -> None:
+    def test_split_requires_target_block_to_be_multi_page(self, prov) -> None:
         """Applying to a non-multi_page Table must raise ApplyError."""
-        book = _table_book()
+        book = _table_book(prov)
         # Override the merged table with a normal (non-multi_page) table.
         book.chapters[0].blocks[1] = Table(
             uid="tbl-merged",
             html="<table><tbody><tr><td>X</td></tr></tbody></table>",
             multi_page=False,
-            provenance=_prov(3),
+            provenance=prov(3),
         )
         with pytest.raises(ApplyError, match="not a multi_page Table"):
             apply_envelope(
@@ -729,9 +726,9 @@ class TestSplitMergedTableApply:
                 now=lambda: "2026-04-23T08:00:01Z",
             )
 
-    def test_split_requires_target_block_to_be_a_table(self) -> None:
+    def test_split_requires_target_block_to_be_a_table(self, prov) -> None:
         """Applying to a Paragraph must raise ApplyError."""
-        book = _table_book()
+        book = _table_book(prov)
         with pytest.raises(ApplyError, match="requires a Table block"):
             apply_envelope(
                 book,
@@ -739,8 +736,8 @@ class TestSplitMergedTableApply:
                 now=lambda: "2026-04-23T08:00:01Z",
             )
 
-    def test_split_increments_book_version(self) -> None:
-        book = _table_book()
+    def test_split_increments_book_version(self, prov) -> None:
+        book = _table_book(prov)
         result = apply_envelope(
             book,
             _env(_split_merged_table_op(), base_version=0),
@@ -748,8 +745,8 @@ class TestSplitMergedTableApply:
         )
         assert result.book.op_log_version == 1
 
-    def test_split_three_segments_produces_three_blocks(self) -> None:
-        book = _table_book()
+    def test_split_three_segments_produces_three_blocks(self, prov) -> None:
+        book = _table_book(prov)
         op = {
             "op": "split_merged_table",
             "block_uid": "tbl-merged",
@@ -780,9 +777,9 @@ class TestSplitMergedTableApply:
 # ---------------------------------------------------------------------------
 
 
-def test_apply_queue_merges_memory_patch_via_merge_edit_memory() -> None:
+def test_apply_queue_merges_memory_patch_via_merge_edit_memory(prov) -> None:
     """Envelope with a valid memory_patches entry must fold the patch into working_memory."""
-    book = _book()
+    book = _book(prov)
     memory = _memory_for(book)
     patch = MemoryPatch(
         chapter_status=[
@@ -835,9 +832,9 @@ def test_apply_queue_merges_memory_patch_via_merge_edit_memory() -> None:
     assert ch_status.notes == "patched note"
 
 
-def test_apply_queue_rejects_envelope_when_memory_merge_fails() -> None:
+def test_apply_queue_rejects_envelope_when_memory_merge_fails(prov) -> None:
     """If merge_edit_memory raises, apply_envelope must raise ApplyError; book/memory unchanged."""
-    book = _book()
+    book = _book(prov)
     memory = _memory_for(book)
     env = OpEnvelope.model_validate(
         {

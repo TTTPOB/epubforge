@@ -30,35 +30,31 @@ from epubforge.ir.semantic import (
 )
 
 
-def _prov(page: int = 1, source: Literal["llm", "vlm", "passthrough"] = "passthrough") -> Provenance:
-    return Provenance(page=page, source=source)
-
-
 class TestParagraph:
-    def test_round_trip(self) -> None:
-        p = Paragraph(text="Hello world.", provenance=_prov())
+    def test_round_trip(self, prov) -> None:
+        p = Paragraph(text="Hello world.", provenance=prov())
         d = p.model_dump()
         assert Paragraph.model_validate(d).text == "Hello world."
 
-    def test_kind_is_paragraph(self) -> None:
-        p = Paragraph(text="x", provenance=_prov())
+    def test_kind_is_paragraph(self, prov) -> None:
+        p = Paragraph(text="x", provenance=prov())
         assert p.kind == "paragraph"
 
 
 class TestHeading:
-    def test_defaults(self) -> None:
-        h = Heading(text="Chapter 1", provenance=_prov())
+    def test_defaults(self, prov) -> None:
+        h = Heading(text="Chapter 1", provenance=prov())
         assert h.level == 1
         assert h.kind == "heading"
 
-    def test_custom_level(self) -> None:
-        h = Heading(text="Sec", level=3, provenance=_prov())
+    def test_custom_level(self, prov) -> None:
+        h = Heading(text="Sec", level=3, provenance=prov())
         assert h.level == 3
 
 
 class TestFootnote:
-    def test_round_trip(self) -> None:
-        fn = Footnote(callout="1", text="See also...", provenance=_prov())
+    def test_round_trip(self, prov) -> None:
+        fn = Footnote(callout="1", text="See also...", provenance=prov())
         assert fn.kind == "footnote"
         assert fn.callout == "1"
 
@@ -70,25 +66,25 @@ class TestBook:
         assert b.authors == []
         assert b.language == "en"
 
-    def test_chapter_with_mixed_blocks(self) -> None:
+    def test_chapter_with_mixed_blocks(self, prov) -> None:
         ch = Chapter(
             title="Intro",
             blocks=[
-                Paragraph(text="First paragraph.", provenance=_prov()),
-                Heading(text="Background", level=2, provenance=_prov()),
-                Footnote(callout="1", text="A note.", provenance=_prov()),
+                Paragraph(text="First paragraph.", provenance=prov()),
+                Heading(text="Background", level=2, provenance=prov()),
+                Footnote(callout="1", text="A note.", provenance=prov()),
             ],
         )
         b = Book(title="My Book", chapters=[ch])
         assert len(b.chapters[0].blocks) == 3
 
-    def test_json_round_trip(self) -> None:
+    def test_json_round_trip(self, prov) -> None:
         b = Book(
             title="Round Trip",
             chapters=[
                 Chapter(
                     title="Ch1",
-                    blocks=[Paragraph(text="p", provenance=_prov(source="llm"))],
+                    blocks=[Paragraph(text="p", provenance=prov(source="llm"))],
                 )
             ],
         )
@@ -192,11 +188,11 @@ class TestUidHelpers:
         assert block_init != block_runtime
         assert chapter_init != chapter_runtime
 
-    def test_models_accept_uid_fields(self) -> None:
+    def test_models_accept_uid_fields(self, prov) -> None:
         chapter = Chapter(
             uid="ch-1",
             title="Intro",
-            blocks=[Paragraph(uid="p-1", text="Hello", provenance=_prov())],
+            blocks=[Paragraph(uid="p-1", text="Hello", provenance=prov())],
         )
         book = Book(
             title="Book",

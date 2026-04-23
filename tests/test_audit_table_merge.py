@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from epubforge.audit.table_merge import detect_table_merge_issues
 from epubforge.ir.semantic import Book, Chapter, Provenance, Table
 
 
-def _prov(page: int) -> Provenance:
-    return Provenance(page=page, source="passthrough")
-
-
 def _table(
+    prov: Callable[..., Provenance],
     uid: str | None,
     html: str,
     page: int,
@@ -23,7 +22,7 @@ def _table(
         html=html,
         multi_page=multi_page,
         continuation=continuation,
-        provenance=_prov(page),
+        provenance=prov(page),
     )
 
 
@@ -36,7 +35,7 @@ def _book_with_table(table: Table) -> Book:
 # test_detect_width_drift
 # ---------------------------------------------------------------------------
 
-def test_detect_width_drift() -> None:
+def test_detect_width_drift(prov) -> None:
     # Segment 0 has 3 columns, segment 1 has 5 columns — drift = 66%, above 25% threshold.
     html = (
         "<table>"
@@ -50,7 +49,7 @@ def test_detect_width_drift() -> None:
         "</tbody>"
         "</table>"
     )
-    tbl = _table("tbl-mp", html, 10, multi_page=True)
+    tbl = _table(prov, "tbl-mp", html, 10, multi_page=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -59,7 +58,7 @@ def test_detect_width_drift() -> None:
     assert "table.merge_width_drift" in codes
 
 
-def test_no_width_drift_when_columns_match() -> None:
+def test_no_width_drift_when_columns_match(prov) -> None:
     # Both segments have 2 columns — no drift.
     html = (
         "<table>"
@@ -67,7 +66,7 @@ def test_no_width_drift_when_columns_match() -> None:
         "<tbody><tr><td>c</td><td>d</td></tr></tbody>"
         "</table>"
     )
-    tbl = _table("tbl-ok", html, 5, multi_page=True)
+    tbl = _table(prov, "tbl-ok", html, 5, multi_page=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -80,7 +79,7 @@ def test_no_width_drift_when_columns_match() -> None:
 # test_detect_header_reintroduced
 # ---------------------------------------------------------------------------
 
-def test_detect_header_reintroduced() -> None:
+def test_detect_header_reintroduced(prov) -> None:
     # Two <thead> blocks in merged result — assembler failed to strip the continuation header.
     html = (
         "<table>"
@@ -90,7 +89,7 @@ def test_detect_header_reintroduced() -> None:
         "<tbody><tr><td>r2c1</td><td>r2c2</td></tr></tbody>"
         "</table>"
     )
-    tbl = _table("tbl-hdr", html, 15, multi_page=True)
+    tbl = _table(prov, "tbl-hdr", html, 15, multi_page=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -99,7 +98,7 @@ def test_detect_header_reintroduced() -> None:
     assert "table.merge_header_reintroduced" in codes
 
 
-def test_no_header_reintroduced_with_single_thead() -> None:
+def test_no_header_reintroduced_with_single_thead(prov) -> None:
     # Only one <thead> — no issue.
     html = (
         "<table>"
@@ -108,7 +107,7 @@ def test_no_header_reintroduced_with_single_thead() -> None:
         "<tbody><tr><td>r2c1</td><td>r2c2</td></tr></tbody>"
         "</table>"
     )
-    tbl = _table("tbl-ok-hdr", html, 5, multi_page=True)
+    tbl = _table(prov, "tbl-ok-hdr", html, 5, multi_page=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -121,12 +120,12 @@ def test_no_header_reintroduced_with_single_thead() -> None:
 # test_detect_orphan_continuation
 # ---------------------------------------------------------------------------
 
-def test_detect_orphan_continuation() -> None:
+def test_detect_orphan_continuation(prov) -> None:
     # continuation=True but multi_page=False: assembler found no predecessor table.
     # This is the orphan continuation case — a table block left stranded.
     html = "<table><tbody><tr><td>orphan data</td></tr></tbody></table>"
     # Crucially: multi_page=False, continuation=True.
-    tbl = _table("tbl-orphan", html, 20, multi_page=False, continuation=True)
+    tbl = _table(prov, "tbl-orphan", html, 20, multi_page=False, continuation=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -139,7 +138,7 @@ def test_detect_orphan_continuation() -> None:
     assert "table.merge_record_incomplete" not in codes
 
 
-def test_no_orphan_when_continuation_absorbed() -> None:
+def test_no_orphan_when_continuation_absorbed(prov) -> None:
     # multi_page=True means assembler successfully merged the continuation;
     # no orphan issue should fire.
     html = (
@@ -147,7 +146,7 @@ def test_no_orphan_when_continuation_absorbed() -> None:
         "<tbody><tr><td>merged row</td></tr></tbody>"
         "</table>"
     )
-    tbl = _table("tbl-merged", html, 8, multi_page=True, continuation=False)
+    tbl = _table(prov, "tbl-merged", html, 8, multi_page=True, continuation=False)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -156,10 +155,10 @@ def test_no_orphan_when_continuation_absorbed() -> None:
     assert "table.merge_orphan_continuation" not in codes
 
 
-def test_no_orphan_for_plain_non_continuation_table() -> None:
+def test_no_orphan_for_plain_non_continuation_table(prov) -> None:
     # A regular table with neither continuation nor multi_page.
     html = "<table><tbody><tr><td>normal</td></tr></tbody></table>"
-    tbl = _table("tbl-plain", html, 3, multi_page=False, continuation=False)
+    tbl = _table(prov, "tbl-plain", html, 3, multi_page=False, continuation=False)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)
@@ -170,10 +169,10 @@ def test_no_orphan_for_plain_non_continuation_table() -> None:
 # test_detect_merge_record_incomplete
 # ---------------------------------------------------------------------------
 
-def test_detect_merge_record_incomplete() -> None:
+def test_detect_merge_record_incomplete(prov) -> None:
     # multi_page=True but no <tbody> content — merge produced an empty result.
     html = "<table><thead><tr><th>Col</th></tr></thead></table>"
-    tbl = _table("tbl-empty", html, 30, multi_page=True)
+    tbl = _table(prov, "tbl-empty", html, 30, multi_page=True)
     book = _book_with_table(tbl)
 
     bundle = detect_table_merge_issues(book)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -14,11 +15,7 @@ from epubforge.ir.semantic import Book, Chapter, Figure, Footnote, Paragraph, Pr
 from epubforge.ir.style_registry import StyleDefinition, StyleRegistry
 
 
-def _prov(page: int) -> Provenance:
-    return Provenance(page=page, source="passthrough")
-
-
-def _synthetic_verified_book() -> Book:
+def _synthetic_verified_book(prov: Callable[..., Provenance]) -> Book:
     return Book(
         title="Synthetic Build",
         chapters=[
@@ -28,15 +25,15 @@ def _synthetic_verified_book() -> Book:
                     Paragraph(
                         text="Intro \x02fn-1-①\x03 text.",
                         style_class="intro",
-                        provenance=_prov(1),
+                        provenance=prov(1),
                     ),
-                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=_prov(1)),
-                    Figure(caption="Synthetic figure", provenance=_prov(1)),
+                    Footnote(callout="①", text="Synthetic note.", paired=True, provenance=prov(1)),
+                    Figure(caption="Synthetic figure", provenance=prov(1)),
                     Table(
                         html="<table><tbody><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></tbody></table>",
                         table_title="Table 1",
                         caption="Synthetic table",
-                        provenance=_prov(1),
+                        provenance=prov(1),
                     ),
                 ],
             )
@@ -44,9 +41,9 @@ def _synthetic_verified_book() -> Book:
     )
 
 
-def _write_synthetic_build_assets(destination: Path) -> None:
+def _write_synthetic_build_assets(prov: Callable[..., Provenance], destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    save_book(_synthetic_verified_book(), destination / "07_footnote_verified.json", allow_legacy=True)
+    save_book(_synthetic_verified_book(prov), destination / "07_footnote_verified.json", allow_legacy=True)
     registry = StyleRegistry(
         book="synthetic-build",
         styles=[
@@ -164,9 +161,9 @@ max_loops = 7
     assert cfg.editor.max_loops == 7
 
 
-def test_synthetic_build_is_byte_equivalent_before_and_after_import_legacy_migration(tmp_path: Path) -> None:
+def test_synthetic_build_is_byte_equivalent_before_and_after_import_legacy_migration(prov, tmp_path: Path) -> None:
     work_dir = tmp_path / "synthetic-build"
-    _write_synthetic_build_assets(work_dir)
+    _write_synthetic_build_assets(prov, work_dir)
 
     legacy_epub = work_dir / "legacy.epub"
     migrated_epub = work_dir / "migrated.epub"

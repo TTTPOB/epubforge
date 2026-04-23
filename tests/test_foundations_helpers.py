@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,11 +20,7 @@ from epubforge.markers import (
 from epubforge.query import find_block_by_uid, find_footnotes, find_headings, find_marker_source, find_markers
 
 
-def _prov(page: int) -> Provenance:
-    return Provenance(page=page, source="llm")
-
-
-def _editable_book() -> Book:
+def _editable_book(prov: Callable[..., Provenance]) -> Book:
     marker = make_fn_marker(1, "①")
     return Book(
         title="Editable",
@@ -35,10 +32,10 @@ def _editable_book() -> Book:
                 uid="ch-1",
                 title="Intro",
                 blocks=[
-                    Heading(uid="h-1", text="Intro", level=1, provenance=_prov(1)),
-                    Paragraph(uid="p-1", text=f"text {marker}", provenance=_prov(1)),
-                    Table(uid="t-1", html="<table><td>①</td></table>", table_title="表1①", caption="caption", provenance=_prov(1)),
-                    Footnote(uid="f-1", callout="①", text="note body", paired=True, provenance=_prov(1)),
+                    Heading(uid="h-1", text="Intro", level=1, provenance=prov(1, source="llm")),
+                    Paragraph(uid="p-1", text=f"text {marker}", provenance=prov(1, source="llm")),
+                    Table(uid="t-1", html="<table><td>①</td></table>", table_title="表1①", caption="caption", provenance=prov(1, source="llm")),
+                    Footnote(uid="f-1", callout="①", text="note body", paired=True, provenance=prov(1, source="llm")),
                 ],
             )
         ],
@@ -69,8 +66,8 @@ def test_load_book_accepts_legacy_pipeline_artifact(tmp_path: Path) -> None:
     assert book.chapters[0].blocks[0].uid is None
 
 
-def test_save_book_writes_editable_artifact(tmp_path: Path) -> None:
-    book = _editable_book()
+def test_save_book_writes_editable_artifact(prov, tmp_path: Path) -> None:
+    book = _editable_book(prov)
 
     out_path = save_book(book, tmp_path)
 
@@ -98,8 +95,8 @@ def test_marker_helpers_ignore_existing_markers() -> None:
     assert replace_all_raw(text, "①", marker) == f"A{marker} B{marker} C{marker}"
 
 
-def test_fields_and_query_helpers_share_single_source() -> None:
-    book = _editable_book()
+def test_fields_and_query_helpers_share_single_source(prov) -> None:
+    book = _editable_book(prov)
     footnote = book.chapters[0].blocks[3]
     assert isinstance(footnote, Footnote)
 
