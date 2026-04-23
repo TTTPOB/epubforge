@@ -46,6 +46,7 @@ from epubforge.ir.semantic import (
     Table,
 )
 from epubforge.markers import FN_MARKER_FULL_RE, has_raw_callout, make_fn_marker, replace_first_raw, replace_nth_raw
+from epubforge.text_utils import cjk_join
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
@@ -194,11 +195,15 @@ def _require_same_chapter(book: Book, block_uids: Iterable[str], *, op_id: str) 
 
 
 def _join_text(parts: list[str], join: Literal["concat", "cjk", "newline"]) -> str:
-    if join == "newline":
-        return "\n".join(parts)
-    if join == "concat":
-        return "".join(parts)
-    return "".join(parts)
+    match join:
+        case "newline":
+            return "\n".join(parts)
+        case "cjk":
+            return cjk_join(parts)
+        case "concat":
+            return "".join(parts)
+        case _:
+            raise AssertionError(f"unreachable join kind {join!r}")
 
 
 def _split_text(block: Block, op: SplitBlock, *, op_id: str) -> list[str]:
@@ -475,217 +480,268 @@ def _check_new_uid_collisions(book: Book, op: EditOp, *, op_id: str) -> None:
         ensure_chapter_uid(op.new_chapter_uid)
 
 
+def _apply_set_role(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetRole)
+    ref, block = _get_block(book, op.block_uid)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"role": op.value})
+    return book
+
+
+def _apply_set_style_class(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetStyleClass)
+    ref, block = _get_block(book, op.block_uid)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"style_class": op.value})
+    return book
+
+
+def _apply_set_text(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetText)
+    ref, block = _get_block(book, op.block_uid)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={op.field: op.value})
+    return book
+
+
+def _apply_set_heading_level(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetHeadingLevel)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Heading):
+        raise ApplyError("set_heading_level requires a Heading block", op_id)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"level": op.value})
+    return book
+
+
+def _apply_set_heading_id(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetHeadingId)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Heading):
+        raise ApplyError("set_heading_id requires a Heading block", op_id)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"id": op.value})
+    return book
+
+
+def _apply_set_footnote_flag(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetFootnoteFlag)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Footnote):
+        raise ApplyError("set_footnote_flag requires a Footnote block", op_id)
+    update: dict[str, object] = {}
+    if op.paired is not None:
+        update["paired"] = op.paired
+    if op.orphan is not None:
+        update["orphan"] = op.orphan
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update=update)
+    return book
+
+
+def _apply_merge_blocks(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, MergeBlocks)
+    chapter_idx, refs = _require_same_chapter(book, op.block_uids, op_id=op_id)
+    blocks = [book.chapters[ref.chapter_idx].blocks[ref.block_idx] for ref in refs]
+    if not all(hasattr(block, "text") for block in blocks):
+        raise ApplyError("merge_blocks currently only supports text-bearing blocks", op_id)
+    merged_text = _join_text([getattr(block, "text") for block in blocks], op.join)
+    first_block = blocks[0].model_copy(update={"text": merged_text})
+    chapter = book.chapters[chapter_idx]
+    kept_idx = refs[0].block_idx
+    delete_indexes = {ref.block_idx for ref in refs[1:]}
+    next_blocks: list[Block] = []
+    for b_idx, block in enumerate(chapter.blocks):
+        if b_idx == kept_idx:
+            next_blocks.append(first_block)
+        elif b_idx not in delete_indexes:
+            next_blocks.append(block)
+    chapter.blocks = next_blocks
+    return book
+
+
+def _apply_split_block(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SplitBlock)
+    ref, block = _get_block(book, op.block_uid)
+    segments = _split_text(block, op, op_id=op_id)
+    if len(segments) != len(op.new_block_uids) + 1:
+        raise ApplyError("split_block produced unexpected segment count", op_id)
+    chapter = book.chapters[ref.chapter_idx]
+    next_blocks: list[Block] = []
+    for b_idx, current in enumerate(chapter.blocks):
+        if b_idx != ref.block_idx:
+            next_blocks.append(current)
+            continue
+        next_blocks.append(current.model_copy(update={"text": segments[0]}))
+        for new_uid, segment in zip(op.new_block_uids, segments[1:], strict=True):
+            next_blocks.append(current.model_copy(update={"uid": new_uid, "text": segment}))
+    chapter.blocks = next_blocks
+    return book
+
+
+def _apply_delete_block(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, DeleteBlock)
+    ref, _ = _get_block(book, op.block_uid)
+    chapter = book.chapters[ref.chapter_idx]
+    chapter.blocks = [block for b_idx, block in enumerate(chapter.blocks) if b_idx != ref.block_idx]
+    return book
+
+
+def _apply_insert_block(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, InsertBlock)
+    ch_idx, chapter = _get_chapter(book, op.chapter_uid)
+    insert_at = 0
+    if op.after_uid is not None:
+        ref = _block_index(book).get(op.after_uid)
+        if ref is None or ref.chapter_idx != ch_idx:
+            raise ApplyError("insert_block after_uid must belong to target chapter", op_id)
+        insert_at = ref.block_idx + 1
+    new_block = _make_block(op.block_kind, op.new_block_uid, op.block_data)
+    chapter.blocks = chapter.blocks[:insert_at] + [new_block] + chapter.blocks[insert_at:]
+    return book
+
+
+def _apply_footnote_op(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, FootnoteOp)
+    block_map = _block_index(book)
+    fn_ref = block_map.get(op.fn_block_uid)
+    if fn_ref is None:
+        raise ApplyError(f"missing footnote block {op.fn_block_uid}", op_id)
+    source_ref = block_map.get(op.source_block_uid) if op.source_block_uid is not None else None
+    new_source_ref = block_map.get(op.new_source_block_uid) if op.new_source_block_uid is not None else None
+    apply_footnote_mutation(
+        book,
+        FootnoteMutation(
+            op_name=op.op,
+            fn_ref=fn_ref,
+            source_ref=source_ref,
+            new_source_ref=new_source_ref,
+            occurrence_index=op.occurrence_index,
+        ),
+        op_id=op_id,
+    )
+    return book
+
+
+def _apply_merge_chapters(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, MergeChapters)
+    chapter_map = _chapter_index(book)
+    source_indexes = [chapter_map.get(uid) for uid in op.source_chapter_uids]
+    if any(index is None for index in source_indexes):
+        raise ApplyError("merge_chapters source chapter missing", op_id)
+    positions = [index for index in source_indexes if index is not None]
+    insert_at = min(positions)
+    new_blocks: list[Block] = []
+    for source_uid, section in zip(op.source_chapter_uids, op.sections, strict=True):
+        source_chapter = book.chapters[chapter_map[source_uid]]
+        new_blocks.append(
+            Heading(
+                uid=section.new_block_uid,
+                level=2,
+                text=section.text,
+                id=section.id,
+                style_class=section.style_class,
+                provenance=source_chapter.blocks[0].provenance if source_chapter.blocks else {"page": 0, "source": "passthrough"},
+            )
+        )
+        new_blocks.extend(block.model_copy(deep=True) for block in source_chapter.blocks)
+    new_chapter = Chapter(uid=op.new_chapter_uid, title=op.new_title, blocks=new_blocks)
+    remaining = [chapter for idx, chapter in enumerate(book.chapters) if idx not in positions]
+    book.chapters = remaining[:insert_at] + [new_chapter] + remaining[insert_at:]
+    return book
+
+
+def _apply_split_chapter(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SplitChapter)
+    ch_idx, chapter = _get_chapter(book, op.chapter_uid)
+    split_ref = _block_index(book).get(op.split_at_block_uid)
+    if split_ref is None or split_ref.chapter_idx != ch_idx:
+        raise ApplyError("split_chapter split_at_block_uid must belong to chapter_uid", op_id)
+    if split_ref.block_idx == 0:
+        raise ApplyError("split_chapter requires at least one block in the original chapter", op_id)
+    head = [block.model_copy(deep=True) for block in chapter.blocks[: split_ref.block_idx]]
+    tail = [block.model_copy(deep=True) for block in chapter.blocks[split_ref.block_idx :]]
+    chapter.blocks = head
+    new_chapter = Chapter(uid=op.new_chapter_uid, title=op.new_chapter_title, blocks=tail)
+    book.chapters = book.chapters[: ch_idx + 1] + [new_chapter] + book.chapters[ch_idx + 1 :]
+    return book
+
+
+def _apply_relocate_block(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, RelocateBlock)
+    source_ref, block = _get_block(book, op.block_uid)
+    target_idx, target_chapter = _get_chapter(book, op.target_chapter_uid)
+    if source_ref.chapter_idx == target_idx and op.after_uid == op.block_uid:
+        raise ApplyError("relocate_block after_uid cannot point to the moved block", op_id)
+    source_chapter = book.chapters[source_ref.chapter_idx]
+    source_chapter.blocks = [item for idx, item in enumerate(source_chapter.blocks) if idx != source_ref.block_idx]
+    insert_at = 0
+    if op.after_uid is not None:
+        target_ref = _block_index(book).get(op.after_uid)
+        if target_ref is None or target_ref.chapter_idx != target_idx:
+            raise ApplyError("relocate_block after_uid must belong to target chapter", op_id)
+        insert_at = target_ref.block_idx + 1
+    target_chapter.blocks = target_chapter.blocks[:insert_at] + [block] + target_chapter.blocks[insert_at:]
+    return book
+
+
+def _apply_split_merged_table(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SplitMergedTable)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Table):
+        raise ApplyError("split_merged_table requires a Table block", op_id)
+    if not block.multi_page:
+        raise ApplyError("split_merged_table target block is not a multi_page Table", op_id)
+    chapter = book.chapters[ref.chapter_idx]
+    # Build one new Table per segment; each gets a fresh runtime uid.
+    # Provenance page is taken from segment_pages; all other fields are
+    # inherited from the merged table (title, caption, etc.).
+    new_blocks: list[Block] = []
+    for seg_idx, (seg_html, seg_page) in enumerate(
+        zip(op.segment_html, op.segment_pages, strict=True)
+    ):
+        new_uid = str(uuid4())
+        seg_table = Table(
+            uid=new_uid,
+            html=seg_html,
+            table_title=block.table_title,
+            caption=block.caption if seg_idx == len(op.segment_html) - 1 else "",
+            continuation=(seg_idx > 0),
+            multi_page=False,
+            bbox=block.bbox,
+            provenance=block.provenance.model_copy(update={"page": seg_page}),
+            merge_record=None,
+        )
+        new_blocks.append(seg_table)
+    # Replace the original merged block with the split sequence in-place.
+    chapter.blocks = (
+        chapter.blocks[: ref.block_idx]
+        + new_blocks
+        + chapter.blocks[ref.block_idx + 1 :]
+    )
+    return book
+
+
+_APPLY_DISPATCH: dict[type[EditOp], Callable[[Book, EditOp, str], Book]] = {
+    SetRole: _apply_set_role,
+    SetStyleClass: _apply_set_style_class,
+    SetText: _apply_set_text,
+    SetHeadingLevel: _apply_set_heading_level,
+    SetHeadingId: _apply_set_heading_id,
+    SetFootnoteFlag: _apply_set_footnote_flag,
+    MergeBlocks: _apply_merge_blocks,
+    SplitBlock: _apply_split_block,
+    DeleteBlock: _apply_delete_block,
+    InsertBlock: _apply_insert_block,
+    FootnoteOp: _apply_footnote_op,
+    MergeChapters: _apply_merge_chapters,
+    SplitChapter: _apply_split_chapter,
+    RelocateBlock: _apply_relocate_block,
+    SplitMergedTable: _apply_split_merged_table,
+}
+
+
 def _apply_op(book: Book, op: EditOp, *, op_id: str) -> Book:
     if isinstance(op, NoopOp | CompactMarker | RevertOp):
         return book
-
-    if isinstance(op, SetRole):
-        ref, block = _get_block(book, op.block_uid)
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"role": op.value})
-        return book
-
-    if isinstance(op, SetStyleClass):
-        ref, block = _get_block(book, op.block_uid)
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"style_class": op.value})
-        return book
-
-    if isinstance(op, SetText):
-        ref, block = _get_block(book, op.block_uid)
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={op.field: op.value})
-        return book
-
-    if isinstance(op, SetHeadingLevel):
-        ref, block = _get_block(book, op.block_uid)
-        if not isinstance(block, Heading):
-            raise ApplyError("set_heading_level requires a Heading block", op_id)
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"level": op.value})
-        return book
-
-    if isinstance(op, SetHeadingId):
-        ref, block = _get_block(book, op.block_uid)
-        if not isinstance(block, Heading):
-            raise ApplyError("set_heading_id requires a Heading block", op_id)
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"id": op.value})
-        return book
-
-    if isinstance(op, SetFootnoteFlag):
-        ref, block = _get_block(book, op.block_uid)
-        if not isinstance(block, Footnote):
-            raise ApplyError("set_footnote_flag requires a Footnote block", op_id)
-        update: dict[str, object] = {}
-        if op.paired is not None:
-            update["paired"] = op.paired
-        if op.orphan is not None:
-            update["orphan"] = op.orphan
-        book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update=update)
-        return book
-
-    if isinstance(op, MergeBlocks):
-        chapter_idx, refs = _require_same_chapter(book, op.block_uids, op_id=op_id)
-        blocks = [book.chapters[ref.chapter_idx].blocks[ref.block_idx] for ref in refs]
-        if not all(hasattr(block, "text") for block in blocks):
-            raise ApplyError("merge_blocks currently only supports text-bearing blocks", op_id)
-        merged_text = _join_text([getattr(block, "text") for block in blocks], op.join)
-        first_block = blocks[0].model_copy(update={"text": merged_text})
-        chapter = book.chapters[chapter_idx]
-        kept_idx = refs[0].block_idx
-        delete_indexes = {ref.block_idx for ref in refs[1:]}
-        next_blocks: list[Block] = []
-        for b_idx, block in enumerate(chapter.blocks):
-            if b_idx == kept_idx:
-                next_blocks.append(first_block)
-            elif b_idx not in delete_indexes:
-                next_blocks.append(block)
-        chapter.blocks = next_blocks
-        return book
-
-    if isinstance(op, SplitBlock):
-        ref, block = _get_block(book, op.block_uid)
-        segments = _split_text(block, op, op_id=op_id)
-        if len(segments) != len(op.new_block_uids) + 1:
-            raise ApplyError("split_block produced unexpected segment count", op_id)
-        chapter = book.chapters[ref.chapter_idx]
-        next_blocks: list[Block] = []
-        for b_idx, current in enumerate(chapter.blocks):
-            if b_idx != ref.block_idx:
-                next_blocks.append(current)
-                continue
-            next_blocks.append(current.model_copy(update={"text": segments[0]}))
-            for new_uid, segment in zip(op.new_block_uids, segments[1:], strict=True):
-                next_blocks.append(current.model_copy(update={"uid": new_uid, "text": segment}))
-        chapter.blocks = next_blocks
-        return book
-
-    if isinstance(op, DeleteBlock):
-        ref, _ = _get_block(book, op.block_uid)
-        chapter = book.chapters[ref.chapter_idx]
-        chapter.blocks = [block for b_idx, block in enumerate(chapter.blocks) if b_idx != ref.block_idx]
-        return book
-
-    if isinstance(op, InsertBlock):
-        ch_idx, chapter = _get_chapter(book, op.chapter_uid)
-        insert_at = 0
-        if op.after_uid is not None:
-            ref = _block_index(book).get(op.after_uid)
-            if ref is None or ref.chapter_idx != ch_idx:
-                raise ApplyError("insert_block after_uid must belong to target chapter", op_id)
-            insert_at = ref.block_idx + 1
-        new_block = _make_block(op.block_kind, op.new_block_uid, op.block_data)
-        chapter.blocks = chapter.blocks[:insert_at] + [new_block] + chapter.blocks[insert_at:]
-        return book
-
-    if isinstance(op, FootnoteOp):
-        block_map = _block_index(book)
-        fn_ref = block_map.get(op.fn_block_uid)
-        if fn_ref is None:
-            raise ApplyError(f"missing footnote block {op.fn_block_uid}", op_id)
-        source_ref = block_map.get(op.source_block_uid) if op.source_block_uid is not None else None
-        new_source_ref = block_map.get(op.new_source_block_uid) if op.new_source_block_uid is not None else None
-        apply_footnote_mutation(
-            book,
-            FootnoteMutation(
-                op_name=op.op,
-                fn_ref=fn_ref,
-                source_ref=source_ref,
-                new_source_ref=new_source_ref,
-                occurrence_index=op.occurrence_index,
-            ),
-            op_id=op_id,
-        )
-        return book
-
-    if isinstance(op, MergeChapters):
-        chapter_map = _chapter_index(book)
-        source_indexes = [chapter_map.get(uid) for uid in op.source_chapter_uids]
-        if any(index is None for index in source_indexes):
-            raise ApplyError("merge_chapters source chapter missing", op_id)
-        positions = [index for index in source_indexes if index is not None]
-        insert_at = min(positions)
-        new_blocks: list[Block] = []
-        for source_uid, section in zip(op.source_chapter_uids, op.sections, strict=True):
-            source_chapter = book.chapters[chapter_map[source_uid]]
-            new_blocks.append(
-                Heading(
-                    uid=section.new_block_uid,
-                    level=2,
-                    text=section.text,
-                    id=section.id,
-                    style_class=section.style_class,
-                    provenance=source_chapter.blocks[0].provenance if source_chapter.blocks else {"page": 0, "source": "passthrough"},
-                )
-            )
-            new_blocks.extend(block.model_copy(deep=True) for block in source_chapter.blocks)
-        new_chapter = Chapter(uid=op.new_chapter_uid, title=op.new_title, blocks=new_blocks)
-        remaining = [chapter for idx, chapter in enumerate(book.chapters) if idx not in positions]
-        book.chapters = remaining[:insert_at] + [new_chapter] + remaining[insert_at:]
-        return book
-
-    if isinstance(op, SplitChapter):
-        ch_idx, chapter = _get_chapter(book, op.chapter_uid)
-        split_ref = _block_index(book).get(op.split_at_block_uid)
-        if split_ref is None or split_ref.chapter_idx != ch_idx:
-            raise ApplyError("split_chapter split_at_block_uid must belong to chapter_uid", op_id)
-        if split_ref.block_idx == 0:
-            raise ApplyError("split_chapter requires at least one block in the original chapter", op_id)
-        head = [block.model_copy(deep=True) for block in chapter.blocks[: split_ref.block_idx]]
-        tail = [block.model_copy(deep=True) for block in chapter.blocks[split_ref.block_idx :]]
-        chapter.blocks = head
-        new_chapter = Chapter(uid=op.new_chapter_uid, title=op.new_chapter_title, blocks=tail)
-        book.chapters = book.chapters[: ch_idx + 1] + [new_chapter] + book.chapters[ch_idx + 1 :]
-        return book
-
-    if isinstance(op, RelocateBlock):
-        source_ref, block = _get_block(book, op.block_uid)
-        target_idx, target_chapter = _get_chapter(book, op.target_chapter_uid)
-        if source_ref.chapter_idx == target_idx and op.after_uid == op.block_uid:
-            raise ApplyError("relocate_block after_uid cannot point to the moved block", op_id)
-        source_chapter = book.chapters[source_ref.chapter_idx]
-        source_chapter.blocks = [item for idx, item in enumerate(source_chapter.blocks) if idx != source_ref.block_idx]
-        insert_at = 0
-        if op.after_uid is not None:
-            target_ref = _block_index(book).get(op.after_uid)
-            if target_ref is None or target_ref.chapter_idx != target_idx:
-                raise ApplyError("relocate_block after_uid must belong to target chapter", op_id)
-            insert_at = target_ref.block_idx + 1
-        target_chapter.blocks = target_chapter.blocks[:insert_at] + [block] + target_chapter.blocks[insert_at:]
-        return book
-
-    if isinstance(op, SplitMergedTable):
-        ref, block = _get_block(book, op.block_uid)
-        if not isinstance(block, Table):
-            raise ApplyError("split_merged_table requires a Table block", op_id)
-        if not block.multi_page:
-            raise ApplyError("split_merged_table target block is not a multi_page Table", op_id)
-        chapter = book.chapters[ref.chapter_idx]
-        # Build one new Table per segment; each gets a fresh runtime uid.
-        # Provenance page is taken from segment_pages; all other fields are
-        # inherited from the merged table (title, caption, etc.).
-        new_blocks: list[Block] = []
-        for seg_idx, (seg_html, seg_page) in enumerate(
-            zip(op.segment_html, op.segment_pages, strict=True)
-        ):
-            new_uid = str(uuid4())
-            seg_table = Table(
-                uid=new_uid,
-                html=seg_html,
-                table_title=block.table_title,
-                caption=block.caption if seg_idx == len(op.segment_html) - 1 else "",
-                continuation=(seg_idx > 0),
-                multi_page=False,
-                bbox=block.bbox,
-                provenance=block.provenance.model_copy(update={"page": seg_page}),
-                merge_record=None,
-            )
-            new_blocks.append(seg_table)
-        # Replace the original merged block with the split sequence in-place.
-        chapter.blocks = (
-            chapter.blocks[: ref.block_idx]
-            + new_blocks
-            + chapter.blocks[ref.block_idx + 1 :]
-        )
-        return book
-
-    raise AssertionError(f"unsupported op type {type(op)!r}")
+    handler = _APPLY_DISPATCH.get(type(op))
+    if handler is None:
+        raise AssertionError(f"unsupported op type {type(op)!r}")
+    return handler(book, op, op_id)
 
 
 def _is_topology_op(op: EditOp) -> bool:
