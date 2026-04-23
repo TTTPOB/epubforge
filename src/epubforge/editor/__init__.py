@@ -1,6 +1,29 @@
 """Editor package."""
 
 from epubforge.editor.apply import ApplyError, ApplyResult, apply_envelope, apply_log
+from epubforge.editor.doctor import (
+    DoctorDelta,
+    DoctorReport,
+    Hint,
+    ReadinessChecklist,
+    build_doctor_report,
+    compute_doctor_delta,
+    evaluate_convergence,
+)
+from epubforge.editor.memory import (
+    ChapterStatus,
+    ConventionNote,
+    EditMemory,
+    MemoryHistoryEntry,
+    MemoryMergeDecision,
+    MemoryMergeResult,
+    MemoryPatch,
+    OpenQuestion,
+    PatternNote,
+    canonical_convention_key,
+    canonical_pattern_key,
+    merge_edit_memory,
+)
 from epubforge.editor.ops import (
     BlockSnapshot,
     CompactMarker,
@@ -28,12 +51,25 @@ from epubforge.editor.ops import (
 
 __all__ = [
     "BlockSnapshot",
+    "ChapterStatus",
     "CompactMarker",
+    "ConventionNote",
+    "DoctorDelta",
+    "DoctorReport",
     "DeleteBlock",
     "EditOp",
+    "EditMemory",
     "FootnoteOp",
+    "Hint",
+    "MemoryHistoryEntry",
+    "MemoryMergeDecision",
+    "MemoryMergeResult",
+    "MemoryPatch",
+    "OpenQuestion",
+    "PatternNote",
     "ApplyError",
     "ApplyResult",
+    "ReadinessChecklist",
     "HeadingSpec",
     "InsertBlock",
     "MergeBlocks",
@@ -53,4 +89,10 @@ __all__ = [
     "SplitChapter",
     "apply_envelope",
     "apply_log",
+    "build_doctor_report",
+    "canonical_convention_key",
+    "canonical_pattern_key",
+    "compute_doctor_delta",
+    "evaluate_convergence",
+    "merge_edit_memory",
 ]
