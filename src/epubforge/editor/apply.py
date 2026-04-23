@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +31,8 @@ from epubforge.editor.ops import (
     SplitBlock,
     SplitChapter,
 )
+from epubforge.editor.leases import LeaseState
+from epubforge.editor.memory import ChapterStatus, EditMemory
 from epubforge.ir.semantic import (
     Block,
     Book,
@@ -71,6 +72,7 @@ class ApplyResult:
     book: Book
     accepted_envelopes: tuple[OpEnvelope, ...]
     revert_backref: RevertBackref | None = None
+    memory: EditMemory | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,13 @@ def _chapter_index(book: Book) -> dict[str, int]:
         if chapter.uid is not None:
             index[chapter.uid] = ch_idx
     return index
+
+
+def _chapter_uid_for_index(book: Book, chapter_idx: int, *, op_id: str) -> str:
+    chapter_uid = book.chapters[chapter_idx].uid
+    if chapter_uid is None:
+        raise ApplyError("chapter is missing uid", op_id)
+    return chapter_uid
 
 
 def _block_index(book: Book) -> dict[str, BlockRef]:
@@ -643,6 +652,133 @@ def _apply_op(book: Book, op: EditOp, *, op_id: str) -> Book:
     raise AssertionError(f"unsupported op type {type(op)!r}")
 
 
+def _is_topology_op(op: EditOp) -> bool:
+    return isinstance(op, (MergeChapters, SplitChapter, RelocateBlock))
+
+
+def _resolve_intra_chapter_uid(book: Book, op: EditOp, *, op_id: str) -> str | None:
+    if isinstance(op, (NoopOp, CompactMarker, RevertOp)):
+        return None
+
+    if isinstance(op, InsertBlock):
+        ch_idx, _ = _get_chapter(book, op.chapter_uid)
+        return _chapter_uid_for_index(book, ch_idx, op_id=op_id)
+
+    if isinstance(op, MergeBlocks):
+        ch_idx, _ = _require_same_chapter(book, op.block_uids, op_id=op_id)
+        return _chapter_uid_for_index(book, ch_idx, op_id=op_id)
+
+    if isinstance(op, FootnoteOp):
+        related_uids = [op.fn_block_uid]
+        if op.source_block_uid is not None:
+            related_uids.append(op.source_block_uid)
+        if op.new_source_block_uid is not None:
+            related_uids.append(op.new_source_block_uid)
+        ch_idx, _ = _require_same_chapter(book, related_uids, op_id=op_id)
+        return _chapter_uid_for_index(book, ch_idx, op_id=op_id)
+
+    if isinstance(
+        op,
+        (
+            SetRole,
+            SetStyleClass,
+            SetText,
+            SetHeadingLevel,
+            SetHeadingId,
+            SetFootnoteFlag,
+            SplitBlock,
+            DeleteBlock,
+        ),
+    ):
+        ref, _ = _get_block(book, op.block_uid)
+        return _chapter_uid_for_index(book, ref.chapter_idx, op_id=op_id)
+
+    return None
+
+
+def _ensure_lease_access(
+    book: Book,
+    op: EditOp,
+    *,
+    op_id: str,
+    lease_state: LeaseState | None,
+    holder: str,
+    now_ts: str,
+) -> None:
+    if lease_state is None:
+        return
+
+    lease_state.expire_stale(now=now_ts)
+    if isinstance(op, (NoopOp, CompactMarker, RevertOp)):
+        return
+
+    if _is_topology_op(op):
+        active = lease_state.book_exclusive
+        if active is None or active.holder != holder:
+            raise ApplyError(f"topology op requires book-exclusive lease held by {holder}", op_id)
+        return
+
+    if lease_state.book_exclusive is not None:
+        raise ApplyError("book-exclusive lease is active; chapter ops are paused", op_id)
+
+    chapter_uid = _resolve_intra_chapter_uid(book, op, op_id=op_id)
+    if chapter_uid is None:
+        return
+    active = lease_state.chapter_lease(chapter_uid)
+    if active is None or active.holder != holder:
+        raise ApplyError(f"intra-chapter op requires chapter lease for {chapter_uid} held by {holder}", op_id)
+
+
+def _chapter_status_or_default(memory: EditMemory, chapter_uid: str) -> ChapterStatus:
+    return memory.chapter_status.get(chapter_uid, ChapterStatus(chapter_uid=chapter_uid))
+
+
+def _concat_notes(notes: Iterable[str]) -> str:
+    values = [note.strip() for note in notes if note.strip()]
+    return "\n".join(values)
+
+
+def _migrate_merge_chapter_status(memory: EditMemory, op: MergeChapters) -> EditMemory:
+    merged_sources = [_chapter_status_or_default(memory, chapter_uid) for chapter_uid in op.source_chapter_uids]
+    merged = ChapterStatus(
+        chapter_uid=op.new_chapter_uid,
+        read_passes=max((item.read_passes for item in merged_sources), default=0),
+        last_reader=next((item.last_reader for item in reversed(merged_sources) if item.last_reader), None),
+        issues_found=sum(item.issues_found for item in merged_sources),
+        issues_fixed=sum(item.issues_fixed for item in merged_sources),
+        notes=_concat_notes(item.notes for item in merged_sources),
+    )
+    chapter_status = {
+        chapter_uid: status
+        for chapter_uid, status in memory.chapter_status.items()
+        if chapter_uid not in set(op.source_chapter_uids)
+    }
+    chapter_status[op.new_chapter_uid] = merged
+    return memory.model_copy(update={"chapter_status": chapter_status})
+
+
+def _migrate_split_chapter_status(memory: EditMemory, op: SplitChapter) -> EditMemory:
+    chapter_status = dict(memory.chapter_status)
+    chapter_status.setdefault(op.chapter_uid, ChapterStatus(chapter_uid=op.chapter_uid))
+    chapter_status[op.new_chapter_uid] = ChapterStatus(
+        chapter_uid=op.new_chapter_uid,
+        notes=f"split from {op.chapter_uid}",
+    )
+    return memory.model_copy(update={"chapter_status": chapter_status})
+
+
+def _migrate_topology_memory(memory: EditMemory, op: EditOp, *, updated_at: str, updated_by: str) -> EditMemory:
+    if isinstance(op, MergeChapters):
+        migrated = _migrate_merge_chapter_status(memory, op)
+    elif isinstance(op, SplitChapter):
+        migrated = _migrate_split_chapter_status(memory, op)
+    elif isinstance(op, RelocateBlock):
+        migrated = memory.model_copy(deep=True)
+    else:
+        return memory.model_copy(deep=True)
+    return migrated.model_copy(update={"updated_at": updated_at, "updated_by": updated_by})
+
+
 def _target_effect_preconditions(target: OpEnvelope) -> list[Precondition]:
     op = target.op
     if isinstance(op, InsertBlock):
@@ -873,6 +1009,9 @@ def apply_envelope(
     resolve_target: Callable[[str], OpEnvelope | None] | None = None,
     now: Callable[[], str] = _utc_now,
     replay: bool = False,
+    lease_state: LeaseState | None = None,
+    lease_holder: str | None = None,
+    memory: EditMemory | None = None,
 ) -> ApplyResult:
     """Apply a single envelope to a Book snapshot."""
 
@@ -887,19 +1026,22 @@ def apply_envelope(
         )
 
     working = book.model_copy(deep=True)
+    working_memory = memory.model_copy(deep=True) if memory is not None else None
+    holder = lease_holder or env.agent_id
+    default_applied_at = env.applied_at or now()
 
     if isinstance(env.op, CompactMarker):
         if env.applied_version is not None and env.applied_version != working.version:
             raise ApplyError("compact_marker applied_version does not match current book.version", env.op_id)
-        applied_at = env.applied_at or now()
+        applied_at = default_applied_at
         applied = env.model_copy(update={"applied_version": working.version, "applied_at": applied_at})
-        return ApplyResult(book=working, accepted_envelopes=(applied,))
+        return ApplyResult(book=working, accepted_envelopes=(applied,), memory=working_memory)
 
     if isinstance(env.op, RevertOp):
         if replay:
-            applied_at = env.applied_at or now()
+            applied_at = default_applied_at
             applied = env.model_copy(update={"applied_version": working.version, "applied_at": applied_at})
-            return ApplyResult(book=working, accepted_envelopes=(applied,))
+            return ApplyResult(book=working, accepted_envelopes=(applied,), memory=working_memory)
 
         if resolve_target is None:
             raise ApplyError("revert requires target lookup", env.op_id)
@@ -913,7 +1055,7 @@ def apply_envelope(
             raise ApplyError(f"target op {target.op_id} is irreversible", env.op_id)
 
         _check_preconditions(working, env.preconditions, op_id=env.op_id)
-        revert_applied_at = env.applied_at or now()
+        revert_applied_at = default_applied_at
         applied_revert = env.model_copy(update={"applied_version": working.version, "applied_at": revert_applied_at})
         inverse, backref = _build_inverse_envelope(
             working,
@@ -931,22 +1073,36 @@ def apply_envelope(
             resolve_target=resolve_target,
             now=now,
             replay=False,
+            lease_state=lease_state,
+            lease_holder=lease_holder,
+            memory=working_memory,
         )
         return ApplyResult(
             book=inverse_result.book,
             accepted_envelopes=(applied_revert, *inverse_result.accepted_envelopes),
             revert_backref=backref,
+            memory=inverse_result.memory,
         )
 
+    _ensure_lease_access(
+        working,
+        env.op,
+        op_id=env.op_id,
+        lease_state=lease_state,
+        holder=holder,
+        now_ts=default_applied_at,
+    )
     _check_preconditions(working, env.preconditions, op_id=env.op_id)
     _check_new_uid_collisions(working, env.op, op_id=env.op_id)
     updated = _apply_op(working, env.op, op_id=env.op_id)
     updated.version += 1
-    applied_at = env.applied_at or now()
+    applied_at = default_applied_at
     applied = env.model_copy(update={"applied_version": updated.version, "applied_at": applied_at})
     if env.applied_version is not None and env.applied_version != applied.applied_version:
         raise ApplyError("envelope applied_version does not match replay result", env.op_id)
-    return ApplyResult(book=updated, accepted_envelopes=(applied,))
+    if working_memory is not None and _is_topology_op(env.op):
+        working_memory = _migrate_topology_memory(working_memory, env.op, updated_at=applied_at, updated_by=holder)
+    return ApplyResult(book=updated, accepted_envelopes=(applied,), memory=working_memory)
 
 
 def apply_log(book: Book, log_path: Path, *, from_version: int = 0) -> Book:

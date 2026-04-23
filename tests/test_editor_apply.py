@@ -6,13 +6,17 @@ from uuid import uuid4
 import pytest
 
 from epubforge.editor.apply import ApplyError, apply_envelope, apply_log
+from epubforge.editor.leases import LeaseState
+from epubforge.editor.memory import ChapterStatus, EditMemory
 from epubforge.editor.ops import (
     CompactMarker,
     DeleteBlock,
     InsertBlock,
     MergeBlocks,
+    MergeChapters,
     NoopOp,
     OpEnvelope,
+    RelocateBlock,
     RevertOp,
     SetFootnoteFlag,
     SetHeadingId,
@@ -21,6 +25,7 @@ from epubforge.editor.ops import (
     SetStyleClass,
     SetText,
     SplitBlock,
+    SplitChapter,
 )
 from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance
 
@@ -46,6 +51,42 @@ def _book() -> Book:
                 ],
             )
         ],
+    )
+
+
+def _topology_book() -> Book:
+    return Book(
+        version=0,
+        initialized_at="2026-04-23T08:00:00Z",
+        uid_seed="seed-2",
+        title="Topology Book",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(uid="p-1", text="Alpha", provenance=_prov(1)),
+                    Paragraph(uid="p-2", text="Beta", provenance=_prov(1)),
+                ],
+            ),
+            Chapter(
+                uid="ch-2",
+                title="Chapter 2",
+                blocks=[
+                    Paragraph(uid="p-3", text="Gamma", provenance=_prov(2)),
+                    Paragraph(uid="p-4", text="Delta", provenance=_prov(2)),
+                ],
+            ),
+        ],
+    )
+
+
+def _memory_for(book: Book) -> EditMemory:
+    return EditMemory.create(
+        book_id="book-1",
+        updated_at="2026-04-23T08:00:00Z",
+        updated_by="tester",
+        chapter_uids=[chapter.uid for chapter in book.chapters if chapter.uid is not None],
     )
 
 
@@ -351,3 +392,172 @@ def test_revert_rejects_merge_blocks_even_with_original_blocks_snapshot() -> Non
             resolve_target=lambda target_op_id: applied.accepted_envelopes[0] if target_op_id == applied.accepted_envelopes[0].op_id else None,
             now=lambda: "2026-04-23T08:00:02Z",
         )
+
+
+def test_apply_rejects_intra_chapter_op_without_matching_lease() -> None:
+    with pytest.raises(ApplyError, match="chapter lease"):
+        apply_envelope(
+            _book(),
+            _env(SetText(op="set_text", block_uid="p-1", field="text", value="Beta"), base_version=0),
+            lease_state=LeaseState(),
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+
+
+def test_apply_rejects_topology_op_without_book_lock() -> None:
+    book = _topology_book()
+    memory = _memory_for(book)
+    op = MergeChapters(
+        op="merge_chapters",
+        source_chapter_uids=["ch-1", "ch-2"],
+        new_title="Merged",
+        new_chapter_uid="ch-merged",
+        sections=[
+            {"text": "Section 1", "new_block_uid": "h-merge-1"},
+            {"text": "Section 2", "new_block_uid": "h-merge-2"},
+        ],
+    )
+
+    with pytest.raises(ApplyError, match="book-exclusive"):
+        apply_envelope(
+            book,
+            _env(op, base_version=0),
+            lease_state=LeaseState(),
+            memory=memory,
+            now=lambda: "2026-04-23T08:00:01Z",
+        )
+
+
+def test_merge_chapters_migrates_chapter_status_into_new_uid() -> None:
+    book = _topology_book()
+    memory = _memory_for(book).model_copy(
+        update={
+            "chapter_status": {
+                "ch-1": ChapterStatus(
+                    chapter_uid="ch-1",
+                    read_passes=2,
+                    last_reader="reader-a",
+                    issues_found=3,
+                    issues_fixed=1,
+                    notes="alpha notes",
+                ),
+                "ch-2": ChapterStatus(
+                    chapter_uid="ch-2",
+                    read_passes=5,
+                    last_reader="reader-b",
+                    issues_found=4,
+                    issues_fixed=2,
+                    notes="beta notes",
+                ),
+            }
+        }
+    )
+    leases = LeaseState()
+    assert leases.acquire_book_exclusive("agent-1", "topology_op", now="2026-04-23T08:00:00Z") is not None
+
+    result = apply_envelope(
+        book,
+        _env(
+            MergeChapters(
+                op="merge_chapters",
+                source_chapter_uids=["ch-1", "ch-2"],
+                new_title="Merged",
+                new_chapter_uid="ch-merged",
+                sections=[
+                    {"text": "Section 1", "new_block_uid": "h-merge-1"},
+                    {"text": "Section 2", "new_block_uid": "h-merge-2"},
+                ],
+            ),
+            base_version=0,
+        ),
+        lease_state=leases,
+        memory=memory,
+        now=lambda: "2026-04-23T08:00:01Z",
+    )
+
+    assert [chapter.uid for chapter in result.book.chapters] == ["ch-merged"]
+    assert result.memory is not None
+    assert set(result.memory.chapter_status) == {"ch-merged"}
+    merged = result.memory.chapter_status["ch-merged"]
+    assert merged.read_passes == 5
+    assert merged.last_reader == "reader-b"
+    assert merged.issues_found == 7
+    assert merged.issues_fixed == 3
+    assert merged.notes == "alpha notes\nbeta notes"
+
+
+def test_split_chapter_preserves_old_status_and_creates_fresh_new_status() -> None:
+    book = _topology_book()
+    memory = _memory_for(book).model_copy(
+        update={
+            "chapter_status": {
+                "ch-1": ChapterStatus(
+                    chapter_uid="ch-1",
+                    read_passes=3,
+                    last_reader="reader-a",
+                    issues_found=2,
+                    issues_fixed=1,
+                    notes="existing status",
+                ),
+                "ch-2": ChapterStatus(chapter_uid="ch-2", read_passes=1),
+            }
+        }
+    )
+    leases = LeaseState()
+    assert leases.acquire_book_exclusive("agent-1", "topology_op", now="2026-04-23T08:00:00Z") is not None
+
+    result = apply_envelope(
+        book,
+        _env(
+            SplitChapter(
+                op="split_chapter",
+                chapter_uid="ch-1",
+                split_at_block_uid="p-2",
+                new_chapter_title="Chapter 1B",
+                new_chapter_uid="ch-1b",
+            ),
+            base_version=0,
+        ),
+        lease_state=leases,
+        memory=memory,
+        now=lambda: "2026-04-23T08:00:01Z",
+    )
+
+    assert [chapter.uid for chapter in result.book.chapters] == ["ch-1", "ch-1b", "ch-2"]
+    assert [block.uid for block in result.book.chapters[0].blocks] == ["p-1"]
+    assert [block.uid for block in result.book.chapters[1].blocks] == ["p-2"]
+    assert result.memory is not None
+    assert result.memory.chapter_status["ch-1"].read_passes == 3
+    new_status = result.memory.chapter_status["ch-1b"]
+    assert new_status.read_passes == 0
+    assert new_status.issues_found == 0
+    assert new_status.notes == "split from ch-1"
+
+
+def test_relocate_block_keeps_existing_chapter_uids_and_status_map() -> None:
+    book = _topology_book()
+    memory = _memory_for(book)
+    leases = LeaseState()
+    assert leases.acquire_book_exclusive("agent-1", "topology_op", now="2026-04-23T08:00:00Z") is not None
+
+    result = apply_envelope(
+        book,
+        _env(
+            RelocateBlock(
+                op="relocate_block",
+                block_uid="p-2",
+                target_chapter_uid="ch-2",
+                after_uid="p-3",
+            ),
+            base_version=0,
+        ),
+        lease_state=leases,
+        memory=memory,
+        now=lambda: "2026-04-23T08:00:01Z",
+    )
+
+    assert [chapter.uid for chapter in result.book.chapters] == ["ch-1", "ch-2"]
+    assert [block.uid for block in result.book.chapters[0].blocks] == ["p-1"]
+    assert [block.uid for block in result.book.chapters[1].blocks] == ["p-3", "p-2", "p-4"]
+    assert result.memory is not None
+    assert set(result.memory.chapter_status) == {"ch-1", "ch-2"}

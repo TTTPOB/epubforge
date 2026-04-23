@@ -10,6 +10,7 @@ from epubforge.editor.doctor import (
     compute_doctor_delta,
     evaluate_convergence,
 )
+from epubforge.editor.leases import BookExclusiveLease, ChapterLease, LeaseState
 from epubforge.editor.memory import (
     ChapterStatus,
     ConventionNote,
@@ -51,7 +52,9 @@ from epubforge.editor.ops import (
 
 __all__ = [
     "BlockSnapshot",
+    "BookExclusiveLease",
     "ChapterStatus",
+    "ChapterLease",
     "CompactMarker",
     "ConventionNote",
     "DoctorDelta",
@@ -72,6 +75,7 @@ __all__ = [
     "ReadinessChecklist",
     "HeadingSpec",
     "InsertBlock",
+    "LeaseState",
     "MergeBlocks",
     "MergeChapters",
     "NoopOp",
