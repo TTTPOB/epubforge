@@ -136,7 +136,7 @@ class LLMClient:
         messages: list[ChatCompletionMessageParam],
         *,
         response_format: type[T],
-        temperature: float | None = 0.0,
+        temperature: float | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> T:
         merged_extra = _deep_merge(self.extra_body, extra_body or {})

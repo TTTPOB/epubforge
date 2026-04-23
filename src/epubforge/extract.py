@@ -270,7 +270,7 @@ def _process_vlm_unit(
     ])
 
     try:
-        result = client.chat_parsed(messages, response_format=VLMGroupOutput, temperature=0)
+        result = client.chat_parsed(messages, response_format=VLMGroupOutput)
     except Exception as exc:
         log.warning("VLM call failed for pages %s: %s", unit.pages, exc)
         return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], False, False, [], None
