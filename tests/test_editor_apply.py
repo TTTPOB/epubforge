@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 
 from epubforge.editor.apply import ApplyError, apply_envelope, apply_log
 from epubforge.editor.leases import LeaseState
-from epubforge.editor.memory import ChapterStatus, EditMemory
+from epubforge.editor.memory import ChapterStatus, EditMemory, MemoryPatch
 from epubforge.editor.ops import (
     CompactMarker,
     DeleteBlock,
@@ -772,3 +773,104 @@ class TestSplitMergedTableApply:
             seg = blocks[idx]
             assert isinstance(seg, Table)
             assert seg.multi_page is False
+
+
+# ---------------------------------------------------------------------------
+# §1.6b/c memory_patches wiring tests (PR-F)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_queue_merges_memory_patch_via_merge_edit_memory() -> None:
+    """Envelope with a valid memory_patches entry must fold the patch into working_memory."""
+    book = _book()
+    memory = _memory_for(book)
+    patch = MemoryPatch(
+        chapter_status=[
+            ChapterStatus(
+                chapter_uid="ch-1",
+                read_passes=3,
+                last_reader="test-agent",
+                issues_found=2,
+                issues_fixed=1,
+                notes="patched note",
+            )
+        ]
+    )
+    env = OpEnvelope.model_validate(
+        {
+            "op_id": str(uuid4()),
+            "ts": "2026-04-23T08:00:00Z",
+            "agent_id": "agent-1",
+            "base_version": 0,
+            "preconditions": [],
+            "op": {"op": "set_text", "block_uid": "p-1", "field": "text", "value": "Patched"},
+            "rationale": "test memory patch wiring",
+            "memory_patches": [patch.model_dump(mode="json")],
+        }
+    )
+
+    result = apply_envelope(
+        book,
+        env,
+        memory=memory,
+        now=lambda: "2026-04-23T08:00:01Z",
+    )
+
+    # Book mutation landed.
+    block = result.book.chapters[0].blocks[0]
+    assert isinstance(block, Paragraph)
+    assert block.text == "Patched"
+    assert result.book.version == 1
+
+    # Accepted log grew by one.
+    assert len(result.accepted_envelopes) == 1
+    assert result.accepted_envelopes[0].applied_version == 1
+
+    # Memory on the result reflects the patched chapter_status.
+    assert result.memory is not None
+    ch_status = result.memory.chapter_status.get("ch-1")
+    assert ch_status is not None
+    assert ch_status.read_passes == 3
+    assert ch_status.last_reader == "test-agent"
+    assert ch_status.notes == "patched note"
+
+
+def test_apply_queue_rejects_envelope_when_memory_merge_fails() -> None:
+    """If merge_edit_memory raises, apply_envelope must raise ApplyError; book/memory unchanged."""
+    book = _book()
+    memory = _memory_for(book)
+    env = OpEnvelope.model_validate(
+        {
+            "op_id": str(uuid4()),
+            "ts": "2026-04-23T08:00:00Z",
+            "agent_id": "agent-1",
+            "base_version": 0,
+            "preconditions": [],
+            "op": {"op": "set_text", "block_uid": "p-1", "field": "text", "value": "Should not land"},
+            "rationale": "test memory merge failure",
+            "memory_patches": [MemoryPatch().model_dump(mode="json")],
+        }
+    )
+
+    with patch("epubforge.editor.apply.merge_edit_memory", side_effect=ValueError("simulated merge failure")):
+        with pytest.raises(ApplyError) as exc_info:
+            apply_envelope(
+                book,
+                env,
+                memory=memory,
+                now=lambda: "2026-04-23T08:00:01Z",
+            )
+
+    # The error reason must mention the memory failure.
+    assert "memory merge failed" in exc_info.value.reason
+    assert "simulated merge failure" in exc_info.value.reason
+
+    # Book was not mutated (still version 0, text still "Alpha").
+    assert book.version == 0
+    block = book.chapters[0].blocks[0]
+    assert isinstance(block, Paragraph)
+    assert block.text == "Alpha"
+
+    # Memory was not mutated (no chapter_status changes).
+    assert memory.chapter_status.get("ch-1") is not None
+    assert memory.chapter_status["ch-1"].read_passes == 0

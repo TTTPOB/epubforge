@@ -33,7 +33,7 @@ from epubforge.editor.ops import (
     SplitMergedTable,
 )
 from epubforge.editor.leases import LeaseState
-from epubforge.editor.memory import ChapterStatus, EditMemory
+from epubforge.editor.memory import ChapterStatus, EditMemory, merge_edit_memory
 from epubforge.ir.semantic import (
     Block,
     Book,
@@ -1139,6 +1139,15 @@ def apply_envelope(
         raise ApplyError("envelope applied_version does not match replay result", env.op_id)
     if working_memory is not None and _is_topology_op(env.op):
         working_memory = _migrate_topology_memory(working_memory, env.op, updated_at=applied_at, updated_by=holder)
+    if env.memory_patches:
+        if working_memory is None:
+            raise ApplyError("envelope carries memory_patches but no memory was supplied", env.op_id)
+        for patch in env.memory_patches:
+            try:
+                merge_result = merge_edit_memory(working_memory, patch, updated_at=applied_at, updated_by=holder)
+            except Exception as exc:
+                raise ApplyError(f"memory merge failed: {exc}", env.op_id) from exc
+            working_memory = merge_result.memory
     return ApplyResult(book=updated, accepted_envelopes=(applied,), memory=working_memory)
 
 
