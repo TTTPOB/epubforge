@@ -1051,3 +1051,66 @@ class TestPagesFilter:
 
         assert len(artifact_ids_seen) == 2
         assert artifact_ids_seen[0] != artifact_ids_seen[1]
+
+    def test_manifest_page_lists_are_filtered_when_pages_used(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When --pages filter is applied, manifest.selected_pages, toc_pages,
+        and complex_pages must only contain pages within the filter set."""
+        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        work = cfg.book_work_dir(tmp_path / "book.pdf")
+        # Set up pages data with pages 1 (simple), 2 (complex), 3 (toc)
+        _setup_work_dir(work)
+
+        def fake_extract_skip_vlm(
+            raw_path: Path,
+            pages_path: Path,
+            out_dir: Path,
+            *,
+            force: bool = False,
+            page_filter: Any = None,
+        ) -> Stage3ExtractionResult:
+            unit = out_dir / "unit_0000.json"
+            unit.write_text("{}", encoding="utf-8")
+            audit = out_dir / "audit_notes.json"
+            audit.write_text("[]", encoding="utf-8")
+            bm = out_dir / "book_memory.json"
+            bm.write_text("{}", encoding="utf-8")
+            ei = out_dir / "evidence_index.json"
+            ei.write_text("{}", encoding="utf-8")
+            # Extractor returns ALL pages (unfiltered) — pipeline must filter them
+            return Stage3ExtractionResult(
+                mode="skip_vlm",
+                unit_files=[unit],
+                audit_notes_path=audit,
+                book_memory_path=bm,
+                evidence_index_path=ei,
+                selected_pages=[1, 2],
+                toc_pages=[3],
+                complex_pages=[2],
+            )
+
+        monkeypatch.setattr(
+            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
+        )
+
+        from epubforge.pipeline import run_extract
+
+        # Filter to only page 1 (simple); pages 2 (complex) and 3 (toc) should be excluded
+        run_extract(tmp_path / "book.pdf", cfg, pages={1})
+
+        _, manifest = load_active_stage3_manifest(work)
+
+        assert manifest.selected_pages == [1], (
+            f"expected [1], got {manifest.selected_pages}"
+        )
+        assert manifest.toc_pages == [], (
+            f"expected [], got {manifest.toc_pages}"
+        )
+        assert manifest.complex_pages == [], (
+            f"expected [], got {manifest.complex_pages}"
+        )
+        # page_filter itself must be recorded
+        assert manifest.page_filter == [1]

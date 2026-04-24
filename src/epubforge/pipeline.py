@@ -248,6 +248,7 @@ def run_extract(
     if pages is not None:
         page_filter = sorted(pages)
         selected_pages = sorted(p for p in selected_pages if p in pages)
+        toc_pages = sorted(p for p in toc_pages if p in pages)
         complex_pages = sorted(p for p in complex_pages if p in pages)
 
     mode = "skip_vlm" if cfg.extract.skip_vlm else "vlm"
@@ -362,9 +363,9 @@ def run_extract(
         pages_sha256=pages_sha256,
         source_pdf="source/source.pdf",
         source_pdf_sha256=source_pdf_sha256,
-        selected_pages=result.selected_pages,
-        toc_pages=result.toc_pages,
-        complex_pages=result.complex_pages,
+        selected_pages=selected_pages,
+        toc_pages=toc_pages,
+        complex_pages=complex_pages,
         page_filter=page_filter,
         unit_files=unit_files_rel,
         sidecars=sidecars_rel,
