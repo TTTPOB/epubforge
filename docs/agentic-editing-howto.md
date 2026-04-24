@@ -18,8 +18,96 @@
 - `epubforge editor compact`
 - `epubforge editor snapshot`
 - `epubforge editor render-prompt`
+- `epubforge editor render-page`
+- `epubforge editor vlm-page`
 
 `python -m epubforge.editor.*` 入口已废除。配置通过顶层 root callback 的 `--config` 一次性注入，所有子命令共享同一 `AppContext`。
+
+## skip-VLM 证据草稿与语义修复
+
+### 证据草稿的含义
+
+当 Stage 3 以 `--skip-vlm` 模式运行时，产出的块带有 `Provenance.source="docling"`，
+角色标签为 `docling_*_candidate`（如 `docling_heading_candidate`、`docling_footnote_candidate`）。
+
+**这些 candidate 角色是机械映射标签，不是语义决策。** skip-VLM 证据草稿不决定：
+
+- 章节边界与章节标题
+- 脚注的配对与归属
+- 跨页块的连续性（`cross_page` 属性）
+- 图表标题的归属
+- 列表的逻辑层级
+- 跨页表格合并
+
+### editor meta 中的 stage3 上下文
+
+`edit_state/meta.json` 包含 `stage3` 字段，记录本次提取的上下文：
+
+```json
+{
+  "stage3": {
+    "mode": "skip_vlm",
+    "skipped_vlm": true,
+    "artifact_id": "...",
+    "manifest_sha256": "...",
+    "selected_pages": [1, 2, 3, ...],
+    "complex_pages": [5, 12, ...],
+    "source_pdf": "source/source.pdf",
+    "evidence_index_path": "03_extract/artifacts/<id>/evidence_index.json",
+    "extraction_warnings_path": "..."
+  }
+}
+```
+
+supervisor 可通过 `mode` 字段判断当前书稿是否来自 skip-VLM 模式，并据此决定
+是否需要更积极地调度 scanner/reviewer 来补全语义。
+
+### candidate 角色需要 scanner/fixer 审查
+
+来自 skip-VLM 的书稿，scanner 应优先扫描 `docling_*_candidate` 角色的块：
+
+- `docling_heading_candidate`：判断是否为真实章节标题，还是普通段落
+- `docling_footnote_candidate`：判断是否为脚注，配对 callout
+- `docling_caption_candidate`：判断是否属于图/表的标题
+- `docling_list_item_candidate`：判断列表层级与逻辑归属
+- `docling_unknown_candidate`：优先标记为 open question
+
+fixer 通过以下 op 进行语义修复（在 chapter lease 保护下）：
+
+- `replace_block`：替换块内容或角色
+- `set_paragraph_cross_page`：标记跨页连续性
+- `set_table_metadata`：修复表格元数据（标题、跨页合并）
+
+### render-page 与 vlm-page 工作流
+
+在编辑阶段，supervisor 可以对原始 PDF 页面进行可视化审查或按需重调 VLM：
+
+**render-page：无 LLM/VLM 调用，仅渲染图像**
+
+```bash
+# 渲染第 5 页为 JPEG，写入 edit_state/audit/page_images/page_0005.jpg
+epubforge --config config.toml editor render-page work/mybook --page 5
+
+# 指定输出路径和 DPI
+epubforge --config config.toml editor render-page work/mybook --page 5 --dpi 150 --out /tmp/page5.jpg
+```
+
+适用场景：
+- 对某页的 candidate 角色有疑问，想先看原始版式
+- 不需要消耗 VLM token 的纯视觉核查
+
+**vlm-page：对指定页面重调 VLM（只读，不修改 book.json）**
+
+```bash
+# 对第 5 页重新调用 VLM，结果写入 edit_state/audit/vlm_pages/page_0005.json
+epubforge --config config.toml editor vlm-page work/mybook --page 5
+```
+
+注意：
+- `vlm-page` 只处理 Stage 3 已选中（`selected_pages`）的页面
+- 结果写入 `edit_state/audit/vlm_pages/`，不自动修改 `book.json`
+- supervisor 需要手动解读 VLM 结果，再通过 `propose-op` + `apply-queue` 更新书稿
+- `vlm-page` 要求 `[vlm]` 配置和 provider key
 
 ## 角色分工
 
@@ -37,6 +125,7 @@
 - `doctor` 报告某章 `needs_scan`
 - 出现 `style_inconsistency` 或 `unusual_density` 提示
 - 新导入的书还没有形成足够的风格记忆
+- skip-VLM 模式下大量 `docling_*_candidate` 角色待审查
 
 不适合交给 scanner 的事：
 
@@ -86,7 +175,8 @@
 结果：
 
 - 生成 `edit_state/book.json`
-- 生成 `meta.json`、`memory.json`、`leases.json`
+- 生成 `meta.json`（含 `stage3` 上下文，如果 Stage 3 产物存在）
+- 生成 `memory.json`、`leases.json`
 - 初始化空的 `edit_log.jsonl` 和 `staging.jsonl`
 - 为 chapter / block 补全稳定 uid，并把 `book.op_log_version` 置为 0
 
@@ -114,6 +204,7 @@ supervisor 每一轮都应先读 doctor 结果，再决定本轮开 scanner、fi
 - 有 `issues`：先开 fixer
 - 无 `issues`，但有 `chapters_unscanned` 或扫描类 hints：开 scanner
 - 有 unresolved `open_questions`：开 reviewer
+- skip-VLM 模式下 candidate 角色未审查：优先开 scanner
 
 ### 3. 用 `render-prompt` 生成上下文
 
@@ -121,7 +212,7 @@ supervisor 每一轮都应先读 doctor 结果，再决定本轮开 scanner、fi
 
 fixer / reviewer 可以额外通过 `--issues` 传入本轮关注的问题列表。
 
-这一步的目的是把“规则知识”和“当前书况”绑定到同一提示里，而不是让 subagent 自己到处翻文件猜状态。
+这一步的目的是把"规则知识"和"当前书况"绑定到同一提示里，而不是让 subagent 自己到处翻文件猜状态。
 
 ### 4. 章节内修改走 lease
 
@@ -144,9 +235,9 @@ lease 的意义：
 - `compact`
 - `init`
 
-book lock 不是普通“更强 lease”，而是整本书的独占保护。
+book lock 不是普通"更强 lease"，而是整本书的独占保护。
 
-`compact` 不属于“持锁执行”的范畴。它只能在当前没有任何 active chapter lease、且也没有 book lock 时运行。
+`compact` 不属于"持锁执行"的范畴。它只能在当前没有任何 active chapter lease、且也没有 book lock 时运行。
 
 ### 6. 先暂存，再应用
 
@@ -165,7 +256,7 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 - 更新 `memory.json`
 - 把失败 op 记入 rejected log
 
-这套两步式流程的意义是把“生成修改”与“接受修改”分开，便于 supervisor 管理并发和回退。
+这套两步式流程的意义是把"生成修改"与"接受修改"分开，便于 supervisor 管理并发和回退。
 
 ## `run-script` 的语义
 
@@ -203,7 +294,7 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 
 `compact <work>` 会把当前已接受的 edit log 归档到 `edit_state/log.archive/<timestamp>/`，并在新的 `edit_log.jsonl` 里留下一个 `compact_marker`。
 
-它的语义是“压缩日志历史”，不是“冻结书稿”：
+它的语义是"压缩日志历史"，不是"冻结书稿"：
 
 - 不改变 `book.json` 内容
 - 需要当前没有任何 active chapter lease，也没有 book lock
@@ -228,7 +319,7 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 - 生成对应的 inverse op
 - 记录 revert backref
 
-因此，`revert` 的语义是“通过日志反操作回退某条历史 op”，不是把整个工作目录回滚到某个 snapshot。
+因此，`revert` 的语义是"通过日志反操作回退某条历史 op"，不是把整个工作目录回滚到某个 snapshot。
 
 ## 收敛怎么判断
 
@@ -241,7 +332,7 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 
 满足后，`doctor.readiness.converged` 会为真。
 
-实践上，supervisor 应把它理解为“可以停”的信号，而不是“必须停”的命令。若你刚做完重大 reviewer 裁决，通常还值得再跑一轮确认 doctor delta 已静默。
+实践上，supervisor 应把它理解为"可以停"的信号，而不是"必须停"的命令。若你刚做完重大 reviewer 裁决，通常还值得再跑一轮确认 doctor delta 已静默。
 
 ## 推荐节奏
 
@@ -259,9 +350,17 @@ subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
 
 如果 `delta.quiet_round_streak` 长期增长、当前 log 已很长，可以在没有 active lease / lock 的空闲窗口做 `snapshot` 或 `compact`。
 
+skip-VLM 模式下首次运行时，建议：
+
+1. `doctor` 确认 candidate 块数量
+2. 先开 scanner 对 candidate 块进行审查，生成 open questions
+3. 再开 reviewer 做语义裁决
+4. fixer 执行确定性修复（`replace_block`、`set_paragraph_cross_page`、`set_table_metadata`）
+5. 对有疑问的复杂页面，用 `render-page` 或 `vlm-page` 获取更多证据
+
 ## 与规则文档的关系
 
-本 howto 只回答“怎么 orchestrate”。至于“什么叫正确的标点、表格、脚注、结构判断”，必须回到：
+本 howto 只回答"怎么 orchestrate"。至于"什么叫正确的标点、表格、脚注、结构判断"，必须回到：
 
 - [rules/punctuation.md](./rules/punctuation.md)
 - [rules/tables.md](./rules/tables.md)

@@ -15,11 +15,24 @@ prompt + image).
 
 | Stage | Name | CLI / `--from` | Input | Output |
 |-------|------|----------------|-------|--------|
-| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON) |
+| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied) |
 | 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
-| 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` | `03_extract/unit_*.json` (LLM+VLM blocks) |
-| 4 | assemble | `assemble` / `--from 4` | `03_extract/` | `05_semantic_raw.json` (Semantic IR) |
+| 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` + `source/source.pdf` | `03_extract/artifacts/<id>/` + `03_extract/active_manifest.json` |
+| 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
 | 5 | build | `build` | `edit_state/book.json` or `05_semantic.json` | `out/<name>.epub` |
+
+Stage 3 supports two modes:
+
+- **VLM mode** (default): calls VLM to analyze page images; requires `[vlm]` provider key
+- **skip-VLM mode** (`--skip-vlm`): uses Docling mechanical parse only; no VLM key needed; produces evidence draft with `Provenance.source="docling"` and `docling_*_candidate` roles
+
+Stage 3 artifacts are **manifest-addressed**: the `artifact_id` is derived from a SHA-256 of
+`(source_pdf_sha256, mode, selected_pages)`. A new mode or page selection produces a new
+`artifact_id`; Stage 4 detects stale output by comparing `active_manifest.json` sha with
+`Book.extraction.stage3_manifest_sha256`.
+
+**Old workdirs** (layout: `03_extract/unit_*.json` at root level, no `source/source.pdf`) are
+**not migrated**. Rerun the full pipeline to generate the new format.
 
 > Note: `pipeline.py` has a lingering `stage_timer(log, "8 build")` label at line 117
 > (a pre-D6 artifact). This is cosmetic only — the stage is Stage 5 per D6=B.
@@ -86,12 +99,12 @@ Full JSON schema: see `editor/ops.py` (ops and envelope definitions),
 
 ### `epubforge editor <cmd>` commands
 
-All 12 commands are available via `epubforge editor <cmd>`. Each command receives
+All 14 commands are available via `epubforge editor <cmd>`. Each command receives
 effective config from `ctx.find_root().obj.config` (injected by the root Typer callback).
 
 | Command | Purpose |
 |---------|---------|
-| `init` | Initialize `edit_state/` from `05_semantic.json` |
+| `init` | Initialize `edit_state/` from `05_semantic.json`; reads Stage 3 active manifest to populate `meta.json` stage3 context |
 | `doctor` | Run audit detectors and print readiness report |
 | `propose-op` | Validate `OpEnvelope[]` from stdin and append to `staging.jsonl` |
 | `apply-queue` | Apply staged envelopes from `staging.jsonl` to `book.json` and edit log |
@@ -103,6 +116,8 @@ effective config from `ctx.find_root().obj.config` (injected by the root Typer c
 | `compact` | Compact the accepted edit log into an archive snapshot |
 | `snapshot` | Copy current `edit_state/` into `snapshots/<tag>/` |
 | `render-prompt` | Render a subagent prompt with current `op_log_version` and memory |
+| `render-page` | Render a page from `source/source.pdf` to JPEG; **no LLM/VLM calls** |
+| `vlm-page` | Re-analyze a selected page via VLM; writes to `edit_state/audit/vlm_pages/`; never mutates `book.json` |
 
 Example usage:
 ```bash
@@ -110,7 +125,54 @@ epubforge --config config.example.toml editor init work/mybook
 epubforge --config config.example.toml editor doctor work/mybook
 epubforge --config config.example.toml editor propose-op work/mybook < ops.json
 epubforge --config config.example.toml editor apply-queue work/mybook
+
+# Render page 5 of source PDF (no VLM):
+epubforge --config config.example.toml editor render-page work/mybook --page 5
+# Re-analyze page 5 with VLM (result in audit/vlm_pages/page_0005.json):
+epubforge --config config.example.toml editor vlm-page work/mybook --page 5
 ```
+
+### Stage 3 context in `edit_state/meta.json`
+
+After `editor init`, `meta.json` includes a `stage3` object:
+
+```json
+{
+  "stage3": {
+    "mode": "vlm | skip_vlm | unknown",
+    "skipped_vlm": true,
+    "artifact_id": "...",
+    "manifest_sha256": "...",
+    "selected_pages": [1, 2, ...],
+    "complex_pages": [5, 12, ...],
+    "source_pdf": "source/source.pdf",
+    "evidence_index_path": "03_extract/artifacts/<id>/evidence_index.json",
+    "extraction_warnings_path": "..."
+  }
+}
+```
+
+`mode` can be used by agents to determine whether `docling_*_candidate` roles need
+semantic repair before the book is considered complete.
+
+### skip-VLM evidence draft and candidate repair ops
+
+When `stage3.skipped_vlm == true`, blocks have `Provenance.source="docling"` and
+`docling_*_candidate` roles. These are mechanical Docling labels — **not semantic decisions**.
+
+skip-VLM does not decide: chapter boundaries, footnote pairing, cross-page continuations,
+caption attribution, list hierarchy, or cross-page table merges.
+
+Agent ops for semantic repair (must be under chapter lease):
+
+| Op | Purpose |
+|----|---------|
+| `replace_block` | Replace block content, role, or type |
+| `set_paragraph_cross_page` | Mark or unmark a paragraph as cross-page continuation |
+| `set_table_metadata` | Repair table title, caption, and cross-page merge metadata |
+
+`vlm-page` can be used to gather VLM evidence for specific pages before issuing repair ops.
+`render-page` can be used to inspect a page visually without consuming VLM tokens.
 
 ## Audit Subsystem
 
@@ -139,7 +201,7 @@ Core classes are in `src/epubforge/ir/semantic.py` (and `ir/book_memory.py`):
   cross-page continuations); `merge_record: TableMergeRecord | None`
 - `TableMergeRecord` — provenance for merged tables: `segment_html`, `segment_pages`,
   `segment_order`, `column_widths` (recorded at assemble time before uid init)
-- `Provenance` — `{page, bbox, source: "llm"|"vlm"|"passthrough"}`
+- `Provenance` — `{page, bbox, source: "llm"|"vlm"|"docling"|"passthrough"}`; `source="docling"` indicates skip-VLM mechanical parse output
 - `BookMemory` — rolling per-book facts: `footnote_callouts`, `attribution_templates`,
   `epigraph_chapters`, `punctuation_quirks`, `running_headers`, `chapter_heading_style`,
   `notes` (in `ir/book_memory.py`)
@@ -168,7 +230,7 @@ mirrors the Python model structure exactly.
 | `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
 | `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
 | `EditorSettings` | `[editor]` | Lease TTLs, compact threshold, max loops |
-| `ExtractSettings` | `[extract]` | VLM DPI, batch sizes, book memory toggle |
+| `ExtractSettings` | `[extract]` | VLM DPI, skip-VLM toggle, VLM batch size, book memory toggle |
 
 Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
 
@@ -217,8 +279,8 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 **`[extract]` submodel:**
 ```
 EPUBFORGE_EXTRACT_VLM_DPI                   extract.vlm_dpi
-EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES    extract.max_simple_batch_pages
-EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES   extract.max_complex_batch_pages
+EPUBFORGE_EXTRACT_SKIP_VLM                  extract.skip_vlm  (1/true/yes/on = True)
+EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES       extract.max_vlm_batch_pages
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
 ```
 
