@@ -1,4 +1,4 @@
-"""Append-only editor log helpers."""
+"""Append-only audit log helpers for the BookPatch/AgentOutput editor workflow."""
 
 from __future__ import annotations
 
@@ -6,63 +6,38 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from epubforge.editor.apply import ApplyError, ApplyResult, RevertBackref, apply_envelope
-from epubforge.editor.ops import CompactMarker, OpEnvelope
 from epubforge.ir.semantic import Book
 
 
 CURRENT_LOG = "edit_log.jsonl"
-REJECTED_LOG = "edit_log.rejected.jsonl"
-INDEX_LOG = "edit_log.index.jsonl"
-REVERT_BACKREF_LOG = "edit_log.revert_backrefs.jsonl"
 ARCHIVE_DIR = "log.archive"
 BOOK_FILE = "book.json"
+APPLIED_EVENT_KINDS = frozenset({"agent_output_submitted"})
+COMPACT_MARKER = "compact_marker"
+COMPACT_APPLIED_EVENT_COUNT = "applied_event_count"
 
 
-class RejectedLogEntry(BaseModel):
+class AuditLogEntry(BaseModel):
+    """Single audit-log event emitted by the current editor system."""
+
     model_config = ConfigDict(extra="forbid")
 
-    op_id: str
+    event_id: str
     ts: str
-    reason: str
-    envelope: OpEnvelope
-
-
-class IndexEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    op_id: str
-    archive_path: str
-
-
-class RevertBackrefEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target_op_id: str
-    revert_op_id: str
-    inverse_op_id: str
-    ts: str
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class EditLogPaths:
     root: Path
     current: Path
-    rejected: Path
-    index: Path
-    revert_backrefs: Path
     archive_root: Path
-
-
-@dataclass(frozen=True)
-class LocatedEnvelope:
-    envelope: OpEnvelope
-    archive_path: Path | None = None
 
 
 def resolve_edit_log_paths(path: str | Path) -> EditLogPaths:
@@ -75,14 +50,7 @@ def resolve_edit_log_paths(path: str | Path) -> EditLogPaths:
         current = root / CURRENT_LOG
     else:
         raise ValueError(f"expected edit-state dir or {CURRENT_LOG}, got {candidate}")
-    return EditLogPaths(
-        root=root,
-        current=current,
-        rejected=root / REJECTED_LOG,
-        index=root / INDEX_LOG,
-        revert_backrefs=root / REVERT_BACKREF_LOG,
-        archive_root=root / ARCHIVE_DIR,
-    )
+    return EditLogPaths(root=root, current=current, archive_root=root / ARCHIVE_DIR)
 
 
 def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
@@ -101,83 +69,55 @@ def _iter_jsonl(path: Path) -> Iterable[dict[str, object]]:
                 yield json.loads(line)
 
 
-def read_current_log(path: str | Path) -> list[OpEnvelope]:
+def read_current_log(path: str | Path) -> list[AuditLogEntry]:
     paths = resolve_edit_log_paths(path)
-    return [OpEnvelope.model_validate(item) for item in _iter_jsonl(paths.current)]
+    return [AuditLogEntry.model_validate(item) for item in _iter_jsonl(paths.current)]
 
 
-def append_accepted_log(path: str | Path, envelope: OpEnvelope) -> None:
-    if envelope.applied_version is None or envelope.applied_at is None:
-        raise ValueError("accepted envelopes must have applied_version and applied_at")
+def append_audit_event(
+    path: str | Path,
+    *,
+    kind: str,
+    ts: str,
+    payload: dict[str, Any] | None = None,
+) -> AuditLogEntry:
+    """Append a current-system audit event and return the stored entry."""
+
+    entry = AuditLogEntry(
+        event_id=str(uuid4()),
+        ts=ts,
+        kind=kind,
+        payload=payload or {},
+    )
     paths = resolve_edit_log_paths(path)
-    _append_jsonl(paths.current, envelope.model_dump(mode="json"))
+    _append_jsonl(paths.current, entry.model_dump(mode="json"))
+    return entry
 
 
-def append_rejected_log(path: str | Path, envelope: OpEnvelope, *, reason: str, rejected_at: str) -> None:
-    paths = resolve_edit_log_paths(path)
-    entry = RejectedLogEntry(op_id=envelope.op_id, ts=rejected_at, reason=reason, envelope=envelope)
-    _append_jsonl(paths.rejected, entry.model_dump(mode="json"))
+def count_current_log_events(path: str | Path) -> int:
+    return len(read_current_log(path))
 
 
-def append_revert_backref(path: str | Path, backref: RevertBackref) -> None:
-    paths = resolve_edit_log_paths(path)
-    entry = RevertBackrefEntry(**backref.__dict__)
-    _append_jsonl(paths.revert_backrefs, entry.model_dump(mode="json"))
+def count_applied_log_events(path: str | Path) -> int:
+    """Count accepted mutation events monotonically across log compaction.
+
+    Compaction rewrites the current JSONL log to a compact marker plus any later
+    events. The marker stores the cumulative accepted-event count through the
+    archived log so doctor deltas remain stable after compaction.
+    """
+
+    total = 0
+    for entry in read_current_log(path):
+        if entry.kind == COMPACT_MARKER:
+            total = int(entry.payload[COMPACT_APPLIED_EVENT_COUNT])
+        elif entry.kind in APPLIED_EVENT_KINDS:
+            total += 1
+    return total
 
 
-def known_op_ids(path: str | Path) -> set[str]:
-    paths = resolve_edit_log_paths(path)
-    op_ids = {env.op_id for env in read_current_log(paths.root)}
-    op_ids.update(IndexEntry.model_validate(item).op_id for item in _iter_jsonl(paths.index))
-    return op_ids
+def compact_log(path: str | Path, book: Book, *, ts: str) -> AuditLogEntry:
+    """Archive the current audit log and replace it with a compact marker event."""
 
-
-def reverted_target_op_ids(path: str | Path) -> set[str]:
-    paths = resolve_edit_log_paths(path)
-    return {RevertBackrefEntry.model_validate(item).target_op_id for item in _iter_jsonl(paths.revert_backrefs)}
-
-
-def find_envelope(path: str | Path, op_id: str) -> LocatedEnvelope | None:
-    paths = resolve_edit_log_paths(path)
-    for envelope in read_current_log(paths.root):
-        if envelope.op_id == op_id:
-            return LocatedEnvelope(envelope=envelope)
-    for item in _iter_jsonl(paths.index):
-        entry = IndexEntry.model_validate(item)
-        if entry.op_id != op_id:
-            continue
-        archive_path = paths.root / entry.archive_path
-        for archived in _iter_jsonl(archive_path / CURRENT_LOG):
-            envelope = OpEnvelope.model_validate(archived)
-            if envelope.op_id == op_id:
-                return LocatedEnvelope(envelope=envelope, archive_path=archive_path)
-    return None
-
-
-def apply_and_log(book: Book, path: str | Path, envelope: OpEnvelope, *, now: str | None = None) -> ApplyResult:
-    paths = resolve_edit_log_paths(path)
-    timestamp = now or envelope.applied_at or envelope.ts
-    try:
-        result = apply_envelope(
-            book,
-            envelope,
-            existing_op_ids=known_op_ids(paths.root),
-            reverted_target_op_ids=reverted_target_op_ids(paths.root),
-            resolve_target=lambda op_id: (located.envelope if (located := find_envelope(paths.root, op_id)) else None),
-            now=lambda: timestamp,
-        )
-    except ApplyError as exc:
-        append_rejected_log(paths.root, envelope, reason=exc.reason, rejected_at=timestamp)
-        raise
-
-    for accepted in result.accepted_envelopes:
-        append_accepted_log(paths.root, accepted)
-    if result.revert_backref is not None:
-        append_revert_backref(paths.root, result.revert_backref)
-    return result
-
-
-def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
     paths = resolve_edit_log_paths(path)
     archive_name = ts.replace(":", "-")
     archive_path = paths.archive_root / archive_name
@@ -185,7 +125,8 @@ def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
 
     from epubforge.editor.state import atomic_write_text  # lazy: avoid circular import
 
-    current_log = read_current_log(paths.root)
+    archived_events = read_current_log(paths.root)
+    applied_event_count = count_applied_log_events(paths.root)
     if paths.current.exists():
         shutil.copyfile(paths.current, archive_path / CURRENT_LOG)
     else:
@@ -193,53 +134,33 @@ def compact_log(path: str | Path, book: Book, *, ts: str) -> OpEnvelope:
     atomic_write_text(archive_path / BOOK_FILE, book.model_dump_json(indent=2))
 
     relative_archive = archive_path.relative_to(paths.root)
-    for envelope in current_log:
-        _append_jsonl(
-            paths.index,
-            IndexEntry(op_id=envelope.op_id, archive_path=str(relative_archive)).model_dump(mode="json"),
-        )
-
-    marker = OpEnvelope(
-        op_id=str(uuid4()),
+    marker = AuditLogEntry(
+        event_id=str(uuid4()),
         ts=ts,
-        agent_id="supervisor-compact",
-        base_version=book.op_log_version,
-        op=CompactMarker(
-            op="compact_marker",
-            compacted_at_version=book.op_log_version,
-            archive_path=str(relative_archive),
-            archived_op_count=len(current_log),
-        ),
-        rationale=f"compact log into {relative_archive}",
-        applied_version=book.op_log_version,
-        applied_at=ts,
+        kind=COMPACT_MARKER,
+        payload={
+            "archive_path": str(relative_archive),
+            "archived_event_count": len(archived_events),
+            COMPACT_APPLIED_EVENT_COUNT: applied_event_count,
+        },
     )
-
-    paths.current.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(paths.current, marker.model_dump_json() + "\n")  # noqa: F821  (imported above)
+    atomic_write_text(paths.current, marker.model_dump_json() + "\n")
     return marker
 
 
 __all__ = [
     "ARCHIVE_DIR",
     "BOOK_FILE",
+    "COMPACT_APPLIED_EVENT_COUNT",
+    "COMPACT_MARKER",
     "CURRENT_LOG",
-    "INDEX_LOG",
-    "REJECTED_LOG",
-    "REVERT_BACKREF_LOG",
+    "APPLIED_EVENT_KINDS",
+    "AuditLogEntry",
     "EditLogPaths",
-    "IndexEntry",
-    "LocatedEnvelope",
-    "RejectedLogEntry",
-    "RevertBackrefEntry",
-    "append_accepted_log",
-    "append_rejected_log",
-    "append_revert_backref",
-    "apply_and_log",
+    "append_audit_event",
+    "count_applied_log_events",
     "compact_log",
-    "find_envelope",
-    "known_op_ids",
+    "count_current_log_events",
     "read_current_log",
     "resolve_edit_log_paths",
-    "reverted_target_op_ids",
 ]

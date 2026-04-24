@@ -8,7 +8,12 @@ from typing import Iterable, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from epubforge.audit import DASH_CHAR_LABELS, AuditBundle, DashInventoryChapter, run_all_detectors
+from epubforge.audit import (
+    DASH_CHAR_LABELS,
+    AuditBundle,
+    DashInventoryChapter,
+    run_all_detectors,
+)
 from epubforge.editor._validators import StrictModel, require_non_empty
 from epubforge.editor.memory import EditMemory, OpenQuestion
 from epubforge.ir.semantic import AuditNote, Book, Paragraph, Table
@@ -46,7 +51,9 @@ def chapters_missing_scan(memory: EditMemory, chapter_uids: Iterable[str]) -> li
     return missing
 
 
-def _resolve_chapter_uids(*, book: Book | None, chapter_uids: list[str] | None) -> list[str]:
+def _resolve_chapter_uids(
+    *, book: Book | None, chapter_uids: list[str] | None
+) -> list[str]:
     if chapter_uids is not None:
         return chapter_uids
     if book is None:
@@ -91,11 +98,15 @@ class Hint(StrictModel):
 
     @model_validator(mode="after")
     def _validate_scope(self) -> Hint:
-        if self.scope == "book" and (self.chapter_uid is not None or self.block_uid is not None):
+        if self.scope == "book" and (
+            self.chapter_uid is not None or self.block_uid is not None
+        ):
             raise ValueError("book-scoped hints must not set chapter_uid or block_uid")
         if self.scope == "chapter" and self.chapter_uid is None:
             raise ValueError("chapter-scoped hints must set chapter_uid")
-        if self.scope == "block" and (self.chapter_uid is None or self.block_uid is None):
+        if self.scope == "block" and (
+            self.chapter_uid is None or self.block_uid is None
+        ):
             raise ValueError("block-scoped hints must set chapter_uid and block_uid")
         return self
 
@@ -130,7 +141,9 @@ class DoctorReport(StrictModel):
     delta: DoctorDelta | None = None
 
 
-def _book_dominant_dash(inventory: list[DashInventoryChapter]) -> tuple[str | None, Counter[str]]:
+def _book_dominant_dash(
+    inventory: list[DashInventoryChapter],
+) -> tuple[str | None, Counter[str]]:
     totals: Counter[str] = Counter()
     for entry in inventory:
         totals.update(entry.counts)
@@ -141,9 +154,16 @@ def _book_dominant_dash(inventory: list[DashInventoryChapter]) -> tuple[str | No
 
 
 def _style_inconsistency_hints(bundle: AuditBundle) -> list[Hint]:
-    inventory = [entry for entry in bundle.dash_inventory if entry.total >= 3 and entry.dominant_char is not None]
+    inventory = [
+        entry
+        for entry in bundle.dash_inventory
+        if entry.total >= 3 and entry.dominant_char is not None
+    ]
     book_dominant, totals = _book_dominant_dash(inventory)
-    if book_dominant is None or len([count for count in totals.values() if count > 0]) < 2:
+    if (
+        book_dominant is None
+        or len([count for count in totals.values() if count > 0]) < 2
+    ):
         return []
     hints: list[Hint] = []
     for entry in inventory:
@@ -251,7 +271,9 @@ def _skip_vlm_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
         block = ref.block
         if not isinstance(block, Paragraph):
             continue
-        if not block.role.startswith("docling_") or not block.role.endswith("_candidate"):
+        if not block.role.startswith("docling_") or not block.role.endswith(
+            "_candidate"
+        ):
             continue
         if ref.chapter.uid is None or block.uid is None:
             continue
@@ -298,10 +320,15 @@ def _skip_vlm_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
 
 
 def _convention_signature(memory: EditMemory) -> dict[str, tuple[str, float]]:
-    return {key: (note.value, round(note.confidence, 6)) for key, note in memory.conventions.items()}
+    return {
+        key: (note.value, round(note.confidence, 6))
+        for key, note in memory.conventions.items()
+    }
 
 
-def _pattern_signature(memory: EditMemory) -> dict[str, tuple[tuple[str, ...], bool, str | None]]:
+def _pattern_signature(
+    memory: EditMemory,
+) -> dict[str, tuple[tuple[str, ...], bool, str | None]]:
     return {
         key: (tuple(note.affected_uids), note.resolved, note.suggested_fix)
         for key, note in memory.patterns.items()
@@ -331,7 +358,9 @@ def compute_doctor_delta(
     )
 
     current_conventions = _convention_signature(memory)
-    previous_conventions = _convention_signature(previous_memory) if previous_memory is not None else {}
+    previous_conventions = (
+        _convention_signature(previous_memory) if previous_memory is not None else {}
+    )
     fresh_convention_keys = sorted(
         key
         for key, signature in current_conventions.items()
@@ -339,22 +368,38 @@ def compute_doctor_delta(
     )
 
     current_patterns = _pattern_signature(memory)
-    previous_patterns = _pattern_signature(previous_memory) if previous_memory is not None else {}
+    previous_patterns = (
+        _pattern_signature(previous_memory) if previous_memory is not None else {}
+    )
     fresh_pattern_keys = sorted(
         key
         for key, signature in current_patterns.items()
         if key not in previous_patterns or previous_patterns[key] != signature
     )
 
-    current_open_questions: set[str] = {question.q_id for question in memory.open_questions if not question.resolved}
+    current_open_questions: set[str] = {
+        question.q_id for question in memory.open_questions if not question.resolved
+    }
     previous_open_questions: set[str] = (
-        {question.q_id for question in previous_memory.open_questions if not question.resolved}
+        {
+            question.q_id
+            for question in previous_memory.open_questions
+            if not question.resolved
+        }
         if previous_memory is not None
         else set()
     )
 
-    quiet_round = not fresh_convention_keys and not fresh_pattern_keys and new_applied_op_count == 0
-    prior_streak = previous_report.delta.quiet_round_streak if previous_report and previous_report.delta else 0
+    quiet_round = (
+        not fresh_convention_keys
+        and not fresh_pattern_keys
+        and new_applied_op_count == 0
+    )
+    prior_streak = (
+        previous_report.delta.quiet_round_streak
+        if previous_report and previous_report.delta
+        else 0
+    )
     quiet_round_streak = prior_streak + 1 if quiet_round else 0
 
     return DoctorDelta(
@@ -365,7 +410,9 @@ def compute_doctor_delta(
         fresh_convention_keys=fresh_convention_keys,
         fresh_pattern_keys=fresh_pattern_keys,
         new_open_question_ids=sorted(current_open_questions - previous_open_questions),
-        resolved_open_question_ids=sorted(previous_open_questions - current_open_questions),
+        resolved_open_question_ids=sorted(
+            previous_open_questions - current_open_questions
+        ),
         new_applied_op_count=new_applied_op_count,
         quiet_round=quiet_round,
         quiet_round_streak=quiet_round_streak,
@@ -381,7 +428,11 @@ def evaluate_convergence(
     supervisor_ready_to_stop: bool = True,
 ) -> ReadinessChecklist:
     chapters_unscanned = chapters_missing_scan(memory, chapter_uids)
-    chapters_scanned = [chapter_uid for chapter_uid in sorted(set(chapter_uids)) if chapter_uid not in chapters_unscanned]
+    chapters_scanned = [
+        chapter_uid
+        for chapter_uid in sorted(set(chapter_uids))
+        if chapter_uid not in chapters_unscanned
+    ]
     open_question_count = len(unresolved_questions(memory))
     converged = (
         not issues
@@ -436,16 +487,30 @@ def _suggested_next_actions(
 ) -> list[str]:
     actions: list[str] = []
     if issues:
-        actions.append(f"存在 {len(issues)} 条结构审计问题，建议开 fixer subagent 处理。")
+        actions.append(
+            f"存在 {len(issues)} 条结构审计问题，建议开 fixer subagent 处理。"
+        )
     for chapter_uid in readiness.chapters_unscanned:
         actions.append(f"{chapter_uid} 尚未通读，建议开 scanner subagent。")
     for question in unresolved_questions(memory):
-        actions.append(f"OpenQuestion {question.q_id} 需要 reviewer 仲裁：{question.question}")
+        actions.append(
+            f"OpenQuestion {question.q_id} 需要 reviewer 仲裁：{question.question}"
+        )
     if readiness.converged:
         actions.append("doctor 判定已收敛；supervisor 可停止编辑循环。")
-    elif not supervisor_ready_to_stop and not issues and readiness.open_questions == 0 and not readiness.chapters_unscanned:
+    elif (
+        not supervisor_ready_to_stop
+        and not issues
+        and readiness.open_questions == 0
+        and not readiness.chapters_unscanned
+    ):
         actions.append("结构与扫描条件已满足，但仍需 supervisor 做最后一轮约定审视。")
-    elif not readiness.converged and not issues and readiness.open_questions == 0 and not readiness.chapters_unscanned:
+    elif (
+        not readiness.converged
+        and not issues
+        and readiness.open_questions == 0
+        and not readiness.chapters_unscanned
+    ):
         if delta.quiet_round_streak < 2:
             actions.append("继续下一轮 doctor；还未达到连续 2 轮静默收敛窗口。")
     return actions
@@ -476,7 +541,12 @@ def build_doctor_report(
             skip_vlm_hint_list = _skip_vlm_hints(book, book.extraction.complex_pages)
     if issues is None:
         raise ValueError("issues or book must be provided")
-    hints = [*(detector_hints or []), *auto_detector_hints, *skip_vlm_hint_list, *_core_hints(memory, resolved_chapter_uids)]
+    hints = [
+        *(detector_hints or []),
+        *auto_detector_hints,
+        *skip_vlm_hint_list,
+        *_core_hints(memory, resolved_chapter_uids),
+    ]
     delta = compute_doctor_delta(
         memory=memory,
         hints=hints,

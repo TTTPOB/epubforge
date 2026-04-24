@@ -8,7 +8,13 @@ from typing import Literal
 from epubforge.ir.semantic import AuditNote
 
 
-AuditNoteKind = Literal["orphan_footnote", "suspect_attribution", "punctuation_anomaly", "unknown_callout", "other"]
+AuditNoteKind = Literal[
+    "orphan_footnote",
+    "suspect_attribution",
+    "punctuation_anomaly",
+    "unknown_callout",
+    "other",
+]
 
 DASH_CHAR_LABELS: dict[str, str] = {
     "\u002d": "HYPHEN-MINUS",

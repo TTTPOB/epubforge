@@ -15,13 +15,9 @@ from typing import Any
 import pytest
 
 from epubforge.config import Config, ExtractSettings, RuntimeSettings
-from epubforge.ir.semantic import Book, ExtractionMetadata, Paragraph, Provenance
+from epubforge.ir.semantic import Book, Paragraph
 from epubforge.stage3_artifacts import (
     Stage3ExtractionResult,
-    Stage3Manifest,
-    _sha256_str,
-    activate_manifest_atomic,
-    write_artifact_manifest_atomic,
 )
 
 
@@ -60,7 +56,19 @@ _BASE_DOC_JSON: dict[str, Any] = {
             "children": [],
             "content_layer": "body",
             "label": "text",
-            "prov": [{"page_no": 1, "bbox": {"l": 0, "t": 792, "r": 612, "b": 0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 10]}],
+            "prov": [
+                {
+                    "page_no": 1,
+                    "bbox": {
+                        "l": 0,
+                        "t": 792,
+                        "r": 612,
+                        "b": 0,
+                        "coord_origin": "BOTTOMLEFT",
+                    },
+                    "charspan": [0, 10],
+                }
+            ],
             "orig": "Hello world",
             "text": "Hello world",
         }
@@ -231,10 +239,14 @@ def test_skip_vlm_e2e_no_api_key(
 
     # Guard: require_vlm / require_llm must never be called on this path
     def _fail_require_vlm(self: Any) -> None:
-        raise AssertionError("require_vlm called in skip-VLM E2E test — no API key available")
+        raise AssertionError(
+            "require_vlm called in skip-VLM E2E test — no API key available"
+        )
 
     def _fail_require_llm(self: Any) -> None:
-        raise AssertionError("require_llm called in skip-VLM E2E test — no API key available")
+        raise AssertionError(
+            "require_llm called in skip-VLM E2E test — no API key available"
+        )
 
     monkeypatch.setattr(Config, "require_vlm", _fail_require_vlm)
     monkeypatch.setattr(Config, "require_llm", _fail_require_llm)
@@ -282,7 +294,9 @@ def test_skip_vlm_e2e_no_api_key(
     # Verify role and provenance survive assembly
     first_block = book.chapters[0].blocks[0]
     assert isinstance(first_block, Paragraph)
-    assert first_block.role == "docling_heading_candidate", f"Expected role preserved, got {first_block.role!r}"
+    assert first_block.role == "docling_heading_candidate", (
+        f"Expected role preserved, got {first_block.role!r}"
+    )
     assert first_block.provenance.source == "docling"
     assert first_block.provenance.bbox == [0, 792, 612, 0]
     assert first_block.provenance.raw_ref == "#/texts/0"
@@ -319,7 +333,9 @@ def test_skip_vlm_e2e_no_api_key(
     from epubforge.editor.state import resolve_editor_paths
 
     paths = resolve_editor_paths(work)
-    assert paths.book_path.exists(), "edit_state/book.json must be written by editor init"
+    assert paths.book_path.exists(), (
+        "edit_state/book.json must be written by editor init"
+    )
 
     editor_book = Book.model_validate_json(paths.book_path.read_text(encoding="utf-8"))
     assert editor_book.initialized_at, "editor book must have initialized_at set"

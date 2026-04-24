@@ -14,11 +14,9 @@ from epubforge.stage3_artifacts import (
     Stage3ExtractionResult,
     Stage3Manifest,
     activate_manifest_atomic,
-    active_manifest_matches_desired,
     build_desired_stage3_manifest,
     load_active_stage3_manifest,
     write_artifact_manifest_atomic,
-    _sha256_str,
 )
 
 
@@ -37,7 +35,9 @@ def _make_cfg(
         runtime=RuntimeSettings(work_dir=tmp_path / "work"),
         extract=ExtractSettings(skip_vlm=skip_vlm),
         llm={"api_key": api_key} if api_key else {},
-        vlm={"api_key": api_key, "model": "google/gemini-flash-3", "max_tokens": 16384} if api_key else {"model": "google/gemini-flash-3", "max_tokens": 16384},
+        vlm={"api_key": api_key, "model": "google/gemini-flash-3", "max_tokens": 16384}
+        if api_key
+        else {"model": "google/gemini-flash-3", "max_tokens": 16384},
     )
 
 
@@ -717,9 +717,7 @@ class TestFailedExtractionPreservesOldPointer:
         with pytest.raises(RuntimeError):
             run_extract(tmp_path / "book.pdf", cfg)
 
-        new_manifest = (
-            work / "03_extract" / "artifacts" / desired_id / "manifest.json"
-        )
+        new_manifest = work / "03_extract" / "artifacts" / desired_id / "manifest.json"
         assert not new_manifest.exists()
 
 
@@ -1046,7 +1044,9 @@ class TestPagesFilter:
                 evidence_index_path=ei,
                 selected_pages=pages_out,
                 toc_pages=[3],
-                complex_pages=[p for p in [2] if page_filter is None or p in page_filter],
+                complex_pages=[
+                    p for p in [2] if page_filter is None or p in page_filter
+                ],
             )
 
         monkeypatch.setattr(
@@ -1118,9 +1118,7 @@ class TestPagesFilter:
         assert manifest.selected_pages == [1], (
             f"expected [1], got {manifest.selected_pages}"
         )
-        assert manifest.toc_pages == [], (
-            f"expected [], got {manifest.toc_pages}"
-        )
+        assert manifest.toc_pages == [], f"expected [], got {manifest.toc_pages}"
         assert manifest.complex_pages == [], (
             f"expected [], got {manifest.complex_pages}"
         )

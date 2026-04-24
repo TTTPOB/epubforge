@@ -10,7 +10,6 @@ from epubforge.config import Config, load_config
 from epubforge.epub_builder import resolve_build_source
 
 
-
 def test_run_all_stops_after_stage_4(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -66,12 +65,13 @@ def test_run_command_limits_from_stage_to_4() -> None:
     assert "1<=x<=4" in result.output
 
 
-def test_load_config_reads_editor_section_and_env_overrides(tmp_path: Path, monkeypatch) -> None:
+def test_load_config_reads_editor_section_and_env_overrides(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         """
 [editor]
-lease_ttl_seconds = 900
 compact_threshold = 12
 max_loops = 7
 """.strip(),
@@ -81,8 +81,5 @@ max_loops = 7
 
     cfg = load_config(config_path)
 
-    assert cfg.editor.lease_ttl_seconds == 900
     assert cfg.editor.compact_threshold == 33
     assert cfg.editor.max_loops == 7
-
-

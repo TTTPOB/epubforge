@@ -14,12 +14,12 @@ This module provides:
 from __future__ import annotations
 
 import dataclasses
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from epubforge.editor._validators import StrictModel, require_non_empty, validate_uuid4
-from epubforge.editor.ops import BLOCK_KINDS, BLOCK_PAYLOAD_MODELS
 from epubforge.ir.semantic import (
     Block,
     Book,
@@ -29,6 +29,7 @@ from epubforge.ir.semantic import (
     Footnote,
     Heading,
     Paragraph,
+    Provenance,
     Table,
 )
 from epubforge.ir.style_registry import ALLOWED_ROLES
@@ -99,12 +100,16 @@ class ReplaceNodeChange(StrictModel):
     op: Literal["replace_node"]
     target_uid: str
     old_node: dict[str, Any]  # full snapshot for precondition check (mode="python")
-    new_node: dict[str, Any]  # replacement content; must include kind, must NOT include uid
+    new_node: dict[
+        str, Any
+    ]  # replacement content; must include kind, must NOT include uid
 
     @model_validator(mode="after")
     def _validate_new_node(self) -> ReplaceNodeChange:
         if "uid" in self.new_node:
-            raise ValueError("new_node must not contain uid — it is injected at apply time")
+            raise ValueError(
+                "new_node must not contain uid — it is injected at apply time"
+            )
         if "kind" not in self.new_node:
             raise ValueError("new_node must contain a kind field")
         return self
@@ -173,7 +178,11 @@ class MoveNodeChange(StrictModel):
 # ---------------------------------------------------------------------------
 
 IRChange = Annotated[
-    SetFieldChange | ReplaceNodeChange | InsertNodeChange | DeleteNodeChange | MoveNodeChange,
+    SetFieldChange
+    | ReplaceNodeChange
+    | InsertNodeChange
+    | DeleteNodeChange
+    | MoveNodeChange,
     Field(discriminator="op"),
 ]
 
@@ -216,18 +225,149 @@ class BookPatch(StrictModel):
 # Constants
 # ---------------------------------------------------------------------------
 
+STYLE_CLASS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+BLOCK_KINDS = ("paragraph", "heading", "footnote", "figure", "table", "equation")
+
+
+def _validate_style_class_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = require_non_empty(value, field_name="style_class")
+    if not STYLE_CLASS_PATTERN.fullmatch(value):
+        raise ValueError(
+            "style_class must use [A-Za-z0-9._-] and start with an alphanumeric character"
+        )
+    return value
+
+
+class ParagraphPayload(StrictModel):
+    text: str
+    role: str = "body"
+    display_lines: list[str] | None = None
+    style_class: str | None = None
+    cross_page: bool = False
+    provenance: Provenance
+
+    @field_validator("text")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return require_non_empty(value, field_name="text")
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: str) -> str:
+        value = require_non_empty(value, field_name="role")
+        if value not in ALLOWED_ROLES:
+            raise ValueError(f"role must be one of {sorted(ALLOWED_ROLES)}")
+        return value
+
+    @field_validator("style_class")
+    @classmethod
+    def _validate_style_class(cls, value: str | None) -> str | None:
+        return _validate_style_class_value(value)
+
+
+class HeadingPayload(StrictModel):
+    level: Literal[1, 2, 3] = 1
+    text: str
+    id: str | None = None
+    style_class: str | None = None
+    provenance: Provenance
+
+    @field_validator("text")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return require_non_empty(value, field_name="text")
+
+    @field_validator("id")
+    @classmethod
+    def _validate_heading_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return require_non_empty(value, field_name="id")
+
+    @field_validator("style_class")
+    @classmethod
+    def _validate_style_class(cls, value: str | None) -> str | None:
+        return _validate_style_class_value(value)
+
+
+class FootnotePayload(StrictModel):
+    callout: str
+    text: str
+    paired: bool = False
+    orphan: bool = False
+    ref_bbox: list[float] | None = None
+    provenance: Provenance
+
+    @field_validator("callout")
+    @classmethod
+    def _validate_callout(cls, value: str) -> str:
+        return require_non_empty(value, field_name="callout")
+
+    @model_validator(mode="after")
+    def _validate_flags(self) -> FootnotePayload:
+        if self.paired and self.orphan:
+            raise ValueError(
+                "footnote payload cannot be paired and orphan at the same time"
+            )
+        return self
+
+
+class FigurePayload(StrictModel):
+    caption: str = ""
+    image_ref: str | None = None
+    bbox: list[float] | None = None
+    provenance: Provenance
+
+
+class TablePayload(StrictModel):
+    html: str
+    table_title: str = ""
+    caption: str = ""
+    continuation: bool = False
+    multi_page: bool = False
+    bbox: list[float] | None = None
+    provenance: Provenance
+
+    @field_validator("html")
+    @classmethod
+    def _validate_html(cls, value: str) -> str:
+        return require_non_empty(value, field_name="html")
+
+
+class EquationPayload(StrictModel):
+    latex: str = ""
+    image_ref: str | None = None
+    bbox: list[float] | None = None
+    provenance: Provenance
+
+
+BLOCK_PAYLOAD_MODELS = {
+    "paragraph": ParagraphPayload,
+    "heading": HeadingPayload,
+    "footnote": FootnotePayload,
+    "figure": FigurePayload,
+    "table": TablePayload,
+    "equation": EquationPayload,
+}
+
 # Fields that cannot be modified via SetFieldChange
 _IMMUTABLE_FIELDS: frozenset[str] = frozenset({"uid", "kind", "provenance"})
 
 # Per-kind allowed fields for SetFieldChange
 _ALLOWED_SET_FIELD: dict[str, frozenset[str]] = {
-    "paragraph": frozenset({"text", "role", "style_class", "cross_page", "display_lines"}),
-    "heading":   frozenset({"text", "level", "id", "style_class"}),
-    "footnote":  frozenset({"callout", "text", "paired", "orphan", "ref_bbox"}),
-    "figure":    frozenset({"caption", "image_ref", "bbox"}),
-    "table":     frozenset({"html", "table_title", "caption", "continuation", "multi_page", "bbox"}),
-    "equation":  frozenset({"latex", "image_ref", "bbox"}),
-    "chapter":   frozenset({"title", "level", "id"}),
+    "paragraph": frozenset(
+        {"text", "role", "style_class", "cross_page", "display_lines"}
+    ),
+    "heading": frozenset({"text", "level", "id", "style_class"}),
+    "footnote": frozenset({"callout", "text", "paired", "orphan", "ref_bbox"}),
+    "figure": frozenset({"caption", "image_ref", "bbox"}),
+    "table": frozenset(
+        {"html", "table_title", "caption", "continuation", "multi_page", "bbox"}
+    ),
+    "equation": frozenset({"latex", "image_ref", "bbox"}),
+    "chapter": frozenset({"title", "level", "id"}),
 }
 
 # Heading.level in IR is plain int; enforce valid range here
@@ -239,11 +379,11 @@ _VALID_CHAPTER_LEVELS: frozenset[int] = frozenset({1, 2, 3})
 # Map block kind -> IR class for _make_block
 _KIND_TO_CLASS: dict[str, type] = {
     "paragraph": Paragraph,
-    "heading":   Heading,
-    "footnote":  Footnote,
-    "figure":    Figure,
-    "table":     Table,
-    "equation":  Equation,
+    "heading": Heading,
+    "footnote": Footnote,
+    "figure": Figure,
+    "table": Table,
+    "equation": Equation,
 }
 
 
@@ -255,7 +395,7 @@ _KIND_TO_CLASS: dict[str, type] = {
 @dataclasses.dataclass
 class _BookIndex:
     block_index: dict[str, tuple[int, int]]  # uid -> (chapter_idx, block_idx)
-    chapter_index: dict[str, int]            # uid -> chapter_idx
+    chapter_index: dict[str, int]  # uid -> chapter_idx
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +688,9 @@ def _check_replace_node_preconditions(
         )
     assert isinstance(new_kind, str)
     payload_cls = BLOCK_PAYLOAD_MODELS[new_kind]
-    payload_data = {k: v for k, v in change.new_node.items() if k not in ("uid", "kind")}
+    payload_data = {
+        k: v for k, v in change.new_node.items() if k not in ("uid", "kind")
+    }
     try:
         payload_cls.model_validate(payload_data)
     except Exception as exc:
@@ -590,7 +732,9 @@ def _check_insert_node_preconditions(
             )
         assert isinstance(node_kind, str)
         payload_cls = BLOCK_PAYLOAD_MODELS[node_kind]
-        payload_data = {k: v for k, v in change.node.items() if k not in ("uid", "kind")}
+        payload_data = {
+            k: v for k, v in change.node.items() if k not in ("uid", "kind")
+        }
         try:
             payload_cls.model_validate(payload_data)
         except Exception as exc:
@@ -636,7 +780,10 @@ def _check_delete_node_preconditions(
     patch_id: str,
 ) -> None:
     """Check preconditions for a DeleteNodeChange."""
-    if change.target_uid not in index.block_index and change.target_uid not in index.chapter_index:
+    if (
+        change.target_uid not in index.block_index
+        and change.target_uid not in index.chapter_index
+    ):
         raise PatchError(
             f"delete_node target_uid {change.target_uid!r} not found",
             patch_id,
@@ -668,7 +815,10 @@ def _check_move_node_preconditions(
     patch_id: str,
 ) -> None:
     """Check preconditions for a MoveNodeChange."""
-    if change.target_uid not in index.block_index and change.target_uid not in index.chapter_index:
+    if (
+        change.target_uid not in index.block_index
+        and change.target_uid not in index.chapter_index
+    ):
         raise PatchError(
             f"move_node target_uid {change.target_uid!r} not found",
             patch_id,
@@ -828,7 +978,9 @@ def _apply_insert_node(
             insert_at = 0
         else:
             insert_at = _block_pos_in_chapter(chapter, change.after_uid, patch_id) + 1
-        chapter.blocks = chapter.blocks[:insert_at] + [new_block] + chapter.blocks[insert_at:]
+        chapter.blocks = (
+            chapter.blocks[:insert_at] + [new_block] + chapter.blocks[insert_at:]
+        )
     else:
         # Insert chapter into book.chapters
         node_data = dict(change.node)
@@ -924,10 +1076,14 @@ def _apply_move_node(
         if change.after_uid is None:
             insert_at = 0
         else:
-            insert_at = _block_pos_in_chapter(target_chapter, change.after_uid, patch_id) + 1
+            insert_at = (
+                _block_pos_in_chapter(target_chapter, change.after_uid, patch_id) + 1
+            )
 
         target_chapter.blocks = (
-            target_chapter.blocks[:insert_at] + [block] + target_chapter.blocks[insert_at:]
+            target_chapter.blocks[:insert_at]
+            + [block]
+            + target_chapter.blocks[insert_at:]
         )
 
 
@@ -971,14 +1127,20 @@ def validate_book_patch(book: Book, patch: BookPatch) -> None:
 
     for change in patch.changes:
         if isinstance(change, SetFieldChange):
-            _validate_static_set_field(change, block_index, chapter_index, pid, book=book)
+            _validate_static_set_field(
+                change, block_index, chapter_index, pid, book=book
+            )
 
         elif isinstance(change, ReplaceNodeChange):
             _validate_static_replace_node(change, block_index, chapter_index, pid)
 
         elif isinstance(change, InsertNodeChange):
             _validate_static_insert_node(
-                change, block_index, chapter_index, insert_uids_seen, pid,
+                change,
+                block_index,
+                chapter_index,
+                insert_uids_seen,
+                pid,
                 inserted_chapter_uids=inserted_chapter_uids,
             )
             node_uid = change.node.get("uid")
@@ -1001,7 +1163,10 @@ def validate_book_patch(book: Book, patch: BookPatch) -> None:
 
         elif isinstance(change, MoveNodeChange):
             _validate_static_move_node(
-                change, block_index, chapter_index, pid,
+                change,
+                block_index,
+                chapter_index,
+                pid,
                 inserted_chapter_uids=inserted_chapter_uids,
             )
 
@@ -1078,7 +1243,9 @@ def _validate_static_replace_node(
         )
     assert isinstance(new_kind, str)
     payload_cls = BLOCK_PAYLOAD_MODELS[new_kind]
-    payload_data = {k: v for k, v in change.new_node.items() if k not in ("uid", "kind")}
+    payload_data = {
+        k: v for k, v in change.new_node.items() if k not in ("uid", "kind")
+    }
     try:
         payload_cls.model_validate(payload_data)
     except Exception as exc:
@@ -1133,7 +1300,9 @@ def _validate_static_insert_node(
             )
         assert isinstance(node_kind, str)
         payload_cls = BLOCK_PAYLOAD_MODELS[node_kind]
-        payload_data = {k: v for k, v in change.node.items() if k not in ("uid", "kind")}
+        payload_data = {
+            k: v for k, v in change.node.items() if k not in ("uid", "kind")
+        }
         try:
             payload_cls.model_validate(payload_data)
         except Exception as exc:
@@ -1182,7 +1351,10 @@ def _validate_static_move_node(
                 pid,
             )
     else:
-        if change.to_parent_uid is not None and change.to_parent_uid not in all_chapter_uids:
+        if (
+            change.to_parent_uid is not None
+            and change.to_parent_uid not in all_chapter_uids
+        ):
             raise PatchError(
                 f"move_node to_parent_uid {change.to_parent_uid!r} not found",
                 pid,
@@ -1313,6 +1485,8 @@ def apply_book_patch(book: Book, patch: BookPatch) -> Book:
 
 __all__ = [
     "BookPatch",
+    "BLOCK_KINDS",
+    "BLOCK_PAYLOAD_MODELS",
     "DeleteNodeChange",
     "IRChange",
     "InsertNodeChange",

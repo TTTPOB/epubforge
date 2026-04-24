@@ -18,7 +18,9 @@ def detect_candidate_issues(book: Book) -> AuditBundle:
         block = ref.block
         if not isinstance(block, Paragraph):
             continue
-        if not block.role.startswith("docling_") or not block.role.endswith("_candidate"):
+        if not block.role.startswith("docling_") or not block.role.endswith(
+            "_candidate"
+        ):
             continue
         issues.append(
             AuditIssue(

@@ -88,7 +88,9 @@ class Paragraph(_UidMixin):
     role: str = "body"
     display_lines: list[str] | None = None
     style_class: str | None = None
-    cross_page: bool = False  # True when paragraph spans a page break (assembled from continuation)
+    cross_page: bool = (
+        False  # True when paragraph spans a page break (assembled from continuation)
+    )
     provenance: Provenance
 
 
@@ -105,8 +107,12 @@ class Footnote(_UidMixin):
     kind: Literal["footnote"] = "footnote"
     callout: str
     text: str
-    paired: bool = False  # True when callout was found and marked in a preceding paragraph
-    orphan: bool = False  # True when LLM stage 7 confirms no matching callout exists in the book
+    paired: bool = (
+        False  # True when callout was found and marked in a preceding paragraph
+    )
+    orphan: bool = (
+        False  # True when LLM stage 7 confirms no matching callout exists in the book
+    )
     ref_bbox: list[float] | None = None
     provenance: Provenance
 
@@ -145,7 +151,9 @@ class Table(_UidMixin):
     table_title: str = ""
     caption: str = ""
     continuation: bool = False
-    multi_page: bool = False  # True when this table was merged from cross-page continuations
+    multi_page: bool = (
+        False  # True when this table was merged from cross-page continuations
+    )
     bbox: list[float] | None = None
     provenance: Provenance
     merge_record: TableMergeRecord | None = None
@@ -186,7 +194,6 @@ class ExtractionMetadata(BaseModel):
 
 
 class Book(BaseModel):
-    op_log_version: int = 0
     initialized_at: str = ""
     uid_seed: str = ""
     title: str
@@ -198,6 +205,7 @@ class Book(BaseModel):
 
 
 # --- VLM output schema (used as response_format) ---
+
 
 class _VLMBase(BaseModel):
     bbox: list[float] | None = None
@@ -249,8 +257,11 @@ class AuditNote(BaseModel):
     page: int
     block_index: int | None = None
     kind: Literal[
-        "orphan_footnote", "suspect_attribution",
-        "punctuation_anomaly", "unknown_callout", "other"
+        "orphan_footnote",
+        "suspect_attribution",
+        "punctuation_anomaly",
+        "unknown_callout",
+        "other",
     ]
     hint: str = Field(max_length=200)
 
@@ -262,6 +273,7 @@ class VLMPageOutput(BaseModel):
 
 
 # --- stage 4 (VLM) multi-page wrapper ---
+
 
 class VLMGroupOutput(BaseModel):
     pages: list[VLMPageOutput]

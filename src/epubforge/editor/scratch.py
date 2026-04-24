@@ -36,7 +36,9 @@ def _slug(value: str, *, fallback: str) -> str:
     return normalized or fallback
 
 
-def allocate_script_path(work_dir: str | Path, description: str, *, agent_id: str = "agent") -> Path:
+def allocate_script_path(
+    work_dir: str | Path, description: str, *, agent_id: str = "agent"
+) -> Path:
     paths = resolve_editor_paths(work_dir)
     stamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
     desc_slug = _slug(description, fallback="script")
@@ -84,7 +86,9 @@ def _resolve_within_scratch(raw: str | Path, scratch_dir: Path) -> Path:
         raise ValueError(f"script must be a .py file, got: {p}")
     resolved = p.resolve(strict=True)
     if not resolved.is_relative_to(scratch_dir.resolve()):
-        raise ValueError(f"script must reside under scratch_dir ({scratch_dir}), got: {resolved}")
+        raise ValueError(
+            f"script must reside under scratch_dir ({scratch_dir}), got: {resolved}"
+        )
     return resolved
 
 

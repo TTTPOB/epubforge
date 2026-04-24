@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 from docling_core.types.doc import DocItemLabel
 from docling_core.types.doc.base import BoundingBox
 
@@ -124,7 +123,10 @@ class TestTableLikeLabelsDoNotAffectBatching:
             {"page": 4, "kind": "complex"},
         ]
         anchors = {
-            1: [_anchor(DocItemLabel.TEXT, t=700.0), _anchor(DocItemLabel.TABLE, t=200.0)],
+            1: [
+                _anchor(DocItemLabel.TEXT, t=700.0),
+                _anchor(DocItemLabel.TABLE, t=200.0),
+            ],
             2: [_anchor(DocItemLabel.PICTURE, t=500.0)],
             3: [_anchor(DocItemLabel.FOOTNOTE, t=100.0)],
             4: [_anchor(DocItemLabel.LIST_ITEM, t=300.0)],
@@ -198,6 +200,7 @@ class TestVLMPromptNoContinuationHints:
             captured_messages.extend(messages)
             # Return a minimal valid response
             from epubforge.ir.semantic import VLMGroupOutput, VLMPageOutput
+
             return VLMGroupOutput(
                 pages=[VLMPageOutput(page=p, blocks=[]) for p in pages]
             )
@@ -209,7 +212,9 @@ class TestVLMPromptNoContinuationHints:
         mock_fitz = MagicMock()
         mock_page = MagicMock()
         mock_pix = MagicMock()
-        mock_pix.tobytes.return_value = b"\xff\xd8\xff\xe0" + b"\x00" * 16  # minimal JPEG-like
+        mock_pix.tobytes.return_value = (
+            b"\xff\xd8\xff\xe0" + b"\x00" * 16
+        )  # minimal JPEG-like
         mock_page.get_pixmap.return_value = mock_pix
         mock_fitz.__getitem__ = MagicMock(return_value=mock_page)
 
@@ -261,7 +266,10 @@ class TestVLMPromptNoContinuationHints:
         text_blocks = [c["text"] for c in content if c.get("type") == "text"]
         full_text = "\n".join(text_blocks)
         # Should say pages are selected adjacent and not to assume continuation
-        assert "selected adjacent" in full_text.lower() or "adjacent pages" in full_text.lower()
+        assert (
+            "selected adjacent" in full_text.lower()
+            or "adjacent pages" in full_text.lower()
+        )
         assert "do not assume" in full_text.lower() or "not assume" in full_text.lower()
 
     def test_single_page_prompt_says_judge_from_evidence(self) -> None:
@@ -312,26 +320,51 @@ class TestSidecarsAlwaysWritten:
 
         # Create minimal raw.json
         raw_path = tmp_path / "01_raw.json"
-        raw_path.write_text(json.dumps({
-            "schema_name": "DoclingDocument",
-            "version": "1.0.0",
-            "name": "test",
-            "origin": {"mimetype": "application/pdf", "binary_hash": 0, "filename": "test.pdf"},
-            "furniture": {"self_ref": "#/furniture", "children": [], "content_layer": "furniture", "name": "_root_", "label": "unspecified"},
-            "body": {"self_ref": "#/body", "children": [], "content_layer": "body", "name": "_root_", "label": "unspecified"},
-            "texts": [],
-            "pictures": [],
-            "tables": [],
-            "key_value_items": [],
-            "form_items": [],
-            "pages": {str(p): {"size": {"width": 595, "height": 842}, "image": None} for p in pages},
-        }), encoding="utf-8")
+        raw_path.write_text(
+            json.dumps(
+                {
+                    "schema_name": "DoclingDocument",
+                    "version": "1.0.0",
+                    "name": "test",
+                    "origin": {
+                        "mimetype": "application/pdf",
+                        "binary_hash": 0,
+                        "filename": "test.pdf",
+                    },
+                    "furniture": {
+                        "self_ref": "#/furniture",
+                        "children": [],
+                        "content_layer": "furniture",
+                        "name": "_root_",
+                        "label": "unspecified",
+                    },
+                    "body": {
+                        "self_ref": "#/body",
+                        "children": [],
+                        "content_layer": "body",
+                        "name": "_root_",
+                        "label": "unspecified",
+                    },
+                    "texts": [],
+                    "pictures": [],
+                    "tables": [],
+                    "key_value_items": [],
+                    "form_items": [],
+                    "pages": {
+                        str(p): {"size": {"width": 595, "height": 842}, "image": None}
+                        for p in pages
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
 
         # Create pages.json
         pages_path = tmp_path / "02_pages.json"
-        pages_path.write_text(json.dumps({
-            "pages": [{"page": p, "kind": "simple"} for p in pages]
-        }), encoding="utf-8")
+        pages_path.write_text(
+            json.dumps({"pages": [{"page": p, "kind": "simple"} for p in pages]}),
+            encoding="utf-8",
+        )
 
         # Create minimal PDF
         pdf_path = tmp_path / "source.pdf"
@@ -356,13 +389,16 @@ class TestSidecarsAlwaysWritten:
             mock_llm_cls.return_value = mock_client
 
             from epubforge.ir.semantic import VLMGroupOutput, VLMPageOutput
+
             mock_client.chat_parsed.return_value = VLMGroupOutput(
                 pages=[VLMPageOutput(page=p, blocks=[]) for p in pages]
             )
 
             # Setup mock fitz
             mock_fitz_doc = MagicMock()
-            mock_fitz_open.return_value.__enter__ = MagicMock(return_value=mock_fitz_doc)
+            mock_fitz_open.return_value.__enter__ = MagicMock(
+                return_value=mock_fitz_doc
+            )
             mock_fitz_open.return_value = mock_fitz_doc
             mock_page = MagicMock()
             mock_pix = MagicMock()
@@ -409,7 +445,9 @@ class TestSidecarsAlwaysWritten:
         assert "pages" in data
         assert "refs" in data
 
-    def test_evidence_index_written_when_book_memory_disabled(self, tmp_path: Path) -> None:
+    def test_evidence_index_written_when_book_memory_disabled(
+        self, tmp_path: Path
+    ) -> None:
         result, out_dir = self._run_extract_with_mock(
             tmp_path, pages=[1, 2], enable_book_memory=False
         )
@@ -419,6 +457,7 @@ class TestSidecarsAlwaysWritten:
 
     def test_result_is_stage3_extraction_result(self, tmp_path: Path) -> None:
         from epubforge.stage3_artifacts import Stage3ExtractionResult
+
         result, out_dir = self._run_extract_with_mock(tmp_path, pages=[1])
         assert isinstance(result, Stage3ExtractionResult)
         assert result.mode == "vlm"

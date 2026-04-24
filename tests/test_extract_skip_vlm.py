@@ -8,8 +8,6 @@ from typing import Any
 
 import pytest
 
-from docling_core.types.doc import DoclingDocument
-
 
 # ---------------------------------------------------------------------------
 # Helpers: build minimal DoclingDocument fixtures
@@ -53,10 +51,22 @@ def _page_entry(page_no: int) -> dict[str, Any]:
     return {"size": {"width": 612, "height": 792}, "image": None, "page_no": page_no}
 
 
-def _prov(page_no: int, l: float = 10, t: float = 10, r: float = 100, b: float = 20) -> dict[str, Any]:
+def _prov(
+    page_no: int,
+    left: float = 10,
+    top: float = 10,
+    right: float = 100,
+    bottom: float = 20,
+) -> dict[str, Any]:
     return {
         "page_no": page_no,
-        "bbox": {"l": l, "t": t, "r": r, "b": b, "coord_origin": "BOTTOMLEFT"},
+        "bbox": {
+            "l": left,
+            "t": top,
+            "r": right,
+            "b": bottom,
+            "coord_origin": "BOTTOMLEFT",
+        },
         "charspan": [0, 5],
     }
 
@@ -125,6 +135,7 @@ def _make_doc(
 ) -> dict[str, Any]:
     """Build a minimal DoclingDocument dict."""
     import copy
+
     data = copy.deepcopy(_BASE_DOC)
     all_items = list(texts or []) + list(tables or []) + list(pictures or [])
 
@@ -217,7 +228,9 @@ def _run_single_item(
         items_texts = []
         items_tables = []
     else:
-        items_texts = [_text_item("#/texts/0", label, text, page_no=1, extra=extra_text_fields)]
+        items_texts = [
+            _text_item("#/texts/0", label, text, page_no=1, extra=extra_text_fields)
+        ]
         items_pics = []
         items_tables = []
 
@@ -261,7 +274,9 @@ def test_section_header_produces_heading_candidate_not_heading(tmp_path: Path) -
     assert block.get("level") is None
 
 
-def test_footnote_text_produces_footnote_candidate_not_footnote_ir(tmp_path: Path) -> None:
+def test_footnote_text_produces_footnote_candidate_not_footnote_ir(
+    tmp_path: Path,
+) -> None:
     """Footnote-looking text should produce a Paragraph, not Footnote IR."""
     block = _run_single_item(tmp_path, "footnote", "①This is a footnote")
     assert block["kind"] == "paragraph"
@@ -280,7 +295,9 @@ def test_footnote_looking_text_does_not_produce_footnote_ir(tmp_path: Path) -> N
 
 def test_list_item_produces_list_item_candidate(tmp_path: Path) -> None:
     block = _run_single_item(
-        tmp_path, "list_item", "Item text",
+        tmp_path,
+        "list_item",
+        "Item text",
         extra_text_fields={"enumerated": False, "marker": "•"},
     )
     assert block["kind"] == "paragraph"
@@ -303,7 +320,9 @@ def test_handwritten_text_produces_candidate_and_warning(tmp_path: Path) -> None
     from epubforge.extract_skip_vlm import extract_skip_vlm
 
     doc_data = _make_doc(
-        texts=[_text_item("#/texts/0", "handwritten_text", "handwritten note", page_no=1)],
+        texts=[
+            _text_item("#/texts/0", "handwritten_text", "handwritten note", page_no=1)
+        ],
         pages=[1],
     )
     raw_path, pages_path, out_dir = _write_inputs(
@@ -321,7 +340,9 @@ def test_handwritten_text_produces_candidate_and_warning(tmp_path: Path) -> None
     assert "handwritten" in result.warnings[0].message.lower()
 
 
-def test_field_heading_produces_field_candidate_when_text_present(tmp_path: Path) -> None:
+def test_field_heading_produces_field_candidate_when_text_present(
+    tmp_path: Path,
+) -> None:
     block = _run_single_item(tmp_path, "field_heading", "Name:")
     assert block["kind"] == "paragraph"
     assert block["role"] == "docling_field_candidate"
@@ -339,7 +360,9 @@ def test_field_value_without_text_produces_no_block(tmp_path: Path) -> None:
     assert block == {}
 
 
-def test_checkbox_selected_with_text_produces_checkbox_candidate(tmp_path: Path) -> None:
+def test_checkbox_selected_with_text_produces_checkbox_candidate(
+    tmp_path: Path,
+) -> None:
     block = _run_single_item(tmp_path, "checkbox_selected", "Yes")
     assert block["kind"] == "paragraph"
     assert block["role"] == "docling_checkbox_candidate"
@@ -388,7 +411,9 @@ def test_adjacent_same_shape_tables_do_not_set_continuation(tmp_path: Path) -> N
         unit_data = json.loads(unit_path.read_text(encoding="utf-8"))
         for block in unit_data["draft_blocks"]:
             if block["kind"] == "table":
-                assert block["continuation"] is False, "Table should never set continuation in skip-VLM"
+                assert block["continuation"] is False, (
+                    "Table should never set continuation in skip-VLM"
+                )
 
 
 def test_picture_produces_figure_with_mechanical_image_ref(tmp_path: Path) -> None:
@@ -508,7 +533,9 @@ def test_provenance_fields_written(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_punctuation_does_not_set_cross_page_continuation(tmp_path: Path) -> None:
+def test_missing_punctuation_does_not_set_cross_page_continuation(
+    tmp_path: Path,
+) -> None:
     """Paragraph blocks should never have cross_page=True from skip-VLM extractor."""
     from epubforge.extract_skip_vlm import extract_skip_vlm
 
@@ -554,7 +581,11 @@ def test_candidate_edges_physical_adjacent_pages(tmp_path: Path) -> None:
     raw_path, pages_path, out_dir = _write_inputs(
         tmp_path,
         doc_data,
-        [{"page": 1, "kind": "complex"}, {"page": 2, "kind": "complex"}, {"page": 3, "kind": "complex"}],
+        [
+            {"page": 1, "kind": "complex"},
+            {"page": 2, "kind": "complex"},
+            {"page": 3, "kind": "complex"},
+        ],
     )
     result = extract_skip_vlm(raw_path, pages_path, out_dir)
 
@@ -651,8 +682,7 @@ def test_candidate_edges_leading_trailing_refs(tmp_path: Path) -> None:
     from epubforge.extract_skip_vlm import extract_skip_vlm
 
     texts = [
-        _text_item(f"#/texts/{i}", "text", f"text {i}", page_no=1)
-        for i in range(6)
+        _text_item(f"#/texts/{i}", "text", f"text {i}", page_no=1) for i in range(6)
     ]
     doc_data = _make_doc(texts=texts, pages=[1])
     raw_path, pages_path, out_dir = _write_inputs(
@@ -787,7 +817,9 @@ def test_book_memory_is_empty(tmp_path: Path) -> None:
         [{"page": 1, "kind": "complex"}],
     )
     result = extract_skip_vlm(raw_path, pages_path, out_dir)
-    mem = BookMemory.model_validate_json(result.book_memory_path.read_text(encoding="utf-8"))
+    mem = BookMemory.model_validate_json(
+        result.book_memory_path.read_text(encoding="utf-8")
+    )
     # BookMemory should be essentially empty (default-constructed)
     empty = BookMemory()
     assert mem.model_dump() == empty.model_dump()
@@ -838,6 +870,7 @@ def test_explicit_docling_refitem_refs_go_to_evidence_only(tmp_path: Path) -> No
 
     # Build a doc with a table that has a caption reference to a text item
     import copy
+
     doc_data = copy.deepcopy(_BASE_DOC)
     doc_data["pages"]["1"] = _page_entry(1)
     doc_data["body"]["children"] = [
@@ -962,7 +995,10 @@ def test_table_export_failure_produces_warning_and_audit_note(tmp_path: Path) ->
         [{"page": 1, "kind": "complex"}],
     )
 
-    with patch("docling_core.types.doc.TableItem.export_to_html", side_effect=RuntimeError("mock failure")):
+    with patch(
+        "docling_core.types.doc.TableItem.export_to_html",
+        side_effect=RuntimeError("mock failure"),
+    ):
         result = extract_skip_vlm(raw_path, pages_path, out_dir)
 
     # Must produce exactly one warning

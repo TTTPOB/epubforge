@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from collections import Counter
 
-from epubforge.audit.models import AuditBundle, DASH_CHAR_LABELS, DashInventoryChapter, normalized_chapter_uid
+from epubforge.audit.models import (
+    AuditBundle,
+    DASH_CHAR_LABELS,
+    DashInventoryChapter,
+    normalized_chapter_uid,
+)
 from epubforge.fields import iter_block_text_fields
 from epubforge.ir.semantic import Book
 

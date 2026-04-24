@@ -46,7 +46,9 @@ def detect_invariant_issues(book: Book) -> AuditBundle:
                 )
             )
 
-    block_uid_counts = Counter(ref.block.uid for ref in iter_blocks(book) if ref.block.uid)
+    block_uid_counts = Counter(
+        ref.block.uid for ref in iter_blocks(book) if ref.block.uid
+    )
     for ref in iter_blocks(book):
         if ref.block.uid is None or not ref.block.uid.strip():
             issues.append(

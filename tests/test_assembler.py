@@ -1,7 +1,16 @@
 """Tests for assembler._pair_footnotes page-scoped pairing."""
 
 from epubforge.assembler import _cjk_join, _is_continuation_plausible, _pair_footnotes
-from epubforge.ir.semantic import Block, Equation, Figure, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import (
+    Block,
+    Equation,
+    Figure,
+    Footnote,
+    Heading,
+    Paragraph,
+    Provenance,
+    Table,
+)
 
 
 def _para(text: str, page: int) -> Paragraph:
@@ -9,7 +18,11 @@ def _para(text: str, page: int) -> Paragraph:
 
 
 def _fn(callout: str, page: int) -> Footnote:
-    return Footnote(callout=callout, text="note text", provenance=Provenance(page=page, source="llm"))
+    return Footnote(
+        callout=callout,
+        text="note text",
+        provenance=Provenance(page=page, source="llm"),
+    )
 
 
 def _table(html: str, page: int) -> Table:
@@ -18,18 +31,25 @@ def _table(html: str, page: int) -> Table:
 
 def _merged_table(html: str, page: int) -> Table:
     """Simulate a table merged by _merge_continued_tables (multi_page=True)."""
-    return Table(html=html, multi_page=True, provenance=Provenance(page=page, source="vlm"))
+    return Table(
+        html=html, multi_page=True, provenance=Provenance(page=page, source="vlm")
+    )
 
 
 def _heading(text: str, page: int, level: int = 1) -> Heading:
-    return Heading(text=text, level=level, provenance=Provenance(page=page, source="vlm"))
+    return Heading(
+        text=text, level=level, provenance=Provenance(page=page, source="vlm")
+    )
 
 
 def _cross_page_para(text: str, page: int) -> Paragraph:
-    return Paragraph(text=text, cross_page=True, provenance=Provenance(page=page, source="llm"))
+    return Paragraph(
+        text=text, cross_page=True, provenance=Provenance(page=page, source="llm")
+    )
 
 
 # --- same-page pairing ---
+
 
 def test_pairing_same_page() -> None:
     """Footnote on page N pairs with paragraph on page N."""
@@ -106,6 +126,7 @@ def test_pairing_past_subsection_heading() -> None:
 
 # --- cross-page pairing ---
 
+
 def test_same_page_wins_over_prev_page_fallback() -> None:
     """Same-page paragraph (P3) beats prev-page paragraph (P0) for LIFO selection."""
     blocks: list[Block] = [
@@ -139,7 +160,10 @@ def test_prev_page_fallback_when_no_same_page() -> None:
 
 def test_cross_page_paragraph_pairs_across_page() -> None:
     """Cross-page paragraph (P1) pairs with footnote on next page."""
-    blocks: list[Block] = [_cross_page_para("text spanning pages ①", page=14), _fn("①", page=15)]
+    blocks: list[Block] = [
+        _cross_page_para("text spanning pages ①", page=14),
+        _fn("①", page=15),
+    ]
     result = _pair_footnotes(blocks)
     fn = result[1]
     assert isinstance(fn, Footnote)
@@ -229,6 +253,7 @@ def test_merged_table_does_not_steal_same_page_paragraph() -> None:
 
 # --- LIFO and multi-callout ---
 
+
 def test_lifo_two_tables_same_callout() -> None:
     """LIFO: two tables both containing ① — footnote pairs with the most recent one."""
     blocks: list[Block] = [
@@ -311,34 +336,54 @@ def test_regular_table_wins_tie_with_orphan_paragraph() -> None:
 
 # --- first_footnote_continues_prev_footnote hard filter ---
 
+
 def test_fn_continuation_rejected_on_callout_mismatch() -> None:
     """_is_continuation_plausible rejects when callouts differ (VLM self-contradiction)."""
-    prev = Footnote(callout="⑧", text="some text.", provenance=Provenance(page=10, source="vlm"))
-    cont = Footnote(callout="①", text="new fn.", provenance=Provenance(page=11, source="vlm"))
+    prev = Footnote(
+        callout="⑧", text="some text.", provenance=Provenance(page=10, source="vlm")
+    )
+    cont = Footnote(
+        callout="①", text="new fn.", provenance=Provenance(page=11, source="vlm")
+    )
     assert not _is_continuation_plausible(prev, cont)
 
 
 def test_fn_continuation_accepted_when_callout_empty() -> None:
     """_is_continuation_plausible accepts when cont callout is empty (VLM prompt contract)."""
-    prev = Footnote(callout="⑧", text="text without end", provenance=Provenance(page=10, source="vlm"))
-    cont = Footnote(callout="", text="continuation.", provenance=Provenance(page=11, source="vlm"))
+    prev = Footnote(
+        callout="⑧",
+        text="text without end",
+        provenance=Provenance(page=10, source="vlm"),
+    )
+    cont = Footnote(
+        callout="", text="continuation.", provenance=Provenance(page=11, source="vlm")
+    )
     assert _is_continuation_plausible(prev, cont)
 
 
 def test_fn_continuation_accepted_when_prev_ends_with_period() -> None:
     """_is_continuation_plausible does not reject based on trailing period (e.g. 'Dr.' abbreviation)."""
-    prev = Footnote(callout="⑧", text="See Dr.", provenance=Provenance(page=10, source="vlm"))
-    cont = Footnote(callout="", text="Smith's findings.", provenance=Provenance(page=11, source="vlm"))
+    prev = Footnote(
+        callout="⑧", text="See Dr.", provenance=Provenance(page=10, source="vlm")
+    )
+    cont = Footnote(
+        callout="",
+        text="Smith's findings.",
+        provenance=Provenance(page=11, source="vlm"),
+    )
     assert _is_continuation_plausible(prev, cont)
 
 
 def test_fn_continuation_rejected_when_prev_is_none() -> None:
     """_is_continuation_plausible rejects when there is no preceding footnote."""
-    cont = Footnote(callout="", text="continuation.", provenance=Provenance(page=1, source="vlm"))
+    cont = Footnote(
+        callout="", text="continuation.", provenance=Provenance(page=1, source="vlm")
+    )
     assert not _is_continuation_plausible(None, cont)
 
 
 # --- Fix 1: cross-chapter same-page pairing ---
+
 
 def test_cross_chapter_same_page_pairing() -> None:
     """Para before a level-1 heading pairs with FN on the same physical page (cross-chapter layout)."""
@@ -356,6 +401,7 @@ def test_cross_chapter_same_page_pairing() -> None:
 
 
 # --- Fix 2: P0 distance limit ---
+
 
 def test_p0_fallback_distance_limit() -> None:
     """P0 fallback does not fire when distance exceeds 1 page (distance=3 here)."""
@@ -389,6 +435,7 @@ def test_salvage_does_not_borrow_far_page_marker() -> None:
 
 
 # --- Fix 3: salvage duplicate callouts ---
+
 
 def test_salvage_duplicate_callouts_same_page() -> None:
     """When two paras on the same page share a callout, the second gets salvaged to the same marker."""
@@ -497,6 +544,7 @@ class TestParseBlock:
     def test_vlm_format_paragraph(self):
         """VLM-format block: flat page, no role, no nested provenance."""
         from epubforge.assembler import _parse_block
+
         raw = {"kind": "paragraph", "text": "Hello", "page": 3}
         block = _parse_block(raw, default_page=1, source="vlm")
         assert isinstance(block, Paragraph)
@@ -509,6 +557,7 @@ class TestParseBlock:
     def test_skip_vlm_format_paragraph_preserves_role(self):
         """Skip-VLM block: nested provenance, role preserved."""
         from epubforge.assembler import _parse_block
+
         raw = {
             "kind": "paragraph",
             "text": "Chapter 1",
@@ -537,6 +586,7 @@ class TestParseBlock:
     def test_skip_vlm_format_table_preserves_bbox(self):
         """Skip-VLM Table block preserves bbox."""
         from epubforge.assembler import _parse_block
+
         raw = {
             "kind": "table",
             "html": "<table><tr><td>A</td></tr></table>",
@@ -554,6 +604,7 @@ class TestParseBlock:
     def test_skip_vlm_format_figure_preserves_bbox(self):
         """Skip-VLM Figure block preserves bbox."""
         from epubforge.assembler import _parse_block
+
         raw = {
             "kind": "figure",
             "caption": "Fig 1",
@@ -569,6 +620,7 @@ class TestParseBlock:
     def test_skip_vlm_format_equation_preserves_bbox(self):
         """Skip-VLM Equation block preserves bbox."""
         from epubforge.assembler import _parse_block
+
         raw = {
             "kind": "equation",
             "latex": "E=mc^2",
@@ -583,6 +635,7 @@ class TestParseBlock:
     def test_vlm_format_uses_default_page(self):
         """VLM block without page key uses default_page."""
         from epubforge.assembler import _parse_block
+
         raw = {"kind": "paragraph", "text": "test"}
         block = _parse_block(raw, default_page=10, source="vlm")
         assert isinstance(block, Paragraph)
@@ -591,6 +644,7 @@ class TestParseBlock:
     def test_unknown_kind_returns_none(self):
         """Unknown block kind returns None."""
         from epubforge.assembler import _parse_block
+
         raw = {"kind": "unknown_thing", "text": "test"}
         block = _parse_block(raw, default_page=1, source="vlm")
         assert block is None

@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
-from typing import Callable
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner, Result
 
 from epubforge.cli import app
@@ -25,7 +22,6 @@ from epubforge.ir.semantic import (
     Provenance,
 )
 from epubforge.stage3_artifacts import (
-    Stage3ActivePointer,
     Stage3Manifest,
     _sha256_str,
     activate_manifest_atomic,
@@ -54,7 +50,7 @@ def _minimal_book(
 ) -> Book:
     """Create a minimal book with optional extraction metadata."""
     blocks = []
-    for p in (pages or [1]):
+    for p in pages or [1]:
         blocks.append(Paragraph(text=f"Para page {p}.", provenance=_prov(p)))
     book = Book(
         title="Test Book",
@@ -210,7 +206,9 @@ class TestStage3EditorMetaValidation:
             evidence_index_path="",
             extraction_warnings_path="",
         )
-        meta = EditorMeta(initialized_at="2026-01-01T00:00:00Z", uid_seed="seed", stage3=s3)
+        meta = EditorMeta(
+            initialized_at="2026-01-01T00:00:00Z", uid_seed="seed", stage3=s3
+        )
         assert meta.stage3 is not None
         assert meta.stage3.artifact_id == "abc"
 
@@ -231,7 +229,9 @@ class TestStage3EditorMetaValidation:
             evidence_index_path="/tmp/evidence.json",
             extraction_warnings_path="/tmp/warnings.json",
         )
-        meta = EditorMeta(initialized_at="2026-01-01T00:00:00Z", uid_seed="myseed", stage3=s3)
+        meta = EditorMeta(
+            initialized_at="2026-01-01T00:00:00Z", uid_seed="myseed", stage3=s3
+        )
         serialised = meta.model_dump_json()
         restored = EditorMeta.model_validate_json(serialised)
         assert restored.stage3 is not None
@@ -244,7 +244,9 @@ class TestStage3EditorMetaValidation:
 
 
 class TestEditorInitStage3:
-    def test_init_from_matching_raw_succeeds_with_stage3_meta(self, tmp_path: Path) -> None:
+    def test_init_from_matching_raw_succeeds_with_stage3_meta(
+        self, tmp_path: Path
+    ) -> None:
         work_dir = tmp_path / "book"
         work_dir.mkdir()
 
@@ -257,7 +259,9 @@ class TestEditorInitStage3:
             manifest_sha256=sha256,
             pages=[1, 2],
         )
-        (work_dir / "05_semantic_raw.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        (work_dir / "05_semantic_raw.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
 
         result = _invoke(["editor", "init", str(work_dir)])
         assert result.exit_code == 0, result.output
@@ -288,8 +292,12 @@ class TestEditorInitStage3:
             manifest_sha256=sha256,
             pages=[1, 2],
         )
-        (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
-        (work_dir / "05_semantic_raw.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        (work_dir / "05_semantic.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
+        (work_dir / "05_semantic_raw.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
 
         result = _invoke(["editor", "init", str(work_dir)])
         assert result.exit_code == 0, result.output
@@ -306,7 +314,9 @@ class TestEditorInitStage3:
         audit_notes_path.write_text('[{"msg": "test note"}]', encoding="utf-8")
 
         book = _minimal_book(artifact_id=manifest.artifact_id, manifest_sha256=sha256)
-        (work_dir / "05_semantic_raw.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        (work_dir / "05_semantic_raw.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
 
         result = _invoke(["editor", "init", str(work_dir)])
         assert result.exit_code == 0, result.output
@@ -336,7 +346,9 @@ class TestEditorInitMismatch:
             artifact_id="WRONG_ARTIFACT_000",
             manifest_sha256="whatever",
         )
-        (work_dir / "05_semantic_raw.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        (work_dir / "05_semantic_raw.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
 
         result = _invoke(["editor", "init", str(work_dir)])
         # Should fail because the only raw file doesn't match
@@ -353,7 +365,9 @@ class TestEditorInitMismatch:
         result = _invoke(["editor", "init", str(work_dir)])
         assert result.exit_code != 0
 
-    def test_default_init_source_no_manifest_falls_back_to_file_check(self, tmp_path: Path) -> None:
+    def test_default_init_source_no_manifest_falls_back_to_file_check(
+        self, tmp_path: Path
+    ) -> None:
         """Without active manifest, default_init_source just checks file existence."""
         from epubforge.editor.state import default_init_source
 
@@ -385,7 +399,9 @@ class TestRenderPage:
         if with_manifest:
             manifest = _make_manifest(work_dir)
             sha256 = _setup_active_manifest(work_dir, manifest)
-            book = _minimal_book(artifact_id=manifest.artifact_id, manifest_sha256=sha256)
+            book = _minimal_book(
+                artifact_id=manifest.artifact_id, manifest_sha256=sha256
+            )
         else:
             book = _minimal_book()
 
@@ -398,8 +414,9 @@ class TestRenderPage:
             source_dir.mkdir(parents=True, exist_ok=True)
             # Create a real minimal 1-page PDF using pypdfium2
             import pypdfium2 as pdfium
+
             doc = pdfium.PdfDocument.new()
-            page = doc.new_page(width=595, height=842)
+            doc.new_page(width=595, height=842)
             doc.save(str(source_dir / "source.pdf"))
 
         runner.invoke(app, ["editor", "init", str(work_dir)], catch_exceptions=False)
@@ -429,7 +446,15 @@ class TestRenderPage:
         out_path = tmp_path / "custom_render.jpg"
         result = runner.invoke(
             app,
-            ["editor", "render-page", str(work_dir), "--page", "1", "--out", str(out_path)],
+            [
+                "editor",
+                "render-page",
+                str(work_dir),
+                "--page",
+                "1",
+                "--out",
+                str(out_path),
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
@@ -450,7 +475,9 @@ class TestRenderPage:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         # Default path should be edit_state/audit/page_images/page_0001.jpg
-        expected = str(work_dir / "edit_state" / "audit" / "page_images" / "page_0001.jpg")
+        expected = str(
+            work_dir / "edit_state" / "audit" / "page_images" / "page_0001.jpg"
+        )
         assert payload["image_path"] == expected
 
 
@@ -482,7 +509,10 @@ class TestRenderPageMissingPDF:
         assert result.exit_code != 0
         output = json.loads(result.output)
         # Error should mention source.pdf and rerun parse
-        assert "source.pdf" in output.get("error", "") or "rerun" in output.get("error", "").lower()
+        assert (
+            "source.pdf" in output.get("error", "")
+            or "rerun" in output.get("error", "").lower()
+        )
 
     def test_render_page_zero_page_rejected(self, tmp_path: Path) -> None:
         work_dir = tmp_path / "book"
@@ -515,14 +545,18 @@ class TestVLMPage:
             "source_pdf": "source/source.pdf",
             "pages": {
                 "1": {"items": [{"ref": "p1e1", "kind": "paragraph", "text": "hello"}]},
-                "2": {"items": [{"ref": "p2e1", "kind": "table", "text": "table data"}]},
+                "2": {
+                    "items": [{"ref": "p2e1", "kind": "table", "text": "table data"}]
+                },
             },
             "refs": {},
         }
         ev_path = work_dir / manifest.sidecars["evidence_index"]
         ev_path.write_text(json.dumps(evidence_index, indent=2), encoding="utf-8")
 
-        book = _minimal_book(artifact_id=manifest.artifact_id, manifest_sha256=sha256, pages=[1, 2])
+        book = _minimal_book(
+            artifact_id=manifest.artifact_id, manifest_sha256=sha256, pages=[1, 2]
+        )
         (work_dir / "05_semantic_raw.json").write_text(
             book.model_dump_json(indent=2), encoding="utf-8"
         )
@@ -531,6 +565,7 @@ class TestVLMPage:
         source_dir = work_dir / "source"
         source_dir.mkdir(parents=True, exist_ok=True)
         import pypdfium2 as pdfium
+
         doc = pdfium.PdfDocument.new()
         doc.new_page(width=595, height=842)
         doc.new_page(width=595, height=842)
@@ -547,11 +582,17 @@ class TestVLMPage:
 
         paths = resolve_editor_paths(work_dir)
         from epubforge.io import load_book
+
         book_before = load_book(paths.book_path)
         book_before_json = book_before.model_dump_json()
 
         mock_result = MagicMock()
-        mock_result.model_dump.return_value = {"page": 1, "issues": [], "suggestions": [], "notes": "ok"}
+        mock_result.model_dump.return_value = {
+            "page": 1,
+            "issues": [],
+            "suggestions": [],
+            "notes": "ok",
+        }
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
@@ -568,6 +609,7 @@ class TestVLMPage:
 
         # Verify book.json is unchanged
         from epubforge.io import load_book as lb2
+
         book_after = lb2(paths.book_path)
         assert book_after.model_dump_json() == book_before_json
 
@@ -577,7 +619,12 @@ class TestVLMPage:
         self._setup_work_dir_with_pdf(work_dir)
 
         mock_result = MagicMock()
-        mock_result.model_dump.return_value = {"page": 1, "issues": ["issue A"], "suggestions": [], "notes": ""}
+        mock_result.model_dump.return_value = {
+            "page": 1,
+            "issues": ["issue A"],
+            "suggestions": [],
+            "notes": "",
+        }
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
@@ -620,7 +667,12 @@ class TestVLMPage:
 
         out_path = tmp_path / "vlm_out.json"
         mock_result = MagicMock()
-        mock_result.model_dump.return_value = {"page": 2, "issues": [], "suggestions": [], "notes": ""}
+        mock_result.model_dump.return_value = {
+            "page": 2,
+            "issues": [],
+            "suggestions": [],
+            "notes": "",
+        }
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
@@ -629,7 +681,15 @@ class TestVLMPage:
 
             result = runner.invoke(
                 app,
-                ["editor", "vlm-page", str(work_dir), "--page", "2", "--out", str(out_path)],
+                [
+                    "editor",
+                    "vlm-page",
+                    str(work_dir),
+                    "--page",
+                    "2",
+                    "--out",
+                    str(out_path),
+                ],
                 catch_exceptions=False,
             )
 
@@ -648,7 +708,9 @@ class TestRenderPromptExtractionContext:
         manifest = _make_manifest(work_dir, selected_pages=[1, 2], complex_pages=[2])
         sha256 = _setup_active_manifest(work_dir, manifest)
 
-        book = _minimal_book(artifact_id=manifest.artifact_id, manifest_sha256=sha256, pages=[1, 2])
+        book = _minimal_book(
+            artifact_id=manifest.artifact_id, manifest_sha256=sha256, pages=[1, 2]
+        )
         (work_dir / "05_semantic_raw.json").write_text(
             book.model_dump_json(indent=2), encoding="utf-8"
         )
@@ -656,6 +718,7 @@ class TestRenderPromptExtractionContext:
 
         paths = resolve_editor_paths(work_dir)
         from epubforge.io import load_book
+
         b = load_book(paths.book_path)
         uid = b.chapters[0].uid
         assert uid is not None
@@ -668,7 +731,15 @@ class TestRenderPromptExtractionContext:
 
         result = runner.invoke(
             app,
-            ["editor", "render-prompt", str(work_dir), "--kind", "scanner", "--chapter", chapter_uid],
+            [
+                "editor",
+                "render-prompt",
+                str(work_dir),
+                "--kind",
+                "scanner",
+                "--chapter",
+                chapter_uid,
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
@@ -679,14 +750,24 @@ class TestRenderPromptExtractionContext:
         assert "render-page" in prompt
         assert "vlm-page" in prompt
 
-    def test_render_prompt_contains_candidate_role_guidance(self, tmp_path: Path) -> None:
+    def test_render_prompt_contains_candidate_role_guidance(
+        self, tmp_path: Path
+    ) -> None:
         work_dir = tmp_path / "book"
         work_dir.mkdir()
         chapter_uid = self._setup_for_render_prompt(work_dir)
 
         result = runner.invoke(
             app,
-            ["editor", "render-prompt", str(work_dir), "--kind", "scanner", "--chapter", chapter_uid],
+            [
+                "editor",
+                "render-prompt",
+                str(work_dir),
+                "--kind",
+                "scanner",
+                "--chapter",
+                chapter_uid,
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
@@ -701,8 +782,17 @@ class TestRenderPromptExtractionContext:
 
         result = runner.invoke(
             app,
-            ["editor", "render-prompt", str(work_dir), "--kind", "fixer", "--chapter", chapter_uid,
-             "--issues", '["fix something"]'],
+            [
+                "editor",
+                "render-prompt",
+                str(work_dir),
+                "--kind",
+                "fixer",
+                "--chapter",
+                chapter_uid,
+                "--issues",
+                '["fix something"]',
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
@@ -710,14 +800,24 @@ class TestRenderPromptExtractionContext:
 
         assert "page coverage" in prompt or "selected_pages" in prompt
 
-    def test_render_prompt_uses_absolute_work_dir_in_commands(self, tmp_path: Path) -> None:
+    def test_render_prompt_uses_absolute_work_dir_in_commands(
+        self, tmp_path: Path
+    ) -> None:
         work_dir = tmp_path / "book"
         work_dir.mkdir()
         chapter_uid = self._setup_for_render_prompt(work_dir)
 
         result = runner.invoke(
             app,
-            ["editor", "render-prompt", str(work_dir), "--kind", "reviewer", "--chapter", chapter_uid],
+            [
+                "editor",
+                "render-prompt",
+                str(work_dir),
+                "--kind",
+                "reviewer",
+                "--chapter",
+                chapter_uid,
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output
@@ -726,25 +826,38 @@ class TestRenderPromptExtractionContext:
         # The prompt should contain absolute path to work_dir
         assert str(work_dir.resolve()) in prompt
 
-    def test_render_prompt_without_stage3_has_no_extraction_context(self, tmp_path: Path) -> None:
+    def test_render_prompt_without_stage3_has_no_extraction_context(
+        self, tmp_path: Path
+    ) -> None:
         """Legacy init (no active manifest) should produce prompt without extraction context."""
         work_dir = tmp_path / "book"
         work_dir.mkdir()
 
         # No manifest — minimal legacy setup
         book = _minimal_book()
-        (work_dir / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+        (work_dir / "05_semantic.json").write_text(
+            book.model_dump_json(indent=2), encoding="utf-8"
+        )
         runner.invoke(app, ["editor", "init", str(work_dir)], catch_exceptions=False)
 
         paths = resolve_editor_paths(work_dir)
         from epubforge.io import load_book
+
         b = load_book(paths.book_path)
         chapter_uid = b.chapters[0].uid
         assert chapter_uid is not None
 
         result = runner.invoke(
             app,
-            ["editor", "render-prompt", str(work_dir), "--kind", "scanner", "--chapter", chapter_uid],
+            [
+                "editor",
+                "render-prompt",
+                str(work_dir),
+                "--kind",
+                "scanner",
+                "--chapter",
+                chapter_uid,
+            ],
             catch_exceptions=False,
         )
         assert result.exit_code == 0, result.output

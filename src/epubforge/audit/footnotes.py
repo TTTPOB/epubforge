@@ -21,7 +21,11 @@ def _is_probable_callout_symbol(callout: str) -> bool:
 
 def detect_footnote_issues(book: Book) -> AuditBundle:
     issues: list[AuditIssue] = []
-    block_uid_to_chapter_uid = {ref.block.uid: ref.chapter.uid for ref in iter_blocks(book) if ref.block.uid is not None}
+    block_uid_to_chapter_uid = {
+        ref.block.uid: ref.chapter.uid
+        for ref in iter_blocks(book)
+        if ref.block.uid is not None
+    }
     marker_map: dict[tuple[int, str], list] = defaultdict(list)
     for marker in find_markers(book):
         marker_map[(marker.page, marker.callout)].append(marker)
@@ -42,7 +46,9 @@ def detect_footnote_issues(book: Book) -> AuditBundle:
                     code="footnote.duplicate_callout",
                     page=page,
                     block_index=first.block_idx,
-                    chapter_uid=block_uid_to_chapter_uid.get(block_uid) if block_uid is not None else None,
+                    chapter_uid=block_uid_to_chapter_uid.get(block_uid)
+                    if block_uid is not None
+                    else None,
                     block_uid=block_uid,
                     message=f"marker {callout!r} appears {len(markers)} times on page {page}",
                     note_kind="unknown_callout",
@@ -56,7 +62,9 @@ def detect_footnote_issues(book: Book) -> AuditBundle:
                     code="footnote.marker_with_no_host",
                     page=page,
                     block_index=first.block_idx,
-                    chapter_uid=block_uid_to_chapter_uid.get(block_uid) if block_uid is not None else None,
+                    chapter_uid=block_uid_to_chapter_uid.get(block_uid)
+                    if block_uid is not None
+                    else None,
                     block_uid=block_uid,
                     message=f"marker {callout!r} has no matching footnote body on page {page}",
                     note_kind="orphan_footnote",
@@ -171,7 +179,11 @@ def detect_footnote_issues(book: Book) -> AuditBundle:
         page = ref.block.provenance.page
         counts_by_page[page] = counts_by_page.get(page, 0) + 1
     densities = tuple(
-        PageFootnoteDensity(page=page, chapter_uid=page_to_chapter.get(page), count=counts_by_page.get(page, 0))
+        PageFootnoteDensity(
+            page=page,
+            chapter_uid=page_to_chapter.get(page),
+            count=counts_by_page.get(page, 0),
+        )
         for page in range(min(pages, default=1), max(pages, default=0) + 1)
     )
     return AuditBundle(issues=tuple(issues), footnote_density=densities)

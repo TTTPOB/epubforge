@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from docling_core.types.doc import (
     DocItemLabel,
@@ -29,8 +28,12 @@ from epubforge.classifier import classify_pages, _is_multicolumn
 _DEFAULT_BBOX = BoundingBox(l=50.0, t=100.0, r=300.0, b=120.0)
 
 
-def _text(label: DocItemLabel, page_no: int, ref: str = "#/texts/0",
-          bbox: BoundingBox | None = None) -> TextItem | SectionHeaderItem | FormulaItem:
+def _text(
+    label: DocItemLabel,
+    page_no: int,
+    ref: str = "#/texts/0",
+    bbox: BoundingBox | None = None,
+) -> TextItem | SectionHeaderItem | FormulaItem:
     """Build a text-collection item with the appropriate concrete type for *label*."""
     b = bbox or _DEFAULT_BBOX
     prov = [ProvenanceItem(page_no=page_no, bbox=b, charspan=(0, 0))]
@@ -42,21 +45,25 @@ def _text(label: DocItemLabel, page_no: int, ref: str = "#/texts/0",
     return TextItem(self_ref=ref, label=label, orig="", text="", prov=prov)  # type: ignore[arg-type]
 
 
-def _table(page_no: int, ref: str = "#/tables/0",
-           bbox: BoundingBox | None = None) -> TableItem:
+def _table(
+    page_no: int, ref: str = "#/tables/0", bbox: BoundingBox | None = None
+) -> TableItem:
     b = bbox or _DEFAULT_BBOX
     return TableItem(
-        self_ref=ref, label=DocItemLabel.TABLE,
+        self_ref=ref,
+        label=DocItemLabel.TABLE,
         prov=[ProvenanceItem(page_no=page_no, bbox=b, charspan=(0, 0))],
         data=TableData(num_rows=0, num_cols=0, table_cells=[]),
     )
 
 
-def _picture(page_no: int, ref: str = "#/pictures/0",
-             bbox: BoundingBox | None = None) -> PictureItem:
+def _picture(
+    page_no: int, ref: str = "#/pictures/0", bbox: BoundingBox | None = None
+) -> PictureItem:
     b = bbox or _DEFAULT_BBOX
     return PictureItem(
-        self_ref=ref, label=DocItemLabel.PICTURE,
+        self_ref=ref,
+        label=DocItemLabel.PICTURE,
         prov=[ProvenanceItem(page_no=page_no, bbox=b, charspan=(0, 0))],
     )
 
@@ -87,12 +94,15 @@ def _run(tmp_path: Path, doc: DoclingDocument) -> list[dict]:
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
+
 class TestSimplePage:
     def test_text_only_page_is_simple(self, tmp_path: Path) -> None:
-        doc = _doc(texts=[
-            _text(DocItemLabel.TEXT, 1, "#/texts/0"),
-            _text(DocItemLabel.TEXT, 1, "#/texts/1"),
-        ])
+        doc = _doc(
+            texts=[
+                _text(DocItemLabel.TEXT, 1, "#/texts/0"),
+                _text(DocItemLabel.TEXT, 1, "#/texts/1"),
+            ]
+        )
         pages = _run(tmp_path, doc)
         assert any(p["page"] == 1 and p["kind"] == "simple" for p in pages)
 
@@ -126,20 +136,24 @@ class TestComplexPage:
 
 class TestMultiPage:
     def test_different_pages_classified_independently(self, tmp_path: Path) -> None:
-        doc = _doc(texts=[
-            _text(DocItemLabel.TEXT, 1, "#/texts/0"),
-            _text(DocItemLabel.FOOTNOTE, 2, "#/texts/1"),
-        ])
+        doc = _doc(
+            texts=[
+                _text(DocItemLabel.TEXT, 1, "#/texts/0"),
+                _text(DocItemLabel.FOOTNOTE, 2, "#/texts/1"),
+            ]
+        )
         pages = _run(tmp_path, doc)
         by_page = {p["page"]: p["kind"] for p in pages}
         assert by_page[1] == "simple"
         assert by_page[2] == "complex"
 
     def test_element_refs_collected(self, tmp_path: Path) -> None:
-        doc = _doc(texts=[
-            _text(DocItemLabel.TEXT, 1, "#/texts/0"),
-            _text(DocItemLabel.TEXT, 1, "#/texts/1"),
-        ])
+        doc = _doc(
+            texts=[
+                _text(DocItemLabel.TEXT, 1, "#/texts/0"),
+                _text(DocItemLabel.TEXT, 1, "#/texts/1"),
+            ]
+        )
         pages = _run(tmp_path, doc)
         p1 = next(p for p in pages if p["page"] == 1)
         assert "#/texts/0" in p1["element_refs"]
@@ -186,7 +200,7 @@ class TestMultiColumn:
         assert not _is_multicolumn(bboxes, 595.0)
 
     def test_two_columns_flagged(self) -> None:
-        left = [(50.0, 250.0)] * 4   # mid=150
+        left = [(50.0, 250.0)] * 4  # mid=150
         right = [(320.0, 560.0)] * 4  # mid=440
         assert _is_multicolumn(left + right, 595.0)
 

@@ -191,7 +191,9 @@ def build_desired_stage3_manifest(
         "page_filter": sorted(page_filter) if page_filter is not None else None,
         "settings": settings,
     }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
@@ -253,9 +255,7 @@ def validate_stage3_artifact(work_dir: Path, manifest: Stage3Manifest) -> None:
     """
     artifact_dir = work_dir / PurePosixPath(manifest.artifact_dir)
     if not artifact_dir.is_dir():
-        raise Stage3ContractError(
-            f"Artifact directory missing: {artifact_dir}"
-        )
+        raise Stage3ContractError(f"Artifact directory missing: {artifact_dir}")
 
     manifest_file = artifact_dir / "manifest.json"
     if not manifest_file.exists():
@@ -270,7 +270,9 @@ def validate_stage3_artifact(work_dir: Path, manifest: Stage3Manifest) -> None:
             raw_pointer = pointer_path.read_text(encoding="utf-8")
             pointer = Stage3ActivePointer.model_validate_json(raw_pointer)
         except Exception as exc:
-            raise Stage3ContractError(f"Cannot parse active_manifest.json: {exc}") from exc
+            raise Stage3ContractError(
+                f"Cannot parse active_manifest.json: {exc}"
+            ) from exc
 
         if pointer.active_artifact_id == manifest.artifact_id:
             actual_sha = _sha256_str(manifest_file.read_text(encoding="utf-8"))
@@ -405,17 +407,13 @@ def load_active_stage3_manifest(
     """
     pointer_path = _active_pointer_path(work_dir)
     if not pointer_path.exists():
-        raise Stage3ContractError(
-            f"No active manifest pointer found at {pointer_path}"
-        )
+        raise Stage3ContractError(f"No active manifest pointer found at {pointer_path}")
 
     try:
         raw_pointer = pointer_path.read_text(encoding="utf-8")
         pointer = Stage3ActivePointer.model_validate_json(raw_pointer)
     except Exception as exc:
-        raise Stage3ContractError(
-            f"Cannot parse active_manifest.json: {exc}"
-        ) from exc
+        raise Stage3ContractError(f"Cannot parse active_manifest.json: {exc}") from exc
 
     manifest_abs = work_dir / PurePosixPath(pointer.manifest_path)
     if not manifest_abs.exists():
@@ -446,9 +444,7 @@ def load_active_stage3_manifest(
 # ---------------------------------------------------------------------------
 
 
-def resolve_manifest_paths(
-    work_dir: Path, manifest: Stage3Manifest
-) -> dict[str, Path]:
+def resolve_manifest_paths(work_dir: Path, manifest: Stage3Manifest) -> dict[str, Path]:
     """Resolve all relative POSIX paths in *manifest* to absolute :class:`Path` objects.
 
     Returns a dict with keys:
@@ -460,9 +456,7 @@ def resolve_manifest_paths(
     result: dict[str, Any] = {
         "artifact_dir": work_dir / PurePosixPath(manifest.artifact_dir),
         "source_pdf": work_dir / PurePosixPath(manifest.source_pdf),
-        "unit_files": [
-            work_dir / PurePosixPath(rel) for rel in manifest.unit_files
-        ],
+        "unit_files": [work_dir / PurePosixPath(rel) for rel in manifest.unit_files],
     }
     for key, rel in manifest.sidecars.items():
         result[key] = work_dir / PurePosixPath(rel)

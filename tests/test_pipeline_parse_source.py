@@ -20,7 +20,9 @@ def test_run_parse_persists_source_pdf_and_uses_it_for_docling(
     cfg = Config(runtime=RuntimeSettings(work_dir=tmp_path / "work"))
     calls: list[Path] = []
 
-    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs) -> None:
+    def fake_parse_pdf(
+        pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs
+    ) -> None:
         calls.append(pdf_path)
         out_path.write_text('{"pages": {}}', encoding="utf-8")
 
@@ -56,7 +58,9 @@ def test_run_parse_falls_back_to_copy2_when_hardlink_fails(
     cfg = Config(runtime=RuntimeSettings(work_dir=tmp_path / "work"))
     copied: list[tuple[Path, Path]] = []
 
-    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs) -> None:
+    def fake_parse_pdf(
+        pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs
+    ) -> None:
         out_path.write_text('{"pages": {}}', encoding="utf-8")
 
     def fake_link(src: Path, dst: Path) -> None:
@@ -77,7 +81,9 @@ def test_run_parse_falls_back_to_copy2_when_hardlink_fails(
     assert persisted_pdf.read_bytes() == source_pdf.read_bytes()
 
 
-def test_run_parse_existing_output_requires_stable_source_artifacts(tmp_path: Path) -> None:
+def test_run_parse_existing_output_requires_stable_source_artifacts(
+    tmp_path: Path,
+) -> None:
     source_pdf = tmp_path / "input.pdf"
     source_pdf.write_bytes(b"%PDF-1.7\nstable source bytes\n")
     cfg = Config(runtime=RuntimeSettings(work_dir=tmp_path / "work"))
@@ -85,5 +91,8 @@ def test_run_parse_existing_output_requires_stable_source_artifacts(tmp_path: Pa
     work.mkdir(parents=True)
     (work / "01_raw.json").write_text('{"pages": {}}', encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match=r"source/source\.pdf.*source/source_meta\.json.*--force-rerun"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"source/source\.pdf.*source/source_meta\.json.*--force-rerun",
+    ):
         run_parse(source_pdf, cfg, force=False)

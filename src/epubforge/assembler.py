@@ -102,13 +102,26 @@ def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block |
 
     try:
         if kind == "paragraph":
-            return Paragraph(text=raw.get("text", ""), role=raw.get("role", "body"), provenance=prov)
+            return Paragraph(
+                text=raw.get("text", ""), role=raw.get("role", "body"), provenance=prov
+            )
         if kind == "heading":
-            return Heading(text=raw.get("text", ""), level=raw.get("level", 1), provenance=prov)
+            return Heading(
+                text=raw.get("text", ""), level=raw.get("level", 1), provenance=prov
+            )
         if kind == "footnote":
-            return Footnote(callout=str(raw.get("callout", "")), text=raw.get("text", ""), provenance=prov)
+            return Footnote(
+                callout=str(raw.get("callout", "")),
+                text=raw.get("text", ""),
+                provenance=prov,
+            )
         if kind == "figure":
-            return Figure(caption=raw.get("caption", ""), image_ref=raw.get("image_ref"), bbox=raw.get("bbox"), provenance=prov)
+            return Figure(
+                caption=raw.get("caption", ""),
+                image_ref=raw.get("image_ref"),
+                bbox=raw.get("bbox"),
+                provenance=prov,
+            )
         if kind == "table":
             return Table(
                 html=raw.get("html", ""),
@@ -119,7 +132,9 @@ def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block |
                 provenance=prov,
             )
         if kind == "equation":
-            return Equation(latex=raw.get("latex", ""), bbox=raw.get("bbox"), provenance=prov)
+            return Equation(
+                latex=raw.get("latex", ""), bbox=raw.get("bbox"), provenance=prov
+            )
     except Exception as exc:
         log.warning("Skipping malformed block %s: %s", raw, exc)
     return None
@@ -152,14 +167,20 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
             if prev_tbl is not None and prev_idx is not None:
                 new_html = _splice_table_html(prev_tbl.html, block.html)
                 merge_record = _build_merge_record(prev_tbl, block)
-                result[prev_idx] = prev_tbl.model_copy(update={
-                    "html": new_html,
-                    "table_title": prev_tbl.table_title or block.table_title,
-                    "caption": prev_tbl.caption or block.caption,
-                    "multi_page": True,
-                    "merge_record": merge_record,
-                })
-                log.debug("Merged continuation table (page %d) into table (page %d)", block.provenance.page, prev_tbl.provenance.page)
+                result[prev_idx] = prev_tbl.model_copy(
+                    update={
+                        "html": new_html,
+                        "table_title": prev_tbl.table_title or block.table_title,
+                        "caption": prev_tbl.caption or block.caption,
+                        "multi_page": True,
+                        "merge_record": merge_record,
+                    }
+                )
+                log.debug(
+                    "Merged continuation table (page %d) into table (page %d)",
+                    block.provenance.page,
+                    prev_tbl.provenance.page,
+                )
                 continue
         result.append(block)
     return result
@@ -167,7 +188,9 @@ def _merge_continued_tables(blocks: list[Block]) -> list[Block]:
 
 def _extract_tbody_html(html: str) -> str:
     """Return the content of the first <tbody> block, or the full inner table HTML."""
-    tbody_match = re.search(r"<tbody\b[^>]*>(.*?)</tbody>", html, flags=re.IGNORECASE | re.DOTALL)
+    tbody_match = re.search(
+        r"<tbody\b[^>]*>(.*?)</tbody>", html, flags=re.IGNORECASE | re.DOTALL
+    )
     if tbody_match:
         return tbody_match.group(1)
     # Fall back to stripping the outer <table> wrapper
@@ -181,14 +204,18 @@ def _count_row_logical_width(row_html: str) -> int:
     width = 0
     for cell_match in re.finditer(r"<t[dh]\b([^>]*)>", row_html, flags=re.IGNORECASE):
         attrs = cell_match.group(1)
-        colspan_match = re.search(r'colspan\s*=\s*["\']?(\d+)', attrs, flags=re.IGNORECASE)
+        colspan_match = re.search(
+            r'colspan\s*=\s*["\']?(\d+)', attrs, flags=re.IGNORECASE
+        )
         width += int(colspan_match.group(1)) if colspan_match else 1
     return max(width, 0)
 
 
 def _modal_column_width(tbody_html: str) -> int:
     """Return the most common logical row width in a tbody block (0 if no rows)."""
-    rows = re.findall(r"<tr\b[^>]*>.*?</tr>", tbody_html, flags=re.IGNORECASE | re.DOTALL)
+    rows = re.findall(
+        r"<tr\b[^>]*>.*?</tr>", tbody_html, flags=re.IGNORECASE | re.DOTALL
+    )
     if not rows:
         return 0
     widths: dict[int, int] = {}
@@ -239,12 +266,20 @@ def _splice_table_html(base: str, cont: str) -> str:
     inner = re.sub(r"^\s*<table[^>]*>", "", cont, count=1, flags=re.IGNORECASE)
     inner = re.sub(r"</table>\s*$", "", inner, count=1, flags=re.IGNORECASE)
     # Remove <thead>…</thead> from continuation to avoid duplicate column headers
-    inner = re.sub(r"<thead\b[^>]*>.*?</thead>", "", inner, flags=re.IGNORECASE | re.DOTALL)
+    inner = re.sub(
+        r"<thead\b[^>]*>.*?</thead>", "", inner, flags=re.IGNORECASE | re.DOTALL
+    )
     # Remove leading <tr> that contains only <th> cells (header row not wrapped in <thead>)
-    inner = re.sub(r"^\s*<tr\b[^>]*>(\s*<th\b[^>]*>.*?</th>\s*)+</tr>", "", inner,
-                   count=1, flags=re.IGNORECASE | re.DOTALL)
-    return re.sub(r"</table>\s*$", inner + "</table>", base, count=1, flags=re.IGNORECASE)
-
+    inner = re.sub(
+        r"^\s*<tr\b[^>]*>(\s*<th\b[^>]*>.*?</th>\s*)+</tr>",
+        "",
+        inner,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return re.sub(
+        r"</table>\s*$", inner + "</table>", base, count=1, flags=re.IGNORECASE
+    )
 
 
 def _pair_footnotes(blocks: list[Block]) -> list[Block]:
@@ -283,10 +318,13 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
     result = list(blocks)
 
     # Pass 1: collect callout symbols from UNPAIRED footnotes only.
-    callout_symbols = sorted({
-        b.callout for b in result
-        if isinstance(b, Footnote) and b.callout and not b.paired
-    })
+    callout_symbols = sorted(
+        {
+            b.callout
+            for b in result
+            if isinstance(b, Footnote) and b.callout and not b.paired
+        }
+    )
     if not callout_symbols:
         return result
 
@@ -306,7 +344,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             # physical page with the heading and its FN body (cross-chapter same-page layout).
             h_page = block.provenance.page
             for c in list(stacks.keys()):
-                stacks[c] = [(j, ep, mp) for j, ep, mp in stacks[c] if mp or ep == h_page]
+                stacks[c] = [
+                    (j, ep, mp) for j, ep, mp in stacks[c] if mp or ep == h_page
+                ]
                 if not stacks[c]:
                     del stacks[c]
 
@@ -319,7 +359,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
 
         elif isinstance(block, Table):
             for c in callout_symbols:
-                if _has_raw_callout(block.html, c) or _has_raw_callout(block.table_title, c):
+                if _has_raw_callout(block.html, c) or _has_raw_callout(
+                    block.table_title, c
+                ):
                     stacks[c].append((i, block.provenance.page, block.multi_page))
 
         elif isinstance(block, Footnote) and not block.paired:
@@ -343,7 +385,10 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                     if not _has_raw_callout(source.text, callout):
                         continue
                 elif isinstance(source, Table):
-                    if not (_has_raw_callout(source.html, callout) or _has_raw_callout(source.table_title, callout)):
+                    if not (
+                        _has_raw_callout(source.html, callout)
+                        or _has_raw_callout(source.table_title, callout)
+                    ):
                         continue
                 else:
                     continue
@@ -355,7 +400,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 elif eff_page == fn_page:
                     priority = 2  # P2: same effective-page, multi source
                 elif is_multi:
-                    priority = 1  # P1: earlier effective-page, multi (cross-page continuation)
+                    priority = (
+                        1  # P1: earlier effective-page, multi (cross-page continuation)
+                    )
                 else:
                     if fn_page - eff_page > 1:
                         continue  # P0 only fires for adjacent pages (layout anomaly)
@@ -392,12 +439,15 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             j, _, _ = stack[best_k]
             source = result[j]
             if isinstance(source, Paragraph):
-                result[j] = source.model_copy(update={
-                    "text": _replace_first_raw(source.text, callout, fn_marker)
-                })
+                result[j] = source.model_copy(
+                    update={"text": _replace_first_raw(source.text, callout, fn_marker)}
+                )
                 log.debug(
                     "Paired footnote callout %r (page %d) into paragraph block %d (P%d)",
-                    callout, fn_page, j, best_priority,
+                    callout,
+                    fn_page,
+                    j,
+                    best_priority,
                 )
             elif isinstance(source, Table):
                 # Callout may be in html body or in table_title — replace in whichever has it
@@ -406,11 +456,19 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                 if _has_raw_callout(source.html, callout):
                     new_html = _replace_all_raw(source.html, callout, fn_marker)
                 elif _has_raw_callout(source.table_title, callout):
-                    new_title = _replace_first_raw(source.table_title, callout, fn_marker)
-                result[j] = source.model_copy(update={"html": new_html, "table_title": new_title})
+                    new_title = _replace_first_raw(
+                        source.table_title, callout, fn_marker
+                    )
+                result[j] = source.model_copy(
+                    update={"html": new_html, "table_title": new_title}
+                )
                 log.debug(
                     "Paired footnote callout %r (page %d) into table block %d page %d (P%d)",
-                    callout, fn_page, j, source.provenance.page, best_priority,
+                    callout,
+                    fn_page,
+                    j,
+                    source.provenance.page,
+                    best_priority,
                 )
             result[i] = block.model_copy(update={"paired": True})
             stack.pop(best_k)
@@ -419,7 +477,9 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
             # entries (P2 candidates). Without this they linger and get grabbed by a distant
             # FN via P1, preventing the salvage pass from re-linking them correctly.
             if best_priority == 3 and callout in stacks:
-                stacks[callout] = [(j2, ep2, mp2) for j2, ep2, mp2 in stacks[callout] if ep2 != fn_page]
+                stacks[callout] = [
+                    (j2, ep2, mp2) for j2, ep2, mp2 in stacks[callout] if ep2 != fn_page
+                ]
                 if not stacks[callout]:
                     del stacks[callout]
 
@@ -455,12 +515,14 @@ def _pair_footnotes(blocks: list[Block]) -> list[Block]:
                     if _has_raw_callout(new_title, c):
                         new_title = _replace_all_raw(new_title, c, marker)
                 if new_html != blk.html or new_title != blk.table_title:
-                    result[i] = blk.model_copy(update={"html": new_html, "table_title": new_title})
+                    result[i] = blk.model_copy(
+                        update={"html": new_html, "table_title": new_title}
+                    )
 
     return result
 
 
-_TERMINAL_PUNCT = frozenset('。！？…；.!?')
+_TERMINAL_PUNCT = frozenset("。！？…；.!?")
 
 
 def _merge_empty_callout_footnotes(blocks: list[Block]) -> list[Block]:
@@ -488,10 +550,13 @@ def _merge_empty_callout_footnotes(blocks: list[Block]) -> list[Block]:
             if target_idx is not None:
                 prev = result[target_idx]
                 assert isinstance(prev, Footnote)
-                result[target_idx] = prev.model_copy(update={"text": _cjk_join(prev.text, block.text)})
+                result[target_idx] = prev.model_copy(
+                    update={"text": _cjk_join(prev.text, block.text)}
+                )
                 log.debug(
                     "Merged empty-callout footnote (page %d) into preceding FN at block %d",
-                    block.provenance.page, target_idx,
+                    block.provenance.page,
+                    target_idx,
                 )
                 continue
             log.warning(
@@ -531,9 +596,13 @@ def _append_to_last_footnote(blocks: list[Block], cont_text: str) -> None:
     for i in range(len(blocks) - 1, -1, -1):
         candidate = blocks[i]
         if isinstance(candidate, Footnote):
-            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text)})
+            blocks[i] = candidate.model_copy(
+                update={"text": _cjk_join(candidate.text, cont_text)}
+            )
             return
-    log.warning("first_footnote_continues_prev_footnote=True but no preceding Footnote found; dropping continuation")
+    log.warning(
+        "first_footnote_continues_prev_footnote=True but no preceding Footnote found; dropping continuation"
+    )
 
 
 def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> bool:
@@ -548,7 +617,12 @@ def _append_to_last_paragraph(blocks: list[Block], cont_text: str) -> bool:
         if isinstance(candidate, Footnote):
             continue
         if isinstance(candidate, Paragraph):
-            blocks[i] = candidate.model_copy(update={"text": _cjk_join(candidate.text, cont_text), "cross_page": True})
+            blocks[i] = candidate.model_copy(
+                update={
+                    "text": _cjk_join(candidate.text, cont_text),
+                    "cross_page": True,
+                }
+            )
             return True
         break
     return False
@@ -563,7 +637,13 @@ def _detect_language(blocks: list[Block]) -> str:
 
 
 class _BookMeta:
-    def __init__(self, title: str, language: str, authors: list[str] | None = None, source_pdf: str = "") -> None:
+    def __init__(
+        self,
+        title: str,
+        language: str,
+        authors: list[str] | None = None,
+        source_pdf: str = "",
+    ) -> None:
         self.title = title
         self.language = language
         self.authors: list[str] = authors or []
@@ -582,6 +662,7 @@ def _build_draft_book(blocks: list[Block], work_dir: Path) -> Book:
     if raw_path.exists():
         try:
             from docling_core.types.doc import DoclingDocument
+
             doc = DoclingDocument.load_from_json(raw_path)
             origin = getattr(doc, "origin", None)
             if origin and getattr(origin, "filename", None):

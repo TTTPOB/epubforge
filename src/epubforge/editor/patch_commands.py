@@ -102,7 +102,9 @@ class SplitChapterParams(StrictModel):
     new_chapter_title: str
     new_chapter_uid: str
 
-    @field_validator("chapter_uid", "split_at_block_uid", "new_chapter_title", "new_chapter_uid")
+    @field_validator(
+        "chapter_uid", "split_at_block_uid", "new_chapter_title", "new_chapter_uid"
+    )
     @classmethod
     def _non_empty(cls, v: str, info) -> str:
         return require_non_empty(v, field_name=info.field_name)
@@ -210,7 +212,11 @@ class SplitMergedTableParams(StrictModel):
             raise ValueError("segment_pages must contain at least 2 items")
         if len(self.new_block_uids) < 2:
             raise ValueError("new_block_uids must contain at least 2 items")
-        if not (len(self.segment_html) == len(self.segment_pages) == len(self.new_block_uids)):
+        if not (
+            len(self.segment_html)
+            == len(self.segment_pages)
+            == len(self.new_block_uids)
+        ):
             raise ValueError(
                 "segment_html, segment_pages, and new_block_uids must all have the same length"
             )
@@ -265,6 +271,7 @@ class PatchCommand(StrictModel):
     @classmethod
     def _validate_command_id(cls, value: str) -> str:
         from epubforge.editor._validators import validate_uuid4
+
         return validate_uuid4(value, field_name="command_id")
 
     @field_validator("agent_id", "rationale")
@@ -281,9 +288,7 @@ class PatchCommand(StrictModel):
         try:
             model_cls.model_validate(self.params)
         except Exception as exc:
-            raise ValueError(
-                f"invalid params for op {self.op!r}: {exc}"
-            ) from exc
+            raise ValueError(f"invalid params for op {self.op!r}: {exc}") from exc
         return self
 
 
@@ -314,7 +319,12 @@ from epubforge.editor.patches import (  # noqa: E402
 from epubforge.editor.text_split import split_text  # noqa: E402
 from epubforge.fields import iter_block_text_fields  # noqa: E402
 from epubforge.ir.semantic import Block, Book, Chapter, Footnote, Paragraph, Table  # noqa: E402
-from epubforge.markers import count_raw_callout, has_raw_callout, make_fn_marker, replace_nth_raw  # noqa: E402
+from epubforge.markers import (  # noqa: E402
+    count_raw_callout,
+    has_raw_callout,
+    make_fn_marker,
+    replace_nth_raw,
+)
 from epubforge.query import find_markers  # noqa: E402
 from epubforge.text_utils import cjk_join  # noqa: E402
 
@@ -354,7 +364,9 @@ _COMPILERS: dict[str, CompilerFn] = {}
 # ---------------------------------------------------------------------------
 
 
-def _find_block(book: Book, block_uid: str, command_id: str) -> tuple[Chapter, Block, int]:
+def _find_block(
+    book: Book, block_uid: str, command_id: str
+) -> tuple[Chapter, Block, int]:
     """Find a block by UID across all chapters.
 
     Returns (chapter, block, block_index_in_chapter).
@@ -386,7 +398,9 @@ def _check_uid_collision(book: Book, uid: str, command_id: str) -> None:
             raise PatchCommandError(f"uid {uid!r} already exists (chapter)", command_id)
         for block in chapter.blocks:
             if block.uid == uid:
-                raise PatchCommandError(f"uid {uid!r} already exists (block)", command_id)
+                raise PatchCommandError(
+                    f"uid {uid!r} already exists (block)", command_id
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -416,10 +430,14 @@ def _compile_split_block(
     # Check no duplicate UIDs within the command
     all_new_uids = params.new_block_uids
     if len(set(all_new_uids)) != len(all_new_uids):
-        raise PatchCommandError("new_block_uids contains duplicates", command.command_id)
+        raise PatchCommandError(
+            "new_block_uids contains duplicates", command.command_id
+        )
 
     # Get display_lines for at_line_index
-    display_lines = getattr(block, "display_lines", None) if isinstance(block, Paragraph) else None
+    display_lines = (
+        getattr(block, "display_lines", None) if isinstance(block, Paragraph) else None
+    )
 
     # Split text
     try:
@@ -447,13 +465,15 @@ def _compile_split_block(
 
     # 1. SetFieldChange: update original block text to first segment
     old_text = _serialize_field_value(text)
-    changes.append({
-        "op": "set_field",
-        "target_uid": params.block_uid,
-        "field": "text",
-        "old": old_text,
-        "new": segments[0],
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": params.block_uid,
+            "field": "text",
+            "old": old_text,
+            "new": segments[0],
+        }
+    )
 
     # 2. InsertNodeChange for each subsequent segment
     prev_uid = params.block_uid
@@ -463,12 +483,14 @@ def _compile_split_block(
         new_node = dict(block_dump)
         new_node["uid"] = new_uid
         new_node["text"] = segment
-        changes.append({
-            "op": "insert_node",
-            "parent_uid": chapter.uid,
-            "after_uid": prev_uid,
-            "node": new_node,
-        })
+        changes.append(
+            {
+                "op": "insert_node",
+                "parent_uid": chapter.uid,
+                "after_uid": prev_uid,
+                "node": new_node,
+            }
+        )
         prev_uid = new_uid
 
     scope = PatchScope(chapter_uid=chapter.uid)
@@ -537,22 +559,26 @@ def _compile_merge_blocks(
     # 1. SetFieldChange on first block
     first_block = block_positions[0][0]
     old_text = _serialize_field_value(getattr(first_block, params.target_field))
-    changes.append({
-        "op": "set_field",
-        "target_uid": params.block_uids[0],
-        "field": params.target_field,
-        "old": old_text,
-        "new": merged_text,
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": params.block_uids[0],
+            "field": params.target_field,
+            "old": old_text,
+            "new": merged_text,
+        }
+    )
 
     # 2. DeleteNodeChange for remaining blocks
     for uid in reversed(params.block_uids[1:]):
         _ch, blk, _idx = _find_block(book, uid, command.command_id)
-        changes.append({
-            "op": "delete_node",
-            "target_uid": uid,
-            "old_node": blk.model_dump(mode="python"),
-        })
+        changes.append(
+            {
+                "op": "delete_node",
+                "target_uid": uid,
+                "old_node": blk.model_dump(mode="python"),
+            }
+        )
 
     scope = PatchScope(chapter_uid=chapter.uid)
     return changes, scope
@@ -570,7 +596,9 @@ def _compile_relocate_block(
     book: Book, command: PatchCommand, params: RelocateBlockParams
 ) -> tuple[list, PatchScope]:
     src_chapter, _block, _idx = _find_block(book, params.block_uid, command.command_id)
-    tgt_chapter, _tgt_idx = _find_chapter(book, params.target_chapter_uid, command.command_id)
+    tgt_chapter, _tgt_idx = _find_chapter(
+        book, params.target_chapter_uid, command.command_id
+    )
 
     if params.after_uid is not None:
         if params.after_uid == params.block_uid:
@@ -587,13 +615,15 @@ def _compile_relocate_block(
                 command.command_id,
             )
 
-    changes: list = [{
-        "op": "move_node",
-        "target_uid": params.block_uid,
-        "from_parent_uid": src_chapter.uid,
-        "to_parent_uid": tgt_chapter.uid,
-        "after_uid": params.after_uid,
-    }]
+    changes: list = [
+        {
+            "op": "move_node",
+            "target_uid": params.block_uid,
+            "from_parent_uid": src_chapter.uid,
+            "to_parent_uid": tgt_chapter.uid,
+            "after_uid": params.after_uid,
+        }
+    ]
 
     # Same chapter = chapter scope, cross chapter = book-wide
     if src_chapter.uid == tgt_chapter.uid:
@@ -643,30 +673,34 @@ def _compile_split_chapter(
     changes: list = []
 
     # 5a. InsertNodeChange — insert empty new chapter after original chapter
-    changes.append({
-        "op": "insert_node",
-        "parent_uid": None,  # insert into book.chapters
-        "after_uid": params.chapter_uid,
-        "node": {
-            "uid": params.new_chapter_uid,
-            "kind": "chapter",
-            "title": params.new_chapter_title,
-            "level": chapter.level,
-            "id": None,
-            "blocks": [],
-        },
-    })
+    changes.append(
+        {
+            "op": "insert_node",
+            "parent_uid": None,  # insert into book.chapters
+            "after_uid": params.chapter_uid,
+            "node": {
+                "uid": params.new_chapter_uid,
+                "kind": "chapter",
+                "title": params.new_chapter_title,
+                "level": chapter.level,
+                "id": None,
+                "blocks": [],
+            },
+        }
+    )
 
     # 5b. MoveNodeChange for each block from split_at_block_uid to end
     prev_uid: str | None = None
     for blk in chapter.blocks[split_idx:]:
-        changes.append({
-            "op": "move_node",
-            "target_uid": blk.uid,
-            "from_parent_uid": params.chapter_uid,
-            "to_parent_uid": params.new_chapter_uid,
-            "after_uid": prev_uid,
-        })
+        changes.append(
+            {
+                "op": "move_node",
+                "target_uid": blk.uid,
+                "from_parent_uid": params.chapter_uid,
+                "to_parent_uid": params.new_chapter_uid,
+                "after_uid": prev_uid,
+            }
+        )
         prev_uid = blk.uid
 
     # 6. Always book-wide scope for chapter topology commands
@@ -721,19 +755,21 @@ def _compile_merge_chapters(
     changes: list = []
 
     # 6a. InsertNodeChange — insert empty new chapter at insertion point
-    changes.append({
-        "op": "insert_node",
-        "parent_uid": None,
-        "after_uid": after_uid,
-        "node": {
-            "uid": params.new_chapter_uid,
-            "kind": "chapter",
-            "title": params.new_title,
-            "level": 1,
-            "id": None,
-            "blocks": [],
-        },
-    })
+    changes.append(
+        {
+            "op": "insert_node",
+            "parent_uid": None,
+            "after_uid": after_uid,
+            "node": {
+                "uid": params.new_chapter_uid,
+                "kind": "chapter",
+                "title": params.new_title,
+                "level": 1,
+                "id": None,
+                "blocks": [],
+            },
+        }
+    )
 
     # 6b. For each source chapter: insert section heading + move blocks
     last_inserted_uid: str | None = None
@@ -745,31 +781,35 @@ def _compile_merge_chapters(
             prov = {"page": 1, "source": "passthrough"}
 
         # Insert section heading block into new chapter
-        changes.append({
-            "op": "insert_node",
-            "parent_uid": params.new_chapter_uid,
-            "after_uid": last_inserted_uid,
-            "node": {
-                "uid": section.new_block_uid,
-                "kind": "heading",
-                "level": 2,
-                "text": section.text,
-                "id": section.id,
-                "style_class": section.style_class,
-                "provenance": prov,
-            },
-        })
+        changes.append(
+            {
+                "op": "insert_node",
+                "parent_uid": params.new_chapter_uid,
+                "after_uid": last_inserted_uid,
+                "node": {
+                    "uid": section.new_block_uid,
+                    "kind": "heading",
+                    "level": 2,
+                    "text": section.text,
+                    "id": section.id,
+                    "style_class": section.style_class,
+                    "provenance": prov,
+                },
+            }
+        )
 
         # Move each block from source chapter to new chapter, after the heading
         prev_uid: str = section.new_block_uid
         for block in source_chapter.blocks:
-            changes.append({
-                "op": "move_node",
-                "target_uid": block.uid,
-                "from_parent_uid": source_chapter.uid,
-                "to_parent_uid": params.new_chapter_uid,
-                "after_uid": prev_uid,
-            })
+            changes.append(
+                {
+                    "op": "move_node",
+                    "target_uid": block.uid,
+                    "from_parent_uid": source_chapter.uid,
+                    "to_parent_uid": params.new_chapter_uid,
+                    "after_uid": prev_uid,
+                }
+            )
             assert block.uid is not None  # run_init guarantees all blocks have UIDs
             prev_uid = block.uid
 
@@ -781,7 +821,7 @@ def _compile_merge_chapters(
             last_inserted_uid = section.new_block_uid
 
     # 6c. Delete each source chapter (will be empty after moves)
-    for (source_chapter, _src_idx) in source_chapters:
+    for source_chapter, _src_idx in source_chapters:
         empty_chapter_dump = {
             "kind": "chapter",
             "uid": source_chapter.uid,
@@ -790,11 +830,13 @@ def _compile_merge_chapters(
             "id": source_chapter.id,
             "blocks": [],
         }
-        changes.append({
-            "op": "delete_node",
-            "target_uid": source_chapter.uid,
-            "old_node": empty_chapter_dump,
-        })
+        changes.append(
+            {
+                "op": "delete_node",
+                "target_uid": source_chapter.uid,
+                "old_node": empty_chapter_dump,
+            }
+        )
 
     # 7. Always book-wide scope
     scope = PatchScope(chapter_uid=None)
@@ -813,7 +855,9 @@ def _compile_pair_footnote(
     book: Book, command: PatchCommand, params: PairFootnoteParams
 ) -> tuple[list, PatchScope]:
     # 1. Find footnote block and verify it is a Footnote
-    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    fn_chapter, fn_block, _fn_idx = _find_block(
+        book, params.fn_block_uid, command.command_id
+    )
     if not isinstance(fn_block, Footnote):
         raise PatchCommandError(
             f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
@@ -858,31 +902,37 @@ def _compile_pair_footnote(
 
     # 6a. If footnote is orphan=True, clear it first
     if fn.orphan:
-        changes.append({
-            "op": "set_field",
-            "target_uid": params.fn_block_uid,
-            "field": "orphan",
-            "old": True,
-            "new": False,
-        })
+        changes.append(
+            {
+                "op": "set_field",
+                "target_uid": params.fn_block_uid,
+                "field": "orphan",
+                "old": True,
+                "new": False,
+            }
+        )
 
     # 6b. Update source block text field: raw callout → marker
-    changes.append({
-        "op": "set_field",
-        "target_uid": params.source_block_uid,
-        "field": found_field,
-        "old": _serialize_field_value(found_value),
-        "new": new_text,
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": params.source_block_uid,
+            "field": found_field,
+            "old": _serialize_field_value(found_value),
+            "new": new_text,
+        }
+    )
 
     # 6c. Set paired=True
-    changes.append({
-        "op": "set_field",
-        "target_uid": params.fn_block_uid,
-        "field": "paired",
-        "old": fn.paired,
-        "new": True,
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": params.fn_block_uid,
+            "field": "paired",
+            "old": fn.paired,
+            "new": True,
+        }
+    )
 
     # 7. Determine scope
     if fn_chapter.uid == source_chapter.uid:
@@ -905,7 +955,9 @@ def _compile_unpair_footnote(
     book: Book, command: PatchCommand, params: UnpairFootnoteParams
 ) -> tuple[list, PatchScope]:
     # 1. Find footnote block and verify it is a Footnote
-    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    fn_chapter, fn_block, _fn_idx = _find_block(
+        book, params.fn_block_uid, command.command_id
+    )
     if not isinstance(fn_block, Footnote):
         raise PatchCommandError(
             f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
@@ -942,22 +994,26 @@ def _compile_unpair_footnote(
     changes: list = []
 
     # 5a. Update source field: marker → raw callout
-    changes.append({
-        "op": "set_field",
-        "target_uid": marker_ref.block.uid,
-        "field": marker_ref.field,
-        "old": _serialize_field_value(current_value),
-        "new": new_value,
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": marker_ref.block.uid,
+            "field": marker_ref.field,
+            "old": _serialize_field_value(current_value),
+            "new": new_value,
+        }
+    )
 
     # 5b. Set paired=False
-    changes.append({
-        "op": "set_field",
-        "target_uid": params.fn_block_uid,
-        "field": "paired",
-        "old": True,
-        "new": False,
-    })
+    changes.append(
+        {
+            "op": "set_field",
+            "target_uid": params.fn_block_uid,
+            "field": "paired",
+            "old": True,
+            "new": False,
+        }
+    )
 
     # 6. Determine scope
     assert marker_ref.block.uid is not None
@@ -984,7 +1040,9 @@ def _compile_mark_orphan(
     book: Book, command: PatchCommand, params: MarkOrphanParams
 ) -> tuple[list, PatchScope]:
     # 1. Find footnote block and verify it is a Footnote
-    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    fn_chapter, fn_block, _fn_idx = _find_block(
+        book, params.fn_block_uid, command.command_id
+    )
     if not isinstance(fn_block, Footnote):
         raise PatchCommandError(
             f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
@@ -1011,32 +1069,38 @@ def _compile_mark_orphan(
         new_value = current_value.replace(marker_ref.marker, fn.callout, 1)
 
         # Restore source field: marker → raw callout
-        changes.append({
-            "op": "set_field",
-            "target_uid": marker_ref.block.uid,
-            "field": marker_ref.field,
-            "old": _serialize_field_value(current_value),
-            "new": new_value,
-        })
+        changes.append(
+            {
+                "op": "set_field",
+                "target_uid": marker_ref.block.uid,
+                "field": marker_ref.field,
+                "old": _serialize_field_value(current_value),
+                "new": new_value,
+            }
+        )
 
         # Clear paired if needed
         if fn.paired:
-            changes.append({
-                "op": "set_field",
-                "target_uid": params.fn_block_uid,
-                "field": "paired",
-                "old": True,
-                "new": False,
-            })
+            changes.append(
+                {
+                    "op": "set_field",
+                    "target_uid": params.fn_block_uid,
+                    "field": "paired",
+                    "old": True,
+                    "new": False,
+                }
+            )
 
         # Set orphan=True
-        changes.append({
-            "op": "set_field",
-            "target_uid": params.fn_block_uid,
-            "field": "orphan",
-            "old": False,
-            "new": True,
-        })
+        changes.append(
+            {
+                "op": "set_field",
+                "target_uid": params.fn_block_uid,
+                "field": "orphan",
+                "old": False,
+                "new": True,
+            }
+        )
 
         # Scope: consider both fn chapter and marker source chapter
         assert marker_ref.block.uid is not None
@@ -1051,21 +1115,25 @@ def _compile_mark_orphan(
     else:
         # No marker — just set paired=False (if needed) and orphan=True
         if fn.paired:
-            changes.append({
+            changes.append(
+                {
+                    "op": "set_field",
+                    "target_uid": params.fn_block_uid,
+                    "field": "paired",
+                    "old": True,
+                    "new": False,
+                }
+            )
+
+        changes.append(
+            {
                 "op": "set_field",
                 "target_uid": params.fn_block_uid,
-                "field": "paired",
-                "old": True,
-                "new": False,
-            })
-
-        changes.append({
-            "op": "set_field",
-            "target_uid": params.fn_block_uid,
-            "field": "orphan",
-            "old": False,
-            "new": True,
-        })
+                "field": "orphan",
+                "old": False,
+                "new": True,
+            }
+        )
 
         # Chapter-scoped (fn chapter only)
         scope = PatchScope(chapter_uid=fn_chapter.uid)
@@ -1119,35 +1187,39 @@ def _compile_split_merged_table(
     changes: list = []
 
     # 5a. DeleteNodeChange — delete the original merged table
-    changes.append({
-        "op": "delete_node",
-        "target_uid": params.block_uid,
-        "old_node": table.model_dump(mode="python"),
-    })
+    changes.append(
+        {
+            "op": "delete_node",
+            "target_uid": params.block_uid,
+            "old_node": table.model_dump(mode="python"),
+        }
+    )
 
     # 5b. InsertNodeChange for each segment
     n = len(params.segment_html)
     for i in range(n):
         after_uid = previous_uid if i == 0 else params.new_block_uids[i - 1]
-        changes.append({
-            "op": "insert_node",
-            "parent_uid": chapter.uid,
-            "after_uid": after_uid,
-            "node": {
-                "uid": params.new_block_uids[i],
-                "kind": "table",
-                "html": params.segment_html[i],
-                "table_title": table.table_title,
-                "caption": table.caption if i == n - 1 else "",
-                "continuation": i > 0,
-                "multi_page": False,
-                "bbox": table.bbox,
-                "provenance": {
-                    **table.provenance.model_dump(mode="python"),
-                    "page": params.segment_pages[i],
+        changes.append(
+            {
+                "op": "insert_node",
+                "parent_uid": chapter.uid,
+                "after_uid": after_uid,
+                "node": {
+                    "uid": params.new_block_uids[i],
+                    "kind": "table",
+                    "html": params.segment_html[i],
+                    "table_title": table.table_title,
+                    "caption": table.caption if i == n - 1 else "",
+                    "continuation": i > 0,
+                    "multi_page": False,
+                    "bbox": table.bbox,
+                    "provenance": {
+                        **table.provenance.model_dump(mode="python"),
+                        "page": params.segment_pages[i],
+                    },
                 },
-            },
-        })
+            }
+        )
 
     # 6. Chapter-scoped: all changes happen within one chapter
     scope = PatchScope(chapter_uid=chapter.uid)

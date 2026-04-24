@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -11,14 +9,11 @@ from pydantic import ValidationError
 from epubforge.ir.semantic import (
     Book,
     Chapter,
-    Equation,
     ExtractionMetadata,
-    Figure,
     Footnote,
     Heading,
     Paragraph,
     Provenance,
-    Table,
     VLMPageOutput,
     VLMFootnote,
     VLMParagraph,
@@ -93,7 +88,6 @@ class TestBook:
         restored = Book.model_validate_json(b.model_dump_json())
         assert restored.chapters[0].title == "Ch1"
         assert restored.chapters[0].blocks[0].provenance.source == "llm"
-        assert restored.op_log_version == 0
         assert restored.uid_seed == ""
 
     def test_block_discriminator(self) -> None:
@@ -103,10 +97,26 @@ class TestBook:
                 {
                     "title": "Ch",
                     "blocks": [
-                        {"kind": "paragraph", "text": "x", "provenance": {"page": 1, "source": "llm"}},
-                        {"kind": "figure", "caption": "Fig 1", "provenance": {"page": 2, "source": "vlm"}},
-                        {"kind": "table", "html": "<table/>", "provenance": {"page": 3, "source": "vlm"}},
-                        {"kind": "equation", "latex": r"E=mc^2", "provenance": {"page": 1, "source": "passthrough"}},
+                        {
+                            "kind": "paragraph",
+                            "text": "x",
+                            "provenance": {"page": 1, "source": "llm"},
+                        },
+                        {
+                            "kind": "figure",
+                            "caption": "Fig 1",
+                            "provenance": {"page": 2, "source": "vlm"},
+                        },
+                        {
+                            "kind": "table",
+                            "html": "<table/>",
+                            "provenance": {"page": 3, "source": "vlm"},
+                        },
+                        {
+                            "kind": "equation",
+                            "latex": r"E=mc^2",
+                            "provenance": {"page": 1, "source": "passthrough"},
+                        },
                     ],
                 }
             ],
@@ -127,10 +137,23 @@ class TestVLMPageOutput:
         raw = {
             "page": 17,
             "blocks": [
-                {"kind": "paragraph", "text": "Para.", "bbox": [10.0, 20.0, 200.0, 40.0]},
-                {"kind": "footnote", "callout": "1", "text": "Note.", "ref_bbox": [10.0, 700.0, 50.0, 710.0]},
+                {
+                    "kind": "paragraph",
+                    "text": "Para.",
+                    "bbox": [10.0, 20.0, 200.0, 40.0],
+                },
+                {
+                    "kind": "footnote",
+                    "callout": "1",
+                    "text": "Note.",
+                    "ref_bbox": [10.0, 700.0, 50.0, 710.0],
+                },
                 {"kind": "figure", "caption": "A fig.", "image_ref": "p17_fig1"},
-                {"kind": "table", "html": "<table><tr><td>A</td></tr></table>", "caption": "Tab 1"},
+                {
+                    "kind": "table",
+                    "html": "<table><tr><td>A</td></tr></table>",
+                    "caption": "Tab 1",
+                },
                 {"kind": "equation", "latex": r"\int_0^\infty"},
             ],
         }
@@ -168,7 +191,14 @@ class TestVLMPageOutput:
         # ref_bbox was a field in old VLMBlock; it should be silently ignored now
         raw = {
             "page": 1,
-            "blocks": [{"kind": "footnote", "callout": "①", "text": "note", "ref_bbox": [1, 2, 3, 4]}],
+            "blocks": [
+                {
+                    "kind": "footnote",
+                    "callout": "①",
+                    "text": "note",
+                    "ref_bbox": [1, 2, 3, 4],
+                }
+            ],
         }
         out = VLMPageOutput.model_validate(raw)
         assert isinstance(out.blocks[0], VLMFootnote)
@@ -183,7 +213,9 @@ class TestUidHelpers:
 
     def test_init_and_runtime_namespaces_do_not_overlap(self) -> None:
         block_init = compute_block_uid_init("seed", 0, 1, "paragraph", "hello", 3)
-        block_runtime = compute_block_uid_runtime("seed", "ch-1", "blk-1", "paragraph", "hello", "op-1")
+        block_runtime = compute_block_uid_runtime(
+            "seed", "ch-1", "blk-1", "paragraph", "hello", "op-1"
+        )
         chapter_init = compute_chapter_uid_init("seed", 0, "Intro")
         chapter_runtime = compute_chapter_uid_runtime("seed", "op-1", "Intro")
 
@@ -198,28 +230,30 @@ class TestUidHelpers:
         )
         book = Book(
             title="Book",
-            op_log_version=2,
             initialized_at="2026-04-23T00:00:00Z",
             uid_seed="seed-1",
             chapters=[chapter],
         )
         assert book.chapters[0].uid == "ch-1"
         assert book.chapters[0].blocks[0].uid == "p-1"
-        assert book.op_log_version == 2
 
 
 class TestAssemblerPagePropagation:
     def test_per_block_page_used(self) -> None:
         from epubforge.assembler import _parse_block
 
-        block = _parse_block({"kind": "paragraph", "text": "x", "page": 42}, default_page=1, source="llm")
+        block = _parse_block(
+            {"kind": "paragraph", "text": "x", "page": 42}, default_page=1, source="llm"
+        )
         assert block is not None
         assert block.provenance.page == 42
 
     def test_falls_back_to_default_page(self) -> None:
         from epubforge.assembler import _parse_block
 
-        block = _parse_block({"kind": "paragraph", "text": "x"}, default_page=7, source="llm")
+        block = _parse_block(
+            {"kind": "paragraph", "text": "x"}, default_page=7, source="llm"
+        )
         assert block is not None
         assert block.provenance.page == 7
 

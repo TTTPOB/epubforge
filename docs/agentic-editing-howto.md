@@ -8,12 +8,12 @@
 
 - `epubforge editor init`
 - `epubforge editor doctor`
-- `epubforge editor propose-op`
-- `epubforge editor apply-queue`
-- `epubforge editor acquire-lease`
-- `epubforge editor release-lease`
-- `epubforge editor acquire-book-lock`
-- `epubforge editor release-book-lock`
+- `epubforge editor agent-output begin`
+- `epubforge editor agent-output add-patch`
+- `epubforge editor agent-output add-command`
+- `epubforge editor agent-output add-memory-patch`
+- `epubforge editor agent-output validate`
+- `epubforge editor agent-output submit`
 - `epubforge editor run-script`
 - `epubforge editor compact`
 - `epubforge editor snapshot`
@@ -25,346 +25,88 @@
 
 ## skip-VLM 证据草稿与语义修复
 
-### 证据草稿的含义
+当 Stage 3 以 `--skip-vlm` 模式运行时，产出的块带有 `Provenance.source="docling"`，角色标签为 `docling_*_candidate`（如 `docling_heading_candidate`、`docling_footnote_candidate`）。这些 candidate 角色是机械映射标签，不是语义决策。
 
-当 Stage 3 以 `--skip-vlm` 模式运行时，产出的块带有 `Provenance.source="docling"`，
-角色标签为 `docling_*_candidate`（如 `docling_heading_candidate`、`docling_footnote_candidate`）。
+fixer 通过以下新工作流修复语义：
 
-**这些 candidate 角色是机械映射标签，不是语义决策。** skip-VLM 证据草稿不决定：
+- `BookPatch.replace_node`：替换块内容或角色
+- `BookPatch.set_field`：标记跨页连续性、修复表格标题/说明等字段
+- `PatchCommand`：表达拆分/合并/搬移/脚注配对等拓扑类修复
 
-- 章节边界与章节标题
-- 脚注的配对与归属
-- 跨页块的连续性（`cross_page` 属性）
-- 图表标题的归属
-- 列表的逻辑层级
-- 跨页表格合并
-
-### editor meta 中的 stage3 上下文
-
-`edit_state/meta.json` 包含 `stage3` 字段，记录本次提取的上下文：
-
-```json
-{
-  "stage3": {
-    "mode": "skip_vlm",
-    "skipped_vlm": true,
-    "artifact_id": "...",
-    "manifest_sha256": "...",
-    "selected_pages": [1, 2, 3, ...],
-    "complex_pages": [5, 12, ...],
-    "source_pdf": "source/source.pdf",
-    "evidence_index_path": "03_extract/artifacts/<id>/evidence_index.json",
-    "extraction_warnings_path": "..."
-  }
-}
-```
-
-supervisor 可通过 `mode` 字段判断当前书稿是否来自 skip-VLM 模式，并据此决定
-是否需要更积极地调度 scanner/reviewer 来补全语义。
-
-### candidate 角色需要 scanner/fixer 审查
-
-来自 skip-VLM 的书稿，scanner 应优先扫描 `docling_*_candidate` 角色的块：
-
-- `docling_heading_candidate`：判断是否为真实章节标题，还是普通段落
-- `docling_footnote_candidate`：判断是否为脚注，配对 callout
-- `docling_caption_candidate`：判断是否属于图/表的标题
-- `docling_list_item_candidate`：判断列表层级与逻辑归属
-- `docling_unknown_candidate`：优先标记为 open question
-
-fixer 通过以下 op 进行语义修复（在 chapter lease 保护下）：
-
-- `replace_block`：替换块内容或角色
-- `set_paragraph_cross_page`：标记跨页连续性
-- `set_table_metadata`：修复表格元数据（标题、跨页合并）
-
-### render-page 与 vlm-page 工作流
-
-在编辑阶段，supervisor 可以对原始 PDF 页面进行可视化审查或按需重调 VLM：
-
-**render-page：无 LLM/VLM 调用，仅渲染图像**
-
-```bash
-# 渲染第 5 页为 JPEG，写入 edit_state/audit/page_images/page_0005.jpg
-epubforge --config config.toml editor render-page work/mybook --page 5
-
-# 指定输出路径和 DPI
-epubforge --config config.toml editor render-page work/mybook --page 5 --dpi 150 --out /tmp/page5.jpg
-```
-
-适用场景：
-- 对某页的 candidate 角色有疑问，想先看原始版式
-- 不需要消耗 VLM token 的纯视觉核查
-
-**vlm-page：对指定页面重调 VLM（只读，不修改 book.json）**
-
-```bash
-# 对第 5 页重新调用 VLM，结果写入 edit_state/audit/vlm_pages/page_0005.json
-epubforge --config config.toml editor vlm-page work/mybook --page 5
-```
-
-注意：
-- `vlm-page` 只处理 Stage 3 已选中（`selected_pages`）的页面
-- 结果写入 `edit_state/audit/vlm_pages/`，不自动修改 `book.json`
-- supervisor 需要手动解读 VLM 结果，再通过 `propose-op` + `apply-queue` 更新书稿
-- `vlm-page` 要求 `[vlm]` 配置和 provider key
-
-## 角色分工
-
-### scanner
-
-职责：
-
-- 通读一个 chapter
-- 根据 `docs/rules/*.md` 提炼 conventions、patterns、open questions
-- 只做非常确定的小改动
-- 为章节增加至少一次 `read_passes`
-
-适合运行的时机：
-
-- `doctor` 报告某章 `needs_scan`
-- 出现 `style_inconsistency` 或 `unusual_density` 提示
-- 新导入的书还没有形成足够的风格记忆
-- skip-VLM 模式下大量 `docling_*_candidate` 角色待审查
-
-不适合交给 scanner 的事：
-
-- 大范围结构改造
-- 跨章拓扑改动
-- 多方案都合理的风格裁决
-
-### fixer
-
-职责：
-
-- 处理已明确的问题和提示
-- 在 chapter lease 保护下输出 op envelopes
-- 只修自己租到的章节
-
-适合运行的时机：
-
-- `doctor.issues` 非空
-- scanner 已经把问题缩小为确定性修复
-- reviewer 已经给出裁决，剩下只是执行
-
-### reviewer
-
-职责：
-
-- 仲裁 open questions
-- 解决 convention 冲突
-- 在必要时给出少量高确定性修正 op
-
-适合运行的时机：
-
-- memory 中存在 unresolved open questions
-- 同一风格有多种合理解释
-- 某次修复会改变全书约定而不是单章局部
+`vlm-page` 只读地产生页面证据，supervisor 需要手动解读结果，再通过 `agent-output` 工作流更新书稿。
 
 ## 初始化语义
 
-### `init`
-
 `init <work>` 会用 `work/<book>/05_semantic.json` 初始化 `edit_state/`。它要求目标工作目录还没有既存编辑状态。
-
-适用场景：
-
-- 你已经有当前架构下的干净 `05_semantic.json`
-- 你希望从标准编辑入口开始
 
 结果：
 
 - 生成 `edit_state/book.json`
 - 生成 `meta.json`（含 `stage3` 上下文，如果 Stage 3 产物存在）
-- 生成 `memory.json`、`leases.json`
-- 初始化空的 `edit_log.jsonl` 和 `staging.jsonl`
-- 为 chapter / block 补全稳定 uid，并把 `book.op_log_version` 置为 0
+- 生成 `memory.json`
+- 初始化空的 `edit_log.jsonl`
+- 创建 `agent_outputs/`、`scratch/`、`snapshots/` 等目录
+- 为 chapter / block 补全稳定 uid
 
 ## 核心循环
 
-### 1. 先跑 `doctor`
+1. 先跑 `doctor <work>`，读取 readiness、issues 和 hints。
+2. 用 `render-prompt <work> --kind scanner|fixer|reviewer --chapter <uid>` 生成当前 memory、chapter 和 patch workflow 指引。
+3. 用 `agent-output begin` 创建本轮 AgentOutput。
+4. 将 subagent 结果写入 AgentOutput：
+   - 字段/节点级变更：`agent-output add-patch --patch-file patch.json`
+   - 拓扑宏：`agent-output add-command --command-file command.json`
+   - 记忆更新：`agent-output add-memory-patch --patch-file memory_patch.json`
+5. 用 `agent-output validate` 做无副作用校验。
+6. 用 `agent-output submit --apply` 事务性提交；或用 `--stage` 仅校验并归档。
+7. 再跑 `doctor`，决定下一轮。
 
-`doctor <work>` 会生成并刷新：
+## AgentOutput 提交流程
 
-- `edit_state/audit/doctor_report.json`
-- `edit_state/audit/doctor_context.json`
+AgentOutput 是唯一的 agent 写入入口。它可包含：
 
-它做三件事：
+- `patches`: 直接的 `BookPatch`
+- `commands`: 编译为 `BookPatch` 的 `PatchCommand`
+- `memory_patches`: 合并进 `memory.json` 的记忆补丁
+- `open_questions` / `notes` / `evidence_refs`
 
-- 跑硬规则 detector
-- 结合 memory 生成 hints
-- 计算 delta 与 readiness
+`submit --apply` 的顺序为：验证 AgentOutput → 编译 commands → 应用编译出的 patches → 应用直接 patches → 合并 memory → 归档 AgentOutput → 写入 audit log。任何验证或应用失败都不会部分写入 `book.json`。
 
-supervisor 每一轮都应先读 doctor 结果，再决定本轮开 scanner、fixer 还是 reviewer。
+## 角色分工
 
-### 2. 按需分派 subagent
+### scanner
 
-推荐判断方式：
+- 通读一个 chapter
+- 根据 `docs/rules/*.md` 提炼 conventions、patterns、open questions
+- 只提交非常确定的 `set_field` 修正
+- 为章节增加至少一次 `read_passes`
 
-- 有 `issues`：先开 fixer
-- 无 `issues`，但有 `chapters_unscanned` 或扫描类 hints：开 scanner
-- 有 unresolved `open_questions`：开 reviewer
-- skip-VLM 模式下 candidate 角色未审查：优先开 scanner
+### fixer
 
-### 3. 用 `render-prompt` 生成上下文
+- 处理已明确的问题和提示
+- 优先使用 chapter-scoped BookPatch；拓扑类动作使用 PatchCommand
+- 不做多方案都合理的风格裁决
 
-`render-prompt <work> --kind scanner|fixer|reviewer --chapter <uid>` 会把当前 `book.op_log_version`、memory 快照和 chapter 信息渲染成稳定提示词。
+### reviewer
 
-fixer / reviewer 可以额外通过 `--issues` 传入本轮关注的问题列表。
+- 仲裁 open questions
+- 解决 convention 冲突
+- 必要时提交少量高确定性 `set_field` 修正
 
-这一步的目的是把"规则知识"和"当前书况"绑定到同一提示里，而不是让 subagent 自己到处翻文件猜状态。
+## render-page 与 vlm-page
 
-### 4. 章节内修改走 lease
+```bash
+# 渲染第 5 页为 JPEG，写入 edit_state/audit/page_images/page_0005.jpg
+epubforge --config config.toml editor render-page work/mybook --page 5
 
-对单章进行编辑前，先 `acquire-lease`；完成后 `release-lease`。
+# 对第 5 页重新调用 VLM，结果写入 edit_state/audit/vlm_pages/page_0005.json
+epubforge --config config.toml editor vlm-page work/mybook --page 5
+```
 
-lease 的意义：
+`render-page` 不消耗 LLM/VLM token。`vlm-page` 只处理 Stage 3 已选中页面，结果不会自动修改 `book.json`。
 
-- 防止多个 fixer 同时改同一章
-- 让 apply 层能拒绝越权修改
+## 收敛与归档
 
-凡是只影响单章 block 的 op，都应该在 chapter lease 下完成。
-
-### 5. 跨章拓扑改动走 book lock
-
-`merge_chapters`、`split_chapter`、`relocate_block` 这类高影响动作，应先申请 `acquire-book-lock`，完成后再 `release-book-lock`。
-
-`--reason` 只能是：
-
-- `topology_op`
-- `compact`
-- `init`
-
-book lock 不是普通"更强 lease"，而是整本书的独占保护。
-
-`compact` 不属于"持锁执行"的范畴。它只能在当前没有任何 active chapter lease、且也没有 book lock 时运行。
-
-### 6. 先暂存，再应用
-
-subagent 产出的不是直接文件改写，而是 `OpEnvelope[]`：
-
-1. 送入 `propose-op`
-2. 再由 `apply-queue` 统一应用
-
-`propose-op` 只负责校验并追加到 `staging.jsonl`。
-
-`apply-queue` 才会：
-
-- 校验 base version / preconditions / lease
-- 把成功 op 写入 `edit_log.jsonl`
-- 更新 `edit_state/book.json`
-- 更新 `memory.json`
-- 把失败 op 记入 rejected log
-
-这套两步式流程的意义是把"生成修改"与"接受修改"分开，便于 supervisor 管理并发和回退。
-
-## `run-script` 的语义
-
-`run-script` 只服务于 scratch 脚本，不是常规编辑通道。
-
-- `--write <desc>`：分配 `edit_state/scratch/` 下的新脚本路径并写入 stub
-- `--exec <path>`：在项目环境中执行该脚本
-
-`--exec` 仅接受 `scratch_dir` 内的 `.py` 文件；拒绝路径错误会通过 stdout JSON 返回。
-
-何时使用：
-
-- 需要做只读分析
-- 需要构造辅助检查
-- 需要在不污染主命令面的前提下做一次性整理
-
-何时不该使用：
-
-- 用它绕开 op queue 直接改 `book.json`
-- 把它当成长期工作流的主要入口
-
-## `snapshot`、`compact`、`revert`
-
-### `snapshot`
-
-`snapshot <work> --tag <name>` 会把当前 `edit_state/` 复制到 `edit_state/snapshots/<tag>/`。
-
-它是检查点，不会改变当前工作状态，也不是回退命令。命令会拒绝覆盖已存在的同名 tag。适合在以下时机使用：
-
-- 大批量修复前
-- reviewer 做出全书风格裁决后
-- compact 前后
-
-### `compact`
-
-`compact <work>` 会把当前已接受的 edit log 归档到 `edit_state/log.archive/<timestamp>/`，并在新的 `edit_log.jsonl` 里留下一个 `compact_marker`。
-
-它的语义是"压缩日志历史"，不是"冻结书稿"：
-
-- 不改变 `book.json` 内容
-- 需要当前没有任何 active chapter lease，也没有 book lock
-- 历史 op 仍可通过索引定位到归档日志
-
-适合时机：
-
-- 已接受 op 数量很多
-- supervisor 想把后续回合建立在更短的当前日志上
-
-### `revert`
-
-当前没有独立的 `revert` CLI。回退是一个 op envelope：
-
-- `op = {"op": "revert", "target_op_id": "..."}`
-
-它和普通 op 一样，先经 `propose-op`，再经 `apply-queue`。
-
-应用 `revert` 时，系统会：
-
-- 校验目标 op 存在且尚未被回退
-- 生成对应的 inverse op
-- 记录 revert backref
-
-因此，`revert` 的语义是"通过日志反操作回退某条历史 op"，不是把整个工作目录回滚到某个 snapshot。
-
-## 收敛怎么判断
-
-当前 `doctor` 的收敛条件是四项同时满足：
-
-1. `issues` 为空
-2. 没有未扫描章节
-3. 没有 unresolved open questions
-4. 连续两轮 `doctor` 都没有新增 convention、pattern，也没有新应用的 op
-
-满足后，`doctor.readiness.converged` 会为真。
-
-实践上，supervisor 应把它理解为"可以停"的信号，而不是"必须停"的命令。若你刚做完重大 reviewer 裁决，通常还值得再跑一轮确认 doctor delta 已静默。
-
-## 推荐节奏
-
-一个典型回合应当长这样：
-
-1. 跑 `doctor`
-2. 读取 `issues`、`hints`、`readiness`、`delta`
-3. 按需获取 chapter lease 或 book lock
-4. 用 `render-prompt` 生成 subagent 提示
-5. 收集 `OpEnvelope[]`
-6. `propose-op`
-7. `apply-queue`
-8. 释放 lease / lock
-9. 再跑 `doctor`
-
-如果 `delta.quiet_round_streak` 长期增长、当前 log 已很长，可以在没有 active lease / lock 的空闲窗口做 `snapshot` 或 `compact`。
-
-skip-VLM 模式下首次运行时，建议：
-
-1. `doctor` 确认 candidate 块数量
-2. 先开 scanner 对 candidate 块进行审查，生成 open questions
-3. 再开 reviewer 做语义裁决
-4. fixer 执行确定性修复（`replace_block`、`set_paragraph_cross_page`、`set_table_metadata`）
-5. 对有疑问的复杂页面，用 `render-page` 或 `vlm-page` 获取更多证据
-
-## 与规则文档的关系
-
-本 howto 只回答"怎么 orchestrate"。至于"什么叫正确的标点、表格、脚注、结构判断"，必须回到：
-
-- [rules/punctuation.md](./rules/punctuation.md)
-- [rules/tables.md](./rules/tables.md)
-- [rules/footnotes.md](./rules/footnotes.md)
-- [rules/structure.md](./rules/structure.md)
-
-supervisor 不应把 howto 当成规则来源，也不应让 subagent 在缺少规则上下文时直接修书。
+- `doctor` 连续 quiet round 后可认为当前轮次收敛。
+- `snapshot` 复制当前 `edit_state/` 到 `snapshots/<tag>/`。
+- `compact` 归档当前 audit log 并写入 compact marker，不修改书稿内容。

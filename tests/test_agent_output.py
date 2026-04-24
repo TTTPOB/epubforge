@@ -17,7 +17,6 @@ from pydantic import ValidationError
 from epubforge.config import Config
 from epubforge.editor.agent_output import (
     AgentOutput,
-    SubmitResult,
     load_agent_output,
     save_agent_output,
     validate_agent_output,
@@ -26,12 +25,10 @@ from epubforge.editor.agent_output import (
 from epubforge.editor.cli_support import CommandError
 from epubforge.editor.memory import (
     ChapterStatus,
-    EditMemory,
     MemoryPatch,
-    OpenQuestion,
 )
 from epubforge.editor.patch_commands import PatchCommand
-from epubforge.editor.patches import BookPatch, PatchScope, SetFieldChange
+from epubforge.editor.patches import BookPatch, PatchScope
 from epubforge.editor.state import load_editor_memory, resolve_editor_paths
 from epubforge.editor.tool_surface import (
     run_agent_output_add_command,
@@ -42,10 +39,20 @@ from epubforge.editor.tool_surface import (
     run_agent_output_begin,
     run_agent_output_submit,
     run_agent_output_validate,
+    run_compact,
+    run_doctor,
     run_init,
 )
 from epubforge.io import load_book
-from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import (
+    Book,
+    Chapter,
+    Footnote,
+    Heading,
+    Paragraph,
+    Provenance,
+    Table,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +70,7 @@ def _cfg() -> Config:
 
 def _now_ts() -> str:
     from datetime import UTC, datetime
+
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -105,7 +113,9 @@ def _make_book() -> Book:
             Chapter(
                 title="Chapter 2",
                 blocks=[
-                    Paragraph(text="Second chapter text", role="body", provenance=_prov()),
+                    Paragraph(
+                        text="Second chapter text", role="body", provenance=_prov()
+                    ),
                     Table(
                         html="<table><tr><td>data</td></tr></table>",
                         provenance=_prov(),
@@ -127,7 +137,9 @@ def initialized_work(tmp_path: Path):
     work = tmp_path / "testbook"
     book = _make_book()
     work.mkdir(parents=True, exist_ok=True)
-    (work / "05_semantic.json").write_text(book.model_dump_json(indent=2), encoding="utf-8")
+    (work / "05_semantic.json").write_text(
+        book.model_dump_json(indent=2), encoding="utf-8"
+    )
     run_init(work=work, cfg=_cfg())
     paths = resolve_editor_paths(work)
     actual_book = load_book(paths.book_path)
@@ -215,6 +227,7 @@ class TestAgentOutputModel:
                 unknown_field="oops",  # type: ignore[unexpected-keyword]
             )
 
+
 # ===========================================================================
 # §8.2 begin command tests
 # ===========================================================================
@@ -249,7 +262,7 @@ class TestBeginCommand:
         out = json.loads(capsys.readouterr().out)
         assert "output_id" in out
         assert "path" in out
-        assert "base_version" not in out  # D6: no base_version
+        assert set(out) == {"output_id", "path"}
 
     def test_begin_invalid_kind(self, initialized_work):
         work, book = initialized_work
@@ -343,7 +356,9 @@ class TestAddNote:
         work, book = initialized_work
         oid = self._begin(work, book, capsys)
 
-        run_agent_output_add_note(work=work, output_id=oid, text="  trimmed  ", cfg=_cfg())
+        run_agent_output_add_note(
+            work=work, output_id=oid, text="  trimmed  ", cfg=_cfg()
+        )
         capsys.readouterr()
 
         paths = resolve_editor_paths(work)
@@ -367,7 +382,9 @@ class TestAddNote:
 
         # Small sleep to ensure timestamp differs
         time.sleep(1)
-        run_agent_output_add_note(work=work, output_id=oid, text="Some note", cfg=_cfg())
+        run_agent_output_add_note(
+            work=work, output_id=oid, text="Some note", cfg=_cfg()
+        )
         capsys.readouterr()
 
         after = load_agent_output(paths, oid).updated_at
@@ -505,7 +522,9 @@ class TestAddQuestion:
 
 class TestAddCommand:
     def _begin(self, work, book, capsys):
-        run_agent_output_begin(work=work, kind="fixer", agent="fixer-1", chapter=None, cfg=_cfg())
+        run_agent_output_begin(
+            work=work, kind="fixer", agent="fixer-1", chapter=None, cfg=_cfg()
+        )
         return json.loads(capsys.readouterr().out)["output_id"]
 
     def _write_command_file(self, tmp_path: Path, data: dict) -> Path:
@@ -701,9 +720,7 @@ class TestAddMemoryPatch:
         mp_data = {
             "conventions": [],
             "patterns": [],
-            "chapter_status": [
-                {"chapter_uid": chapter_uid, "read_passes": 1}
-            ],
+            "chapter_status": [{"chapter_uid": chapter_uid, "read_passes": 1}],
             "open_questions": [],
         }
         mp_file = tmp_path / "memory_patch.json"
@@ -715,7 +732,9 @@ class TestAddMemoryPatch:
         out = json.loads(capsys.readouterr().out)
         assert out["memory_patches_count"] == 1
 
-    def test_add_memory_patch_schema_violation(self, initialized_work, tmp_path, capsys):
+    def test_add_memory_patch_schema_violation(
+        self, initialized_work, tmp_path, capsys
+    ):
         work, book = initialized_work
         oid = self._begin(work, book, capsys)
 
@@ -762,6 +781,7 @@ class TestValidate:
         # We need a capsys context, so use run function directly via patching
         import sys
         from io import StringIO
+
         old_stdout = sys.stdout
         sys.stdout = StringIO()
         try:
@@ -809,7 +829,9 @@ class TestValidate:
         )
         save_agent_output(paths, output)
 
-        result = run_agent_output_validate(work=work, output_id=output.output_id, cfg=_cfg())
+        result = run_agent_output_validate(
+            work=work, output_id=output.output_id, cfg=_cfg()
+        )
         out = json.loads(capsys.readouterr().out)
 
         assert result == 1
@@ -899,14 +921,28 @@ class TestValidate:
                             "op": "insert_node",
                             "parent_uid": chapter_uid,
                             "after_uid": None,
-                            "node": {"uid": new_uid, "kind": "paragraph", "text": "New", "role": "body", "provenance": {"page": 1, "bbox": None, "source": "passthrough"}},
+                            "node": {
+                                "uid": new_uid,
+                                "kind": "paragraph",
+                                "text": "New",
+                                "role": "body",
+                                "provenance": {
+                                    "page": 1,
+                                    "bbox": None,
+                                    "source": "passthrough",
+                                },
+                            },
                         }
                     ],
                     rationale="Adding a block",
                 )
             ],
             memory_patches=[
-                MemoryPatch(chapter_status=[ChapterStatus(chapter_uid=chapter_uid, read_passes=1)])
+                MemoryPatch(
+                    chapter_status=[
+                        ChapterStatus(chapter_uid=chapter_uid, read_passes=1)
+                    ]
+                )
             ],
         )
 
@@ -949,10 +985,14 @@ class TestValidate:
 
         errors = validate_agent_output(output, book)
         # No kind-specific errors for supervisor
-        kind_errors = [e for e in errors if "supervisor" in e.lower() and "may not" in e.lower()]
+        kind_errors = [
+            e for e in errors if "supervisor" in e.lower() and "may not" in e.lower()
+        ]
         assert len(kind_errors) == 0
 
-    def test_validate_catches_stale_patch_precondition_without_side_effects(self, initialized_work):
+    def test_validate_catches_stale_patch_precondition_without_side_effects(
+        self, initialized_work
+    ):
         work, book = initialized_work
         block_uid = book.chapters[0].blocks[0].uid
         before = book.model_dump(mode="python")
@@ -984,7 +1024,9 @@ class TestValidate:
         assert any("precondition mismatch" in e for e in errors)
         assert book.model_dump(mode="python") == before
 
-    def test_validate_checks_multiple_patches_in_submission_order(self, initialized_work):
+    def test_validate_checks_multiple_patches_in_submission_order(
+        self, initialized_work
+    ):
         work, book = initialized_work
         block_uid = book.chapters[0].blocks[0].uid
 
@@ -1126,9 +1168,13 @@ class TestSubmit:
 
         # book unchanged
         book_after = load_book(paths.book_path)
-        assert book_after.op_log_version == book_before.op_log_version
+        assert book_after.model_dump(mode="python") == book_before.model_dump(
+            mode="python"
+        )
 
-    def test_submit_apply_with_set_field_patch(self, initialized_work, tmp_path, capsys):
+    def test_submit_apply_with_set_field_patch(
+        self, initialized_work, tmp_path, capsys
+    ):
         """Apply with a set_field patch: book.json should be updated."""
         work, book = initialized_work
         chapter_uid = book.chapters[0].uid
@@ -1181,7 +1227,9 @@ class TestSubmit:
         assert isinstance(updated_block, Paragraph)
         assert updated_block.text == "Hello world updated"
 
-    def test_submit_apply_validation_fail_no_side_effects(self, initialized_work, capsys):
+    def test_submit_apply_validation_fail_no_side_effects(
+        self, initialized_work, capsys
+    ):
         """Validation failure should prevent any state changes."""
         work, book = initialized_work
         paths = resolve_editor_paths(work)
@@ -1258,7 +1306,10 @@ class TestSubmit:
         assert out["submitted"] is False
         assert any("nonexistent-block-uid-xxxx" in e for e in out["errors"])
         assert (paths.agent_outputs_dir / f"{output.output_id}.json").exists()
-        assert list(paths.agent_outputs_archives_dir.glob(f"{output.output_id}_*.json")) == []
+        assert (
+            list(paths.agent_outputs_archives_dir.glob(f"{output.output_id}_*.json"))
+            == []
+        )
         assert load_book(paths.book_path).model_dump(mode="python") == book_before
         assert load_editor_memory(paths).model_dump(mode="python") == memory_before
 
@@ -1280,10 +1331,14 @@ class TestSubmit:
         archives = list(paths.agent_outputs_archives_dir.glob(f"{oid}_*.json"))
         assert len(archives) == 1
 
-    def test_submit_stage_placeholder(self, initialized_work, capsys):
-        """--stage mode returns placeholder message and exits 0."""
+    def test_submit_stage_validates_archives_and_does_not_apply(
+        self, initialized_work, capsys
+    ):
+        """--stage validates and archives without mutating book.json."""
         work, book = initialized_work
         oid = self._begin_supervisor(work, book, capsys)
+        paths = resolve_editor_paths(work)
+        book_before = load_book(paths.book_path).model_dump(mode="python")
 
         result = run_agent_output_submit(
             work=work, output_id=oid, apply=False, stage=True, cfg=_cfg()
@@ -1291,8 +1346,102 @@ class TestSubmit:
         out = json.loads(capsys.readouterr().out)
 
         assert result == 0
-        assert out["staged"] is False
-        assert "not yet implemented" in out["message"]
+        assert out["staged"] is True
+        assert out["patches_validated"] == 0
+        assert not (paths.agent_outputs_dir / f"{oid}.json").exists()
+        assert list(paths.agent_outputs_archives_dir.glob(f"{oid}_*.json"))
+        assert load_book(paths.book_path).model_dump(mode="python") == book_before
+
+    def test_submit_apply_and_stage_are_mutually_exclusive(
+        self, initialized_work, capsys
+    ):
+        """--apply and --stage should be rejected instead of silently staging."""
+        work, book = initialized_work
+        oid = self._begin_supervisor(work, book, capsys)
+        paths = resolve_editor_paths(work)
+
+        result = run_agent_output_submit(
+            work=work, output_id=oid, apply=True, stage=True, cfg=_cfg()
+        )
+        out = json.loads(capsys.readouterr().out)
+
+        assert result == 1
+        assert "mutually exclusive" in out["error"]
+        assert (paths.agent_outputs_dir / f"{oid}.json").exists()
+        assert list(paths.agent_outputs_archives_dir.glob(f"{oid}_*.json")) == []
+
+    def test_doctor_ignores_staged_outputs_for_applied_delta(
+        self, initialized_work, capsys
+    ):
+        """Staged-only audit events must not reset quiet-round applied-op semantics."""
+        work, book = initialized_work
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        assert result == 0
+        capsys.readouterr()
+
+        oid = self._begin_supervisor(work, book, capsys)
+        result = run_agent_output_submit(
+            work=work, output_id=oid, apply=False, stage=True, cfg=_cfg()
+        )
+        assert result == 0
+        capsys.readouterr()
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        report = json.loads(capsys.readouterr().out)
+
+        assert result == 0
+        assert report["delta"]["new_applied_op_count"] == 0
+
+    def test_doctor_applied_delta_survives_compact_then_stage_and_submit(
+        self, initialized_work, capsys
+    ):
+        """Compaction baseline must not swallow later staged/submitted deltas."""
+        work, book = initialized_work
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        assert result == 0
+        capsys.readouterr()
+
+        oid = self._begin_supervisor(work, book, capsys)
+        result = run_agent_output_submit(
+            work=work, output_id=oid, apply=True, stage=False, cfg=_cfg()
+        )
+        assert result == 0
+        capsys.readouterr()
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        report = json.loads(capsys.readouterr().out)
+        assert result == 0
+        assert report["delta"]["new_applied_op_count"] == 1
+
+        result = run_compact(work=work, cfg=_cfg())
+        assert result == 0
+        capsys.readouterr()
+
+        oid = self._begin_supervisor(work, book, capsys)
+        result = run_agent_output_submit(
+            work=work, output_id=oid, apply=False, stage=True, cfg=_cfg()
+        )
+        assert result == 0
+        capsys.readouterr()
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        report = json.loads(capsys.readouterr().out)
+        assert result == 0
+        assert report["delta"]["new_applied_op_count"] == 0
+
+        oid = self._begin_supervisor(work, book, capsys)
+        result = run_agent_output_submit(
+            work=work, output_id=oid, apply=True, stage=False, cfg=_cfg()
+        )
+        assert result == 0
+        capsys.readouterr()
+
+        result = run_doctor(work=work, output_json=False, cfg=_cfg())
+        report = json.loads(capsys.readouterr().out)
+        assert result == 0
+        assert report["delta"]["new_applied_op_count"] == 1
 
 
 # ===========================================================================
@@ -1315,7 +1464,9 @@ class TestEdgeCases:
         with pytest.raises(CommandError):
             load_agent_output(paths, corrupt_id)
 
-    def test_add_note_duplicate_appended_not_deduplicated(self, initialized_work, capsys):
+    def test_add_note_duplicate_appended_not_deduplicated(
+        self, initialized_work, capsys
+    ):
         """Adding the same note twice results in two entries (append semantics)."""
         work, book = initialized_work
         run_agent_output_begin(
@@ -1323,9 +1474,13 @@ class TestEdgeCases:
         )
         oid = json.loads(capsys.readouterr().out)["output_id"]
 
-        run_agent_output_add_note(work=work, output_id=oid, text="Same note", cfg=_cfg())
+        run_agent_output_add_note(
+            work=work, output_id=oid, text="Same note", cfg=_cfg()
+        )
         capsys.readouterr()
-        run_agent_output_add_note(work=work, output_id=oid, text="Same note", cfg=_cfg())
+        run_agent_output_add_note(
+            work=work, output_id=oid, text="Same note", cfg=_cfg()
+        )
         out = json.loads(capsys.readouterr().out)
 
         assert out["notes_count"] == 2
@@ -1371,7 +1526,9 @@ class TestValidateExtended:
             updated_at=now,
             memory_patches=[
                 MemoryPatch(
-                    chapter_status=[ChapterStatus(chapter_uid=chapter_uid, read_passes=1)]
+                    chapter_status=[
+                        ChapterStatus(chapter_uid=chapter_uid, read_passes=1)
+                    ]
                 )
             ],
         )
@@ -1410,7 +1567,11 @@ class TestValidateExtended:
                                 "kind": "paragraph",
                                 "text": "New",
                                 "role": "body",
-                                "provenance": {"page": 1, "bbox": None, "source": "passthrough"},
+                                "provenance": {
+                                    "page": 1,
+                                    "bbox": None,
+                                    "source": "passthrough",
+                                },
                             },
                         }
                     ],
@@ -1491,7 +1652,11 @@ class TestValidateExtended:
                 )
             ],
             memory_patches=[
-                MemoryPatch(chapter_status=[ChapterStatus(chapter_uid=chapter_uid, read_passes=1)])
+                MemoryPatch(
+                    chapter_status=[
+                        ChapterStatus(chapter_uid=chapter_uid, read_passes=1)
+                    ]
+                )
             ],
         )
 
@@ -1594,7 +1759,11 @@ class TestValidatePhase3:
                 )
             ],
             memory_patches=[
-                MemoryPatch(chapter_status=[ChapterStatus(chapter_uid=chapter_uid, read_passes=1)])
+                MemoryPatch(
+                    chapter_status=[
+                        ChapterStatus(chapter_uid=chapter_uid, read_passes=1)
+                    ]
+                )
             ],
         )
 
@@ -1665,7 +1834,9 @@ class TestValidatePhase3:
         assert any("chapter-scoped output" in e and "book-wide" in e for e in errors)
         assert any("fixer" in e and "book-wide" in e for e in errors)
 
-    def test_validate_fixer_cross_chapter_footnote_command_rejected(self, initialized_work):
+    def test_validate_fixer_cross_chapter_footnote_command_rejected(
+        self, initialized_work
+    ):
         """Chapter-scoped fixer submitting a cross-chapter footnote command should fail."""
         work, book = initialized_work
         chapter_uid = book.chapters[0].uid
@@ -1782,7 +1953,6 @@ class TestValidatePhase3:
     def test_validate_command_then_patches_sequential(self, initialized_work):
         """Successful command followed by a patch on post-command book should validate."""
         work, book = initialized_work
-        chapter_uid = book.chapters[0].uid
         block_uid = book.chapters[0].blocks[0].uid
         new_block_uid = str(uuid4())
 
@@ -1848,7 +2018,6 @@ class TestValidatePhase3:
         work, book = initialized_work
         paths = resolve_editor_paths(work)
 
-        chapter_uid = book.chapters[0].uid
         # Use first two blocks (Paragraph + Heading both have text field)
         block_uid_1 = book.chapters[0].blocks[0].uid  # Paragraph "Hello world"
         block_uid_2 = book.chapters[0].blocks[1].uid  # Heading "Section A"
@@ -1874,9 +2043,14 @@ class TestValidatePhase3:
 
         memory = load_editor_memory(paths)
         from datetime import UTC, datetime
-        now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-        result = submit_agent_output(output=output, book=book, memory=memory, paths=paths, now=now)
+        now = (
+            datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
+
+        result = submit_agent_output(
+            output=output, book=book, memory=memory, paths=paths, now=now
+        )
 
         assert result.submitted is True
         assert result.patches_applied == 1  # 1 compiled patch from merge_blocks

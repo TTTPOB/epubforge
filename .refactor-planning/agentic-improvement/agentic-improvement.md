@@ -868,6 +868,8 @@ Git worktree 提供版本控制，BookPatch 的 `old` 值 precondition 提供字
 
 ### Phase 4: Remove old EditOp/OpEnvelope system
 
+Status: **completed**. The old edit operation, apply queue, staging, and lease/lock implementation files have been removed; current editor mutation entry points are AgentOutput, BookPatch, and PatchCommand only.
+
 前提：Phase 1-3 测试全部通过，BookPatch 能表达所有现有 EditOp 语义。
 
 - Remove `ops.py` (EditOp, OpEnvelope).

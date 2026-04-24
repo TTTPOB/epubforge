@@ -12,7 +12,9 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 log = logging.getLogger(__name__)
 
 
-def parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, ocr_settings=None) -> None:
+def parse_pdf(
+    pdf_path: Path, out_path: Path, *, images_dir: Path, ocr_settings=None
+) -> None:
     """Parse *pdf_path* with Docling and write DoclingDocument JSON to *out_path*.
 
     Figure crops are saved under *images_dir* as p{page}_{ref_id}.png.
@@ -51,7 +53,9 @@ def parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, ocr_settings=
         )
 
     converter = DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)}
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
+        }
     )
 
     result = converter.convert(str(pdf_path))
@@ -75,7 +79,9 @@ def _save_figure_crops(doc, images_dir: Path) -> None:
             continue
         pil_img = element.get_image(doc)
         if pil_img is None:
-            log.warning("get_image() returned None for %s, skipping crop", element.self_ref)
+            log.warning(
+                "get_image() returned None for %s, skipping crop", element.self_ref
+            )
             continue
         ref_id = element.self_ref.replace("/", "_").replace("#", "_").lstrip("_")
         page = element.prov[0].page_no if element.prov else 0

@@ -8,7 +8,15 @@ import pytest
 
 from epubforge.fields import FIELD_MAP, iter_text_fields, set_text_field
 from epubforge.io import load_book, resolve_book_path, save_book
-from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import (
+    Book,
+    Chapter,
+    Footnote,
+    Heading,
+    Paragraph,
+    Provenance,
+    Table,
+)
 from epubforge.markers import (
     has_raw_callout,
     make_fn_marker,
@@ -17,7 +25,13 @@ from epubforge.markers import (
     replace_nth_raw,
     strip_markers,
 )
-from epubforge.query import find_block_by_uid, find_footnotes, find_headings, find_marker_source, find_markers
+from epubforge.query import (
+    find_block_by_uid,
+    find_footnotes,
+    find_headings,
+    find_marker_source,
+    find_markers,
+)
 
 
 def _editable_book(prov: Callable[..., Provenance]) -> Book:
@@ -32,10 +46,31 @@ def _editable_book(prov: Callable[..., Provenance]) -> Book:
                 uid="ch-1",
                 title="Intro",
                 blocks=[
-                    Heading(uid="h-1", text="Intro", level=1, provenance=prov(1, source="llm")),
-                    Paragraph(uid="p-1", text=f"text {marker}", provenance=prov(1, source="llm")),
-                    Table(uid="t-1", html="<table><td>①</td></table>", table_title="表1①", caption="caption", provenance=prov(1, source="llm")),
-                    Footnote(uid="f-1", callout="①", text="note body", paired=True, provenance=prov(1, source="llm")),
+                    Heading(
+                        uid="h-1",
+                        text="Intro",
+                        level=1,
+                        provenance=prov(1, source="llm"),
+                    ),
+                    Paragraph(
+                        uid="p-1",
+                        text=f"text {marker}",
+                        provenance=prov(1, source="llm"),
+                    ),
+                    Table(
+                        uid="t-1",
+                        html="<table><td>①</td></table>",
+                        table_title="表1①",
+                        caption="caption",
+                        provenance=prov(1, source="llm"),
+                    ),
+                    Footnote(
+                        uid="f-1",
+                        callout="①",
+                        text="note body",
+                        paired=True,
+                        provenance=prov(1, source="llm"),
+                    ),
                 ],
             )
         ],
@@ -49,7 +84,11 @@ def test_load_book_fills_pydantic_defaults_for_minimal_payload(tmp_path: Path) -
             {
                 "title": "Chapter 1",
                 "blocks": [
-                    {"kind": "paragraph", "text": "hello", "provenance": {"page": 1, "source": "llm"}},
+                    {
+                        "kind": "paragraph",
+                        "text": "hello",
+                        "provenance": {"page": 1, "source": "llm"},
+                    },
                 ],
             }
         ],
@@ -59,7 +98,6 @@ def test_load_book_fills_pydantic_defaults_for_minimal_payload(tmp_path: Path) -
     book = load_book(tmp_path / "book.json")
 
     assert book.title == "Minimal"
-    assert book.op_log_version == 0
     assert book.initialized_at == ""
     assert book.uid_seed == ""
     assert book.chapters[0].uid is None

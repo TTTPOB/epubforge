@@ -67,14 +67,22 @@ _DEFAULT_STYLES: list[dict] = [
         "parent_role": "attribution",
         "description": "Author attribution after epigraph or blockquote",
         "css_class": "attribution",
-        "css_rules": {"text-align": "right", "font-style": "italic", "text-indent": "0"},
+        "css_rules": {
+            "text-align": "right",
+            "font-style": "italic",
+            "text-indent": "0",
+        },
     },
     {
         "id": "dedication",
         "parent_role": "dedication",
         "description": "Book dedication text",
         "css_class": "dedication",
-        "css_rules": {"text-align": "center", "font-style": "italic", "margin": "2em 0"},
+        "css_rules": {
+            "text-align": "center",
+            "font-style": "italic",
+            "margin": "2em 0",
+        },
     },
     {
         "id": "preface_note",

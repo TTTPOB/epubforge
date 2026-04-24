@@ -15,15 +15,6 @@ from urllib.parse import quote as _url_quote
 from ebooklib import epub
 
 from epubforge.io import EDITABLE_BOOK_PATH
-from epubforge.stage3_artifacts import Stage3ContractError, load_active_stage3_manifest
-
-_FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
-_OPF_MODIFIED_RE = re.compile(r"(<meta property=\"dcterms:modified\">)([^<]+)(</meta>)")
-_FIXED_EPUB_MODIFIED = "2000-01-01T00:00:00Z"
-_FIXED_ZIP_TIMESTAMP = (2000, 1, 1, 0, 0, 0)
-
-log = logging.getLogger(__name__)
-
 from epubforge.ir.semantic import (
     Book,
     Chapter,
@@ -35,6 +26,14 @@ from epubforge.ir.semantic import (
     Table,
 )
 from epubforge.ir.style_registry import StyleRegistry
+from epubforge.stage3_artifacts import Stage3ContractError, load_active_stage3_manifest
+
+_FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
+_OPF_MODIFIED_RE = re.compile(r"(<meta property=\"dcterms:modified\">)([^<]+)(</meta>)")
+_FIXED_EPUB_MODIFIED = "2000-01-01T00:00:00Z"
+_FIXED_ZIP_TIMESTAMP = (2000, 1, 1, 0, 0, 0)
+
+log = logging.getLogger(__name__)
 
 _CSS_BASE = """
 body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
@@ -84,9 +83,13 @@ def _generate_css(registry: StyleRegistry | None) -> str:
 
 def _load_registry(registry_path: Path) -> StyleRegistry | None:
     try:
-        return StyleRegistry.model_validate_json(registry_path.read_text(encoding="utf-8"))
+        return StyleRegistry.model_validate_json(
+            registry_path.read_text(encoding="utf-8")
+        )
     except Exception:
-        log.warning("epub_builder: failed to load style registry from %s", registry_path)
+        log.warning(
+            "epub_builder: failed to load style registry from %s", registry_path
+        )
         return None
 
 
@@ -150,15 +153,19 @@ def build_epub(
     css = _generate_css(registry)
 
     ebook = epub.EpubBook()
-    ebook.set_identifier(_deterministic_identifier(book_model, css=css, images_dir=images_dir))
+    ebook.set_identifier(
+        _deterministic_identifier(book_model, css=css, images_dir=images_dir)
+    )
     ebook.set_title(book_model.title)
     ebook.set_language(book_model.language)
     for author in book_model.authors:
         ebook.add_author(author)
 
     css_item = epub.EpubItem(
-        uid="style", file_name="style/main.css",
-        media_type="text/css", content=css.encode(),
+        uid="style",
+        file_name="style/main.css",
+        media_type="text/css",
+        content=css.encode(),
     )
     ebook.add_item(css_item)
 
@@ -177,13 +184,14 @@ def build_epub(
     # A footnote is "borrowed" when a marker \x02fn-PAGE-CALLOUT\x03 appears in
     # chapter A but the matching Footnote block lives in chapter B.  The footnote
     # body is rendered in chapter A (the callout's home) and suppressed in B.
-    borrowed_by: dict[int, list[Footnote]] = {}   # ch_idx → borrowed Footnotes
-    borrowed_keys: set[tuple[int, str]] = set()    # keys removed from source chapter
+    borrowed_by: dict[int, list[Footnote]] = {}  # ch_idx → borrowed Footnotes
+    borrowed_keys: set[tuple[int, str]] = set()  # keys removed from source chapter
 
     for i, chapter in enumerate(book_model.chapters):
         local_keys: set[tuple[int, str]] = {
             (b.provenance.page, b.callout)
-            for b in chapter.blocks if isinstance(b, Footnote)
+            for b in chapter.blocks
+            if isinstance(b, Footnote)
         }
         ch_borrowed: list[Footnote] = []
         seen: set[tuple[int, str]] = set()
@@ -206,7 +214,11 @@ def build_epub(
                     except ValueError:
                         continue
                     key = (page, callout)
-                    if key not in local_keys and key in all_footnotes_by_key and key not in seen:
+                    if (
+                        key not in local_keys
+                        and key in all_footnotes_by_key
+                        and key not in seen
+                    ):
                         ch_borrowed.append(all_footnotes_by_key[key])
                         borrowed_keys.add(key)
                         seen.add(key)
@@ -221,21 +233,24 @@ def build_epub(
         xhtml_name = f"chap{i:04d}.xhtml"
         ch_id = chapter.id or f"chap{i:04d}"
         body_html, footnotes_html = _render_chapter(
-            chapter, ch_id, figure_to_filename,
-            borrowed_by.get(i), borrowed_keys or None,
+            chapter,
+            ch_id,
+            figure_to_filename,
+            borrowed_by.get(i),
+            borrowed_keys or None,
         )
         full_html = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
-            '<!DOCTYPE html>\n'
+            "<!DOCTYPE html>\n"
             '<html xmlns="http://www.w3.org/1999/xhtml" '
             'xmlns:epub="http://www.idpf.org/2007/ops">\n'
             '<head><meta charset="utf-8"/>'
-            f'<title>{_esc(chapter.title)}</title>'
+            f"<title>{_esc(chapter.title)}</title>"
             '<link rel="stylesheet" href="../style/main.css"/>'
-            '</head>\n'
+            "</head>\n"
             f'<body>\n<h1 id="{_esc(ch_id)}">{_esc(chapter.title)}</h1>\n'
-            f'{body_html}\n{footnotes_html}\n'
-            '</body>\n</html>'
+            f"{body_html}\n{footnotes_html}\n"
+            "</body>\n</html>"
         )
         chap_item = epub.EpubHtml(
             title=chapter.title,
@@ -250,7 +265,9 @@ def build_epub(
         for block in chapter.blocks:
             if isinstance(block, Heading) and block.id:
                 href = f"{xhtml_name}#{block.id}"
-                lvl = min(block.level + 1, 6)  # +1: headings are always children of their chapter
+                lvl = min(
+                    block.level + 1, 6
+                )  # +1: headings are always children of their chapter
                 toc_entries.append((lvl, href, block.text, block.id))
 
     ebook.toc = _build_nested_toc(toc_entries)
@@ -267,11 +284,17 @@ def build_epub(
     size = out_path.stat().st_size
     log.info(
         "epub_builder: chapters=%d blocks=%d images=%d size=%d bytes → %s",
-        n_chapters, n_blocks, n_images, size, out_path.name,
+        n_chapters,
+        n_blocks,
+        n_images,
+        size,
+        out_path.name,
     )
 
 
-def _deterministic_identifier(book_model: Book, *, css: str, images_dir: Path | None) -> str:
+def _deterministic_identifier(
+    book_model: Book, *, css: str, images_dir: Path | None
+) -> str:
     payload = {
         "title": book_model.title,
         "language": book_model.language,
@@ -281,7 +304,9 @@ def _deterministic_identifier(book_model: Book, *, css: str, images_dir: Path | 
         "images": _image_manifest(images_dir),
     }
     digest = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     ).hexdigest()
     return str(uuid.UUID(digest[:32]))
 
@@ -295,7 +320,9 @@ def _chapter_identity(chapter: Chapter) -> dict[str, object]:
     }
 
 
-def _block_identity(block: Paragraph | Heading | Footnote | Figure | Table | Equation) -> dict[str, object]:
+def _block_identity(
+    block: Paragraph | Heading | Footnote | Figure | Table | Equation,
+) -> dict[str, object]:
     payload = block.model_dump(mode="json")
     payload.pop("uid", None)
     return payload
@@ -329,7 +356,9 @@ def _normalize_epub_archive(out_path: Path) -> None:
                         count=1,
                     ).encode("utf-8")
 
-                normalized = zipfile.ZipInfo(filename=info.filename, date_time=_FIXED_ZIP_TIMESTAMP)
+                normalized = zipfile.ZipInfo(
+                    filename=info.filename, date_time=_FIXED_ZIP_TIMESTAMP
+                )
                 normalized.compress_type = info.compress_type
                 normalized.comment = info.comment
                 normalized.extra = info.extra
@@ -383,12 +412,14 @@ def _map_figures_to_images(
             figure_to_filename[id(block)] = fname
             if fname not in registered:
                 stem = img_path.stem
-                ebook.add_item(epub.EpubItem(
-                    uid=f"img-{stem}",
-                    file_name=f"images/{fname}",
-                    media_type="image/png",
-                    content=img_path.read_bytes(),
-                ))
+                ebook.add_item(
+                    epub.EpubItem(
+                        uid=f"img-{stem}",
+                        file_name=f"images/{fname}",
+                        media_type="image/png",
+                        content=img_path.read_bytes(),
+                    )
+                )
                 registered.add(fname)
 
     return figure_to_filename
@@ -460,13 +491,15 @@ def _render_chapter(
             if key in fn_map:
                 log.warning(
                     "duplicate footnote key (page=%d, callout=%r) in chapter %r",
-                    key[0], key[1], chapter_id,
+                    key[0],
+                    key[1],
+                    chapter_id,
                 )
                 continue
             n += 1
             fn_map[key] = (n, f"{chapter_id}-fn{n}")
     # 2) Borrowed footnotes from next chapter(s).
-    for fn in (borrowed_footnotes or []):
+    for fn in borrowed_footnotes or []:
         key = (fn.provenance.page, fn.callout)
         if key not in fn_map:
             n += 1
@@ -481,7 +514,9 @@ def _render_chapter(
         elif isinstance(block, Heading):
             tag = f"h{min(block.level + 1, 6)}"  # h1 reserved for chapter title
             id_attr = f' id="{_esc(block.id)}"' if block.id else ""
-            cls_attr = f' class="{_esc(block.style_class)}"' if block.style_class else ""
+            cls_attr = (
+                f' class="{_esc(block.style_class)}"' if block.style_class else ""
+            )
             parts.append(f"<{tag}{id_attr}{cls_attr}>{_esc(block.text)}</{tag}>")
         elif isinstance(block, Footnote):
             key = (block.provenance.page, block.callout)
@@ -503,13 +538,23 @@ def _render_chapter(
             else:
                 img_tag = ""
             parts.append(
-                f'<figure>{img_tag}'
-                f'<figcaption>{_esc(block.caption)}</figcaption></figure>'
+                f"<figure>{img_tag}"
+                f"<figcaption>{_esc(block.caption)}</figcaption></figure>"
             )
         elif isinstance(block, Table):
-            title_html = f'<p class="table-title">{_render_inline(block.table_title, fn_map)}</p>' if block.table_title else ""
-            caption_html = f'<p class="table-caption">{_render_inline(block.caption, fn_map)}</p>' if block.caption else ""
-            parts.append(f"{title_html}{_apply_fn_markers(block.html, fn_map)}{caption_html}")
+            title_html = (
+                f'<p class="table-title">{_render_inline(block.table_title, fn_map)}</p>'
+                if block.table_title
+                else ""
+            )
+            caption_html = (
+                f'<p class="table-caption">{_render_inline(block.caption, fn_map)}</p>'
+                if block.caption
+                else ""
+            )
+            parts.append(
+                f"{title_html}{_apply_fn_markers(block.html, fn_map)}{caption_html}"
+            )
         elif isinstance(block, Equation):
             parts.append(f'<p class="equation">{_esc(block.latex)}</p>')
 
@@ -528,7 +573,7 @@ def _render_chapter(
                 n_val, fn_id = 0, f"{chapter_id}-fn0"
             fn_parts.append(
                 f'<aside epub:type="footnote" id="{fn_id}">'
-                f'<p><sup>{n_val}</sup> {_esc(fn.text)}</p></aside>'
+                f"<p><sup>{n_val}</sup> {_esc(fn.text)}</p></aside>"
             )
         fn_parts.append("</aside>")
         footnotes_html = "\n".join(fn_parts)
@@ -536,7 +581,9 @@ def _render_chapter(
     return body_html, footnotes_html
 
 
-def _render_paragraph(p: Paragraph, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:
+def _render_paragraph(
+    p: Paragraph, fn_map: dict[tuple[int, str], tuple[int, str]]
+) -> str:
     cls = p.style_class or (p.role if p.role != "body" else None)
     cls_attr = f' class="{_esc(cls)}"' if cls else ""
     if p.display_lines:
@@ -549,6 +596,7 @@ def _render_paragraph(p: Paragraph, fn_map: dict[tuple[int, str], tuple[int, str
 
 def _apply_fn_markers(html: str, fn_map: dict[tuple[int, str], tuple[int, str]]) -> str:
     """Replace \x02fn-PAGE-CALLOUT\x03 markers with sequential noteref links."""
+
     def to_link(m: re.Match[str]) -> str:
         raw = m.group(1)  # "fn-PAGE-CALLOUT"
         parts = raw.split("-", 2)
@@ -559,10 +607,13 @@ def _apply_fn_markers(html: str, fn_map: dict[tuple[int, str], tuple[int, str]])
             return m.group(0)
         entry = fn_map.get((page, callout))
         if entry is None:
-            log.warning("fn marker page=%d callout=%r has no fn_map entry", page, callout)
+            log.warning(
+                "fn marker page=%d callout=%r has no fn_map entry", page, callout
+            )
             return m.group(0)
         n_val, fn_id = entry
         return f'<sup epub:type="noteref"><a href="#{fn_id}">{n_val}</a></sup>'
+
     return _FN_MARKER_RE.sub(to_link, html)
 
 

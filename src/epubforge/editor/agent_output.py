@@ -15,10 +15,26 @@ from epubforge.editor._validators import (
     validate_uuid4,
 )
 from epubforge.editor.cli_support import CommandError
-from epubforge.editor.memory import EditMemory, MemoryMergeDecision, MemoryPatch, OpenQuestion, merge_edit_memory
-from epubforge.editor.patch_commands import PatchCommand, PatchCommandError, compile_patch_commands
+from epubforge.editor.memory import (
+    EditMemory,
+    MemoryMergeDecision,
+    MemoryPatch,
+    OpenQuestion,
+    merge_edit_memory,
+)
+from epubforge.editor.log import append_audit_event
+from epubforge.editor.patch_commands import (
+    PatchCommand,
+    PatchCommandError,
+    compile_patch_commands,
+)
 from epubforge.editor.patches import BookPatch, PatchError, apply_book_patch
-from epubforge.editor.state import EditorPaths, atomic_write_model, atomic_write_text, save_memory
+from epubforge.editor.state import (
+    EditorPaths,
+    atomic_write_model,
+    atomic_write_text,
+    save_memory,
+)
 from epubforge.ir.semantic import Book
 
 AgentKind = Literal["scanner", "fixer", "reviewer", "supervisor"]
@@ -99,6 +115,17 @@ class SubmitResult:
     errors: list[str] = dataclasses.field(default_factory=list)
 
 
+@dataclasses.dataclass
+class StageResult:
+    """Result of validating and archiving an AgentOutput without applying patches."""
+
+    staged: bool
+    output_id: str
+    patches_validated: int
+    archive_path: str
+    errors: list[str] = dataclasses.field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Storage helpers
 # ---------------------------------------------------------------------------
@@ -114,7 +141,9 @@ def load_agent_output(paths: EditorPaths, output_id: str) -> AgentOutput:
     if not output_path.exists():
         # Check whether it was already submitted (archived)
         if paths.agent_outputs_archives_dir.exists():
-            archived = list(paths.agent_outputs_archives_dir.glob(f"{output_id}_*.json"))
+            archived = list(
+                paths.agent_outputs_archives_dir.glob(f"{output_id}_*.json")
+            )
             if archived:
                 raise CommandError(
                     f"output already submitted: {output_id}",
@@ -257,7 +286,9 @@ def _check_patches_permissions(
 # ---------------------------------------------------------------------------
 
 
-def _validate_agent_output_impl(output: AgentOutput, book: Book) -> AgentOutputValidationResult:
+def _validate_agent_output_impl(
+    output: AgentOutput, book: Book
+) -> AgentOutputValidationResult:
     """Single shared validation helper used by both validate_agent_output and submit_agent_output.
 
     Performs all semantic validation and returns an AgentOutputValidationResult containing
@@ -307,9 +338,7 @@ def _validate_agent_output_impl(output: AgentOutput, book: Book) -> AgentOutputV
                 compiled_patches.extend(result.patches)
                 current_book = result.book_after_commands
             except PatchCommandError as exc:
-                errors.append(
-                    f"commands[{i}] ({cmd.command_id}): {exc.reason}"
-                )
+                errors.append(f"commands[{i}] ({cmd.command_id}): {exc.reason}")
                 # Record skipped for subsequent commands
                 for j in range(i + 1, len(output.commands)):
                     skipped_cmd = output.commands[j]
@@ -325,7 +354,9 @@ def _validate_agent_output_impl(output: AgentOutput, book: Book) -> AgentOutputV
 
     # §5.5 — validate output.patches (skip if compilation failed)
     if compilation_failed:
-        errors.append("skipped output.patches validation because command compilation failed")
+        errors.append(
+            "skipped output.patches validation because command compilation failed"
+        )
     else:
         assert book_after_commands is not None
         current_book = book_after_commands
@@ -474,17 +505,15 @@ def apply_memory_patches_sequentially(
 # ---------------------------------------------------------------------------
 
 
-def archive_agent_output(paths: EditorPaths, output: AgentOutput, submitted_at: str) -> Path:
+def archive_agent_output(
+    paths: EditorPaths, output: AgentOutput, submitted_at: str
+) -> Path:
     """Atomically archive a submitted AgentOutput and remove the in-progress file.
 
     Returns the path of the created archive file.
     """
     submitted_compact = (
-        submitted_at
-        .replace(":", "")
-        .replace("-", "")
-        .replace("T", "-")
-        .rstrip("Z")
+        submitted_at.replace(":", "").replace("-", "").replace("T", "-").rstrip("Z")
     )
     archive_name = f"{output.output_id}_{submitted_compact}.json"
     archive_path = paths.agent_outputs_archives_dir / archive_name
@@ -567,6 +596,22 @@ def submit_agent_output(
     # Step 7: archive output
     archive_path = archive_agent_output(paths, output, submitted_at=now)
 
+    append_audit_event(
+        paths.edit_state_dir,
+        kind="agent_output_submitted",
+        ts=now,
+        payload={
+            "output_id": output.output_id,
+            "agent_id": output.agent_id,
+            "kind": output.kind,
+            "chapter_uid": output.chapter_uid,
+            "patch_ids": [patch.patch_id for patch in all_patches],
+            "patches_applied": len(all_patches),
+            "memory_patches_applied": len(output.memory_patches),
+            "archive_path": str(archive_path),
+        },
+    )
+
     return SubmitResult(
         submitted=True,
         output_id=output.output_id,
@@ -577,15 +622,61 @@ def submit_agent_output(
     )
 
 
+def stage_agent_output(
+    output: AgentOutput,
+    book: Book,
+    paths: EditorPaths,
+    *,
+    now: str,
+) -> StageResult:
+    """Validate and archive an AgentOutput without mutating book.json or memory.json."""
+
+    validation = _validate_agent_output_impl(output, book)
+    if validation.errors:
+        return StageResult(
+            staged=False,
+            output_id=output.output_id,
+            patches_validated=0,
+            archive_path="",
+            errors=validation.errors,
+        )
+
+    all_patches = list(validation.compiled_patches) + list(output.patches)
+    archive_path = archive_agent_output(paths, output, submitted_at=now)
+    append_audit_event(
+        paths.edit_state_dir,
+        kind="agent_output_staged",
+        ts=now,
+        payload={
+            "output_id": output.output_id,
+            "agent_id": output.agent_id,
+            "kind": output.kind,
+            "chapter_uid": output.chapter_uid,
+            "patch_ids": [patch.patch_id for patch in all_patches],
+            "patches_validated": len(all_patches),
+            "memory_patches_validated": len(output.memory_patches),
+            "archive_path": str(archive_path),
+        },
+    )
+    return StageResult(
+        staged=True,
+        output_id=output.output_id,
+        patches_validated=len(all_patches),
+        archive_path=str(archive_path),
+    )
+
+
 __all__ = [
     "AgentKind",
     "AgentOutput",
+    "StageResult",
     "SubmitResult",
     "apply_memory_patches_sequentially",
     "apply_patches_sequentially",
     "archive_agent_output",
     "load_agent_output",
     "save_agent_output",
+    "stage_agent_output",
     "submit_agent_output",
     "validate_agent_output",
 ]

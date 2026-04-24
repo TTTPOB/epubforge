@@ -4,11 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from epubforge.editor.memory import (
-    ChapterStatus,
     ConventionNote,
     EditMemory,
     MemoryPatch,
-    OpenQuestion,
     PatternNote,
     canonical_convention_key,
     canonical_pattern_key,
@@ -69,7 +67,9 @@ def test_canonical_key_validation_rejects_mismatch_and_normalizes_patterns() -> 
             contributed_at="2026-04-23T08:00:00Z",
         )
 
-    first = canonical_pattern_key("same_page_dup_callout", ["blk-3", "blk-1", "blk-2", "blk-2"])
+    first = canonical_pattern_key(
+        "same_page_dup_callout", ["blk-3", "blk-1", "blk-2", "blk-2"]
+    )
     second = canonical_pattern_key("same_page_dup_callout", ["blk-2", "blk-1", "blk-3"])
     assert first == second
 
@@ -111,17 +111,27 @@ def test_higher_confidence_wins_and_equal_confidence_uses_later_timestamp() -> N
     baseline = _memory()
     first_merge = merge_edit_memory(
         baseline,
-        MemoryPatch(conventions=[_convention(confidence=0.7, contributed_at="2026-04-23T08:00:00Z")]),
+        MemoryPatch(
+            conventions=[
+                _convention(confidence=0.7, contributed_at="2026-04-23T08:00:00Z")
+            ]
+        ),
         updated_at="2026-04-23T08:00:00Z",
         updated_by="supervisor",
     )
     stronger = merge_edit_memory(
         first_merge.memory,
-        MemoryPatch(conventions=[_convention(confidence=0.9, contributed_at="2026-04-23T08:01:00Z")]),
+        MemoryPatch(
+            conventions=[
+                _convention(confidence=0.9, contributed_at="2026-04-23T08:01:00Z")
+            ]
+        ),
         updated_at="2026-04-23T08:01:00Z",
         updated_by="supervisor",
     )
-    note = stronger.memory.conventions[canonical_convention_key("book", None, "dash_range_style")]
+    note = stronger.memory.conventions[
+        canonical_convention_key("book", None, "dash_range_style")
+    ]
     assert note.confidence == 0.9
     assert stronger.decisions[0].outcome == "revised"
     assert stronger.true_revisions == 1
@@ -140,7 +150,9 @@ def test_higher_confidence_wins_and_equal_confidence_uses_later_timestamp() -> N
         updated_at="2026-04-23T08:02:00Z",
         updated_by="supervisor",
     )
-    latest = later_duplicate.memory.conventions[canonical_convention_key("book", None, "dash_range_style")]
+    latest = later_duplicate.memory.conventions[
+        canonical_convention_key("book", None, "dash_range_style")
+    ]
     assert latest.contributed_at == "2026-04-23T08:02:00Z"
     assert later_duplicate.decisions[0].outcome == "duplicate"
     assert later_duplicate.fresh_change_count == 0
@@ -176,7 +188,9 @@ def test_close_conflict_opens_question_instead_of_merging() -> None:
     assert question.options == ["—", "-"]
     assert conflict.decisions[0].outcome == "open_question"
     assert conflict.decisions[0].stored_change is False
-    retained = conflict.memory.conventions[canonical_convention_key("book", None, "dash_range_style")]
+    retained = conflict.memory.conventions[
+        canonical_convention_key("book", None, "dash_range_style")
+    ]
     assert retained.value == "—"
 
 
@@ -193,7 +207,9 @@ def test_pattern_merge_uses_stable_canonical_key_and_dedupes_rephrasing() -> Non
         MemoryPatch(
             patterns=[
                 PatternNote(
-                    canonical_key=canonical_pattern_key("same_page_dup_callout", ["blk-2", "blk-1", "blk-3"]),
+                    canonical_key=canonical_pattern_key(
+                        "same_page_dup_callout", ["blk-2", "blk-1", "blk-3"]
+                    ),
                     topic="same_page_dup_callout",
                     description="Same cluster, different wording.",
                     affected_uids=["blk-2", "blk-1", "blk-3"],

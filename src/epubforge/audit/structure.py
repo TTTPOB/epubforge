@@ -27,7 +27,9 @@ def detect_structure_issues(book: Book) -> AuditBundle:
             issues.append(
                 AuditIssue(
                     code="structure.blank_chapter_title",
-                    page=chapter.blocks[0].provenance.page if chapter.blocks else chapter_idx + 1,
+                    page=chapter.blocks[0].provenance.page
+                    if chapter.blocks
+                    else chapter_idx + 1,
                     chapter_uid=chapter.uid,
                     message="chapter title must not be blank",
                 )

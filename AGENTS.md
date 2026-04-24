@@ -65,57 +65,50 @@ All state lives under `edit_state/` inside the book's work directory.
 ```
 edit_state/
   book.json          # current Book (Semantic IR)
-  edit_log.jsonl     # append-only log of applied OpEnvelopes
+  edit_log.jsonl     # append-only audit log for AgentOutput submissions/staging
   memory.json        # BookMemory (rolling per-book facts)
-  leases.json        # chapter leases + book-wide exclusive lock
-  staging.jsonl      # pending (not-yet-applied) envelopes
   meta.json          # init metadata
   audit/             # doctor report + context JSON
+  agent_outputs/     # in-progress AgentOutput JSON plus archives/
   scratch/           # temporary scripts allocated by run-script
   snapshots/         # archived edit_state copies (tagged)
 ```
 
-### OpEnvelope / apply_envelope semantics
+### AgentOutput / BookPatch workflow
 
-An `OpEnvelope` (defined in `editor/ops.py`) carries:
-- `op_id`: UUID4 identifier for this envelope
-- `base_version`: the `Book.op_log_version` the op was authored against
-- `applied_version`: set after application (must be >= `base_version`)
-- `op`: the single `EditOp` payload
-- `memory_patches`: optional list of `MemoryPatch` to apply to `BookMemory`
-- `agent_id`, `applied_at`, `preconditions`, etc.
+Editor agents write structured `AgentOutput` files under `edit_state/agent_outputs/`.
+An `AgentOutput` contains:
+- `patches`: low-level `BookPatch` objects made of UID-addressed IR changes
+- `commands`: high-level `PatchCommand` macros compiled to `BookPatch`
+- `memory_patches`, `open_questions`, `notes`, and optional `evidence_refs`
 
-`apply_envelope` (`editor/apply.py`) is **transactional**: it begins with
-`working = book.model_copy(deep=True)` (line 1121). Any op failure or
-`memory_patches` failure raises and discards `working`, returning the original
-`book` unchanged. On success, `book.op_log_version` is incremented.
+`agent-output submit --apply` validates the whole output, compiles commands,
+applies patches transactionally to `book.json`, applies memory patches, archives the
+submitted output, and appends an audit event. `agent-output submit --stage` validates
+and archives without mutating `book.json` or `memory.json`.
 
-`Book.op_log_version: int` is the op-log version — incremented by each successful
-`apply_envelope` call, and paired with `OpEnvelope.base_version` / `applied_version`.
-It is **not** an IR schema version.
-
-Full JSON schema: see `editor/ops.py` (ops and envelope definitions),
-`editor/memory.py` (MemoryPatch), and `editor/_validators.py` (shared invariants).
+Full JSON schema: see `editor/agent_output.py`, `editor/patches.py`,
+`editor/patch_commands.py`, `editor/memory.py`, and `editor/_validators.py`.
 
 ### `epubforge editor <cmd>` commands
 
-All 14 commands are available via `epubforge editor <cmd>`. Each command receives
+The editor command surface is available via `epubforge editor <cmd>`. Each command receives
 effective config from `ctx.find_root().obj.config` (injected by the root Typer callback).
 
 | Command | Purpose |
 |---------|---------|
 | `init` | Initialize `edit_state/` from `05_semantic.json`; reads Stage 3 active manifest to populate `meta.json` stage3 context |
 | `doctor` | Run audit detectors and print readiness report |
-| `propose-op` | Validate `OpEnvelope[]` from stdin and append to `staging.jsonl` |
-| `apply-queue` | Apply staged envelopes from `staging.jsonl` to `book.json` and edit log |
-| `acquire-lease` | Acquire a chapter-level lease |
-| `release-lease` | Release a chapter-level lease |
-| `acquire-book-lock` | Acquire the book-wide exclusive lock |
-| `release-book-lock` | Release the book-wide exclusive lock |
+| `agent-output begin` | Create an in-progress AgentOutput |
+| `agent-output add-patch` | Append a BookPatch from a JSON file |
+| `agent-output add-command` | Append a PatchCommand from a JSON file |
+| `agent-output add-memory-patch` | Append a MemoryPatch from a JSON file |
+| `agent-output validate` | Validate an AgentOutput without mutation |
+| `agent-output submit` | Dry-run, stage, or apply an AgentOutput |
 | `run-script` | Allocate or execute scratch scripts in `edit_state/scratch/` |
 | `compact` | Compact the accepted edit log into an archive snapshot |
 | `snapshot` | Copy current `edit_state/` into `snapshots/<tag>/` |
-| `render-prompt` | Render a subagent prompt with current `op_log_version` and memory |
+| `render-prompt` | Render a subagent prompt with current memory and patch workflow instructions |
 | `render-page` | Render a page from `source/source.pdf` to JPEG; **no LLM/VLM calls** |
 | `vlm-page` | Re-analyze a selected page via VLM; writes to `edit_state/audit/vlm_pages/`; never mutates `book.json` |
 
@@ -123,8 +116,9 @@ Example usage:
 ```bash
 epubforge --config config.example.toml editor init work/mybook
 epubforge --config config.example.toml editor doctor work/mybook
-epubforge --config config.example.toml editor propose-op work/mybook < ops.json
-epubforge --config config.example.toml editor apply-queue work/mybook
+epubforge --config config.example.toml editor agent-output begin work/mybook --kind fixer --agent fixer-1 --chapter <chapter_uid>
+epubforge --config config.example.toml editor agent-output add-patch work/mybook <output_id> --patch-file patch.json
+epubforge --config config.example.toml editor agent-output submit work/mybook <output_id> --apply
 
 # Render page 5 of source PDF (no VLM):
 epubforge --config config.example.toml editor render-page work/mybook --page 5
@@ -163,13 +157,13 @@ When `stage3.skipped_vlm == true`, blocks have `Provenance.source="docling"` and
 skip-VLM does not decide: chapter boundaries, footnote pairing, cross-page continuations,
 caption attribution, list hierarchy, or cross-page table merges.
 
-Agent ops for semantic repair (must be under chapter lease):
+Agent repair primitives for semantic repair:
 
-| Op | Purpose |
+| Primitive | Purpose |
 |----|---------|
-| `replace_block` | Replace block content, role, or type |
-| `set_paragraph_cross_page` | Mark or unmark a paragraph as cross-page continuation |
-| `set_table_metadata` | Repair table title, caption, and cross-page merge metadata |
+| `BookPatch.replace_node` | Replace block content, role, or type |
+| `BookPatch.set_field` | Mark paragraph cross-page state; repair table title/caption/metadata fields |
+| `PatchCommand` macros | Perform topology changes such as split/merge/relocate safely |
 
 `vlm-page` can be used to gather VLM evidence for specific pages before issuing repair ops.
 `render-page` can be used to inspect a page visually without consuming VLM tokens.
@@ -191,7 +185,7 @@ Audit detectors are in `src/epubforge/audit/`. Each returns an `AuditBundle`.
 
 Core classes are in `src/epubforge/ir/semantic.py` (and `ir/book_memory.py`):
 
-- `Book` — root; holds `op_log_version`, `title`, `authors`, `chapters`
+- `Book` — root; holds `title`, `authors`, `chapters`, extraction metadata, and editor init metadata
 - `Chapter` — holds `blocks: list[Block]`
 - `Block` — discriminated union: `Paragraph | Heading | Footnote | Figure | Table | Equation`
 - `Heading` — heading block with `level` and `text`
@@ -229,7 +223,7 @@ mirrors the Python model structure exactly.
 |----------|-------------|---------|
 | `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
 | `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
-| `EditorSettings` | `[editor]` | Lease TTLs, compact threshold, max loops |
+| `EditorSettings` | `[editor]` | Compact threshold, max loops |
 | `ExtractSettings` | `[extract]` | VLM DPI, skip-VLM toggle, VLM batch size, book memory toggle |
 
 Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
@@ -270,8 +264,6 @@ EPUBFORGE_RUNTIME_LOG_LEVEL     runtime.log_level
 
 **`[editor]` submodel:**
 ```
-EPUBFORGE_EDITOR_LEASE_TTL_SECONDS          editor.lease_ttl_seconds
-EPUBFORGE_EDITOR_BOOK_EXCLUSIVE_TTL_SECONDS editor.book_exclusive_ttl_seconds
 EPUBFORGE_EDITOR_COMPACT_THRESHOLD          editor.compact_threshold
 EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 ```

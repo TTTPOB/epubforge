@@ -276,7 +276,11 @@ class TestManifestRoundtrip:
 
         # Tamper with the manifest file.
         manifest_file = (
-            tmp_path / "03_extract" / "artifacts" / manifest.artifact_id / "manifest.json"
+            tmp_path
+            / "03_extract"
+            / "artifacts"
+            / manifest.artifact_id
+            / "manifest.json"
         )
         manifest_file.write_text('{"tampered": true}', encoding="utf-8")
 
@@ -400,7 +404,9 @@ class TestValidateStage3Artifact:
 
 
 class TestActivationAtomicity:
-    def test_previous_pointer_preserved_when_not_activated(self, tmp_path: Path) -> None:
+    def test_previous_pointer_preserved_when_not_activated(
+        self, tmp_path: Path
+    ) -> None:
         """If a new manifest is written but activate_manifest_atomic is never
         called (simulating extraction failure), the old active pointer must be
         unchanged."""

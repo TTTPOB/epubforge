@@ -93,7 +93,9 @@ def _persist_source_pdf(pdf_path: Path, work: Path) -> tuple[Path, dict[str, obj
         "size_bytes": source_pdf.stat().st_size,
         "copied_at": datetime.now(timezone.utc).isoformat(),
     }
-    source_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    source_meta.write_text(
+        json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     log.info(
         "parse source: original=%s target=%s sha256=%s size_bytes=%s method=%s",
         original,
@@ -142,7 +144,9 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     source_pdf, _source_meta = _persist_source_pdf(pdf_path, work)
     log.info("Stage 1: parsing %s...", pdf_path.name)
     with stage_timer(log, "1 parse"):
-        parse_pdf(source_pdf, out, images_dir=work / "images", ocr_settings=cfg.extract.ocr)
+        parse_pdf(
+            source_pdf, out, images_dir=work / "images", ocr_settings=cfg.extract.ocr
+        )
     log.info("  -> %s", out)
 
 
@@ -283,7 +287,8 @@ def run_extract(
                 return
             except Exception as exc:
                 log.warning(
-                    "Stage 3: active artifact validation failed (%s), will re-extract", exc
+                    "Stage 3: active artifact validation failed (%s), will re-extract",
+                    exc,
                 )
 
     # Handle reuse_only mode: fail if we can't reuse
@@ -422,6 +427,7 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 
     # 4. Write Book.extraction metadata
     from pathlib import PurePosixPath as _PurePosix
+
     manifest_path_abs = work / _PurePosix(pointer.manifest_path)
     book.extraction = ExtractionMetadata(
         stage3_mode=manifest.mode,
@@ -436,6 +442,7 @@ def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 
     out.write_text(book.model_dump_json(indent=2), encoding="utf-8")
     log.info("  -> %s", out)
+
 
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     from epubforge.epub_builder import build_epub, resolve_build_source

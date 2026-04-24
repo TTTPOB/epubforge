@@ -65,11 +65,13 @@ def _apply_cache_control(
             continue
         content = msg.get("content", "")
         if isinstance(content, str):
-            blocks: list[dict[str, Any]] = [{
-                "type": "text",
-                "text": content,
-                "cache_control": {"type": "ephemeral"},
-            }]
+            blocks: list[dict[str, Any]] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         elif isinstance(content, list) and content:
             blocks = [dict(b) for b in content]
             for b in reversed(blocks):
@@ -140,7 +142,9 @@ class LLMClient:
         extra_body: dict[str, Any] | None = None,
     ) -> T:
         merged_extra = _deep_merge(self.extra_body, extra_body or {})
-        cache_key = self._cache_key(messages, response_format, temperature, merged_extra)
+        cache_key = self._cache_key(
+            messages, response_format, temperature, merged_extra
+        )
         cache_path = self._cache_path(cache_key)
         req_id = cache_key[:8]
         chars = _count_chars(messages)
@@ -148,8 +152,13 @@ class LLMClient:
 
         log.info(
             "%s req=%s model=%s fmt=%s msgs=%d chars=%d images=%d",
-            self._kind, req_id, self.model, response_format.__name__,
-            len(messages), chars, images,
+            self._kind,
+            req_id,
+            self.model,
+            response_format.__name__,
+            len(messages),
+            chars,
+            images,
         )
 
         if cache_path.exists():
@@ -160,13 +169,20 @@ class LLMClient:
 
         t0 = time.perf_counter()
         sdk_messages = _apply_cache_control(messages, enabled=self.prompt_caching)
-        result = self._call_parsed(sdk_messages, response_format, temperature, merged_extra, req_id=req_id)
+        result = self._call_parsed(
+            sdk_messages, response_format, temperature, merged_extra, req_id=req_id
+        )
         elapsed = time.perf_counter() - t0
 
         log.info(
             "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc cached=%d",
-            self._kind, req_id, elapsed, result.finish_reason,
-            result.prompt_tokens, result.completion_tokens, result.cached_tokens,
+            self._kind,
+            req_id,
+            elapsed,
+            result.finish_reason,
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.cached_tokens,
         )
         get_tracker().record_miss(
             prompt=result.prompt_tokens,
@@ -219,7 +235,8 @@ class LLMClient:
                 log.warning(
                     "req=%s attempt=%d/3 endpoint rejected json_schema response_format (400); "
                     "falling back to json_object mode (no strict schema)",
-                    req_id, attempt + 1,
+                    req_id,
+                    attempt + 1,
                 )
                 return self._call_json_object_fallback(
                     messages, response_format, temperature, merged_extra, req_id=req_id
@@ -234,7 +251,9 @@ class LLMClient:
                 new_budget = min((budget or 8192) * 2, 65536)
                 log.warning(
                     "req=%s attempt=%d/3 structured output truncated; retrying with max_tokens=%d",
-                    req_id, attempt + 1, new_budget,
+                    req_id,
+                    attempt + 1,
+                    new_budget,
                 )
                 budget = new_budget
                 kwargs["max_tokens"] = new_budget
@@ -249,7 +268,9 @@ class LLMClient:
             prompt_tokens = usage.prompt_tokens if usage else 0
             completion_tokens = usage.completion_tokens if usage else 0
             details = getattr(usage, "prompt_tokens_details", None) if usage else None
-            cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+            cached_tokens = (
+                int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+            )
             return _CallResult(
                 parsed=parsed,
                 prompt_tokens=prompt_tokens,
@@ -301,7 +322,9 @@ class LLMClient:
                 budget = min(budget * 2, 65536)
                 log.warning(
                     "req=%s attempt=%d/3 json_object response truncated; retrying with max_tokens=%d",
-                    req_id, attempt + 1, budget,
+                    req_id,
+                    attempt + 1,
+                    budget,
                 )
                 fallback_kwargs["max_tokens"] = budget
                 continue
@@ -314,8 +337,12 @@ class LLMClient:
                 parsed = response_format.model_validate_json(content)
                 prompt_tokens = usage.prompt_tokens if usage else 0
                 completion_tokens = usage.completion_tokens if usage else 0
-                details = getattr(usage, "prompt_tokens_details", None) if usage else None
-                cached_tokens = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+                details = (
+                    getattr(usage, "prompt_tokens_details", None) if usage else None
+                )
+                cached_tokens = (
+                    int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+                )
                 return _CallResult(
                     parsed=parsed,
                     prompt_tokens=prompt_tokens,
@@ -329,7 +356,9 @@ class LLMClient:
                     log.warning(
                         "req=%s attempt=%d/3 json_object response appears truncated (EOF); "
                         "retrying with max_tokens=%d",
-                        req_id, attempt + 1, budget,
+                        req_id,
+                        attempt + 1,
+                        budget,
                     )
                     fallback_kwargs["max_tokens"] = budget
                     continue

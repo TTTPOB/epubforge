@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,8 +43,6 @@ class RuntimeSettings(BaseModel):
 class EditorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    lease_ttl_seconds: int = 1800
-    book_exclusive_ttl_seconds: int = 300
     compact_threshold: int = 50
     max_loops: int = 50
 
@@ -83,7 +80,9 @@ class Config(BaseSettings):
 
     llm: ProviderSettings = Field(default_factory=ProviderSettings)
     vlm: ProviderSettings = Field(
-        default_factory=lambda: ProviderSettings(model="google/gemini-flash-3", max_tokens=16384)
+        default_factory=lambda: ProviderSettings(
+            model="google/gemini-flash-3", max_tokens=16384
+        )
     )
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     editor: EditorSettings = Field(default_factory=EditorSettings)
@@ -91,12 +90,16 @@ class Config(BaseSettings):
 
     def require_llm(self) -> None:
         if not self.llm.api_key:
-            raise SystemExit("LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)")
+            raise SystemExit(
+                "LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)"
+            )
 
     def require_vlm(self) -> None:
         resolved = self.resolved_vlm()
         if not resolved.api_key:
-            raise SystemExit("VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)")
+            raise SystemExit(
+                "VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)"
+            )
 
     def resolved_vlm(self) -> ProviderSettings:
         """Return effective VLM settings, falling back to LLM for api_key.
@@ -107,7 +110,9 @@ class Config(BaseSettings):
         """
         return ProviderSettings(
             base_url=self.vlm.base_url,
-            api_key=self.vlm.api_key if self.vlm.api_key is not None else self.llm.api_key,
+            api_key=self.vlm.api_key
+            if self.vlm.api_key is not None
+            else self.llm.api_key,
             model=self.vlm.model,
             timeout_seconds=self.vlm.timeout_seconds,
             max_tokens=self.vlm.max_tokens,
@@ -134,32 +139,40 @@ def _bool_env(v: str) -> bool:
 
 _ENV_MAP: list[tuple[str, str, str, Any]] = [
     # (env_name, section, field, cast)
-    ("EPUBFORGE_LLM_BASE_URL",                          "llm",     "base_url",                  str),
-    ("EPUBFORGE_LLM_API_KEY",                           "llm",     "api_key",                   str),
-    ("EPUBFORGE_LLM_MODEL",                             "llm",     "model",                     str),
-    ("EPUBFORGE_LLM_TIMEOUT",                           "llm",     "timeout_seconds",            float),
-    ("EPUBFORGE_LLM_MAX_TOKENS",                        "llm",     "max_tokens",                lambda v: None if v == "" else int(v)),
-    ("EPUBFORGE_LLM_PROMPT_CACHING",                    "llm",     "prompt_caching",            _bool_env),
-    ("EPUBFORGE_VLM_BASE_URL",                          "vlm",     "base_url",                  str),
-    ("EPUBFORGE_VLM_API_KEY",                           "vlm",     "api_key",                   str),
-    ("EPUBFORGE_VLM_MODEL",                             "vlm",     "model",                     str),
-    ("EPUBFORGE_VLM_TIMEOUT",                           "vlm",     "timeout_seconds",            float),
-    ("EPUBFORGE_VLM_MAX_TOKENS",                        "vlm",     "max_tokens",                lambda v: None if v == "" else int(v)),
-    ("EPUBFORGE_VLM_PROMPT_CACHING",                    "vlm",     "prompt_caching",            _bool_env),
-    ("EPUBFORGE_RUNTIME_CONCURRENCY",                   "runtime", "concurrency",               int),
-    ("EPUBFORGE_RUNTIME_CACHE_DIR",                     "runtime", "cache_dir",                 Path),
-    ("EPUBFORGE_RUNTIME_WORK_DIR",                      "runtime", "work_dir",                  Path),
-    ("EPUBFORGE_RUNTIME_OUT_DIR",                       "runtime", "out_dir",                   Path),
-    ("EPUBFORGE_RUNTIME_LOG_LEVEL",                     "runtime", "log_level",                 str),
-    ("EPUBFORGE_EDITOR_LEASE_TTL_SECONDS",              "editor",  "lease_ttl_seconds",         int),
-    ("EPUBFORGE_EDITOR_BOOK_EXCLUSIVE_TTL_SECONDS",     "editor",  "book_exclusive_ttl_seconds", int),
-    ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD",              "editor",  "compact_threshold",         int),
-    ("EPUBFORGE_EDITOR_MAX_LOOPS",                      "editor",  "max_loops",                 int),
-    ("EPUBFORGE_EXTRACT_VLM_DPI",                       "extract", "vlm_dpi",                   int),
-    ("EPUBFORGE_EXTRACT_SKIP_VLM",                      "extract", "skip_vlm",                  _bool_env),
-    ("EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES",           "extract", "max_vlm_batch_pages",       int),
-    ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),
-    ("EPUBFORGE_EXTRACT_OCR_ENABLED",                   "extract.ocr", "enabled",              _bool_env),
+    ("EPUBFORGE_LLM_BASE_URL", "llm", "base_url", str),
+    ("EPUBFORGE_LLM_API_KEY", "llm", "api_key", str),
+    ("EPUBFORGE_LLM_MODEL", "llm", "model", str),
+    ("EPUBFORGE_LLM_TIMEOUT", "llm", "timeout_seconds", float),
+    (
+        "EPUBFORGE_LLM_MAX_TOKENS",
+        "llm",
+        "max_tokens",
+        lambda v: None if v == "" else int(v),
+    ),
+    ("EPUBFORGE_LLM_PROMPT_CACHING", "llm", "prompt_caching", _bool_env),
+    ("EPUBFORGE_VLM_BASE_URL", "vlm", "base_url", str),
+    ("EPUBFORGE_VLM_API_KEY", "vlm", "api_key", str),
+    ("EPUBFORGE_VLM_MODEL", "vlm", "model", str),
+    ("EPUBFORGE_VLM_TIMEOUT", "vlm", "timeout_seconds", float),
+    (
+        "EPUBFORGE_VLM_MAX_TOKENS",
+        "vlm",
+        "max_tokens",
+        lambda v: None if v == "" else int(v),
+    ),
+    ("EPUBFORGE_VLM_PROMPT_CACHING", "vlm", "prompt_caching", _bool_env),
+    ("EPUBFORGE_RUNTIME_CONCURRENCY", "runtime", "concurrency", int),
+    ("EPUBFORGE_RUNTIME_CACHE_DIR", "runtime", "cache_dir", Path),
+    ("EPUBFORGE_RUNTIME_WORK_DIR", "runtime", "work_dir", Path),
+    ("EPUBFORGE_RUNTIME_OUT_DIR", "runtime", "out_dir", Path),
+    ("EPUBFORGE_RUNTIME_LOG_LEVEL", "runtime", "log_level", str),
+    ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
+    ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
+    ("EPUBFORGE_EXTRACT_VLM_DPI", "extract", "vlm_dpi", int),
+    ("EPUBFORGE_EXTRACT_SKIP_VLM", "extract", "skip_vlm", _bool_env),
+    ("EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES", "extract", "max_vlm_batch_pages", int),
+    ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
+    ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
 ]
 
 _SECTION_MODELS = {

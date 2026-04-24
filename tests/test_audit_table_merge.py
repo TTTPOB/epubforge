@@ -35,6 +35,7 @@ def _book_with_table(table: Table) -> Book:
 # test_detect_width_drift
 # ---------------------------------------------------------------------------
 
+
 def test_detect_width_drift(prov) -> None:
     # Segment 0 has 3 columns, segment 1 has 5 columns — drift = 66%, above 25% threshold.
     html = (
@@ -79,6 +80,7 @@ def test_no_width_drift_when_columns_match(prov) -> None:
 # test_detect_header_reintroduced
 # ---------------------------------------------------------------------------
 
+
 def test_detect_header_reintroduced(prov) -> None:
     # Two <thead> blocks in merged result — assembler failed to strip the continuation header.
     html = (
@@ -120,6 +122,7 @@ def test_no_header_reintroduced_with_single_thead(prov) -> None:
 # test_detect_orphan_continuation
 # ---------------------------------------------------------------------------
 
+
 def test_detect_orphan_continuation(prov) -> None:
     # continuation=True but multi_page=False: assembler found no predecessor table.
     # This is the orphan continuation case — a table block left stranded.
@@ -141,11 +144,7 @@ def test_detect_orphan_continuation(prov) -> None:
 def test_no_orphan_when_continuation_absorbed(prov) -> None:
     # multi_page=True means assembler successfully merged the continuation;
     # no orphan issue should fire.
-    html = (
-        "<table>"
-        "<tbody><tr><td>merged row</td></tr></tbody>"
-        "</table>"
-    )
+    html = "<table><tbody><tr><td>merged row</td></tr></tbody></table>"
     tbl = _table(prov, "tbl-merged", html, 8, multi_page=True, continuation=False)
     book = _book_with_table(tbl)
 
@@ -168,6 +167,7 @@ def test_no_orphan_for_plain_non_continuation_table(prov) -> None:
 # ---------------------------------------------------------------------------
 # test_detect_merge_record_incomplete
 # ---------------------------------------------------------------------------
+
 
 def test_detect_merge_record_incomplete(prov) -> None:
     # multi_page=True but no <tbody> content — merge produced an empty result.

@@ -29,9 +29,7 @@ out_dir     = "out"
 log_level   = "INFO"   # DEBUG | INFO | WARNING
 
 [editor]
-lease_ttl_seconds           = 1800   # chapter lease TTL in seconds
-book_exclusive_ttl_seconds  = 300    # book-wide exclusive lock TTL in seconds
-compact_threshold           = 50     # compact after N accepted ops
+compact_threshold           = 50     # compact after N audit events
 max_loops                   = 50     # max agent loop iterations
 
 [extract]

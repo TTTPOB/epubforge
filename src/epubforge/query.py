@@ -71,7 +71,11 @@ def find_headings(book: Book, *, level: int | None = None) -> list[BlockRef]:
     refs = find_blocks(book, kinds={"heading"})
     if level is None:
         return refs
-    return [ref for ref in refs if isinstance(ref.block, Heading) and ref.block.level == level]
+    return [
+        ref
+        for ref in refs
+        if isinstance(ref.block, Heading) and ref.block.level == level
+    ]
 
 
 def find_footnotes(
@@ -128,5 +132,7 @@ def find_markers(
 
 
 def find_marker_source(book: Book, footnote: Footnote) -> MarkerRef | None:
-    matches = find_markers(book, page=footnote.provenance.page, callout=footnote.callout)
+    matches = find_markers(
+        book, page=footnote.provenance.page, callout=footnote.callout
+    )
     return matches[0] if matches else None

@@ -40,7 +40,9 @@ def iter_block_text_fields(block: Block) -> Iterator[tuple[TextFieldName, str]]:
 
 def set_text_field(block: Block, field: TextFieldName, value: str) -> Block:
     if field not in block_text_fields(block):
-        raise ValueError(f"Field {field!r} is not editable for block kind {block.kind!r}")
+        raise ValueError(
+            f"Field {field!r} is not editable for block kind {block.kind!r}"
+        )
     return block.model_copy(update={field: value})
 
 

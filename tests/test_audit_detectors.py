@@ -10,7 +10,16 @@ from epubforge.audit import (
 )
 from epubforge.editor.doctor import build_doctor_report
 from epubforge.editor.memory import EditMemory, OpenQuestion
-from epubforge.ir.semantic import Block, Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import (
+    Block,
+    Book,
+    Chapter,
+    Footnote,
+    Heading,
+    Paragraph,
+    Provenance,
+    Table,
+)
 from epubforge.markers import make_fn_marker
 
 
@@ -23,7 +32,9 @@ def _para(
     role: str = "body",
     style_class: str | None = None,
 ) -> Paragraph:
-    return Paragraph(uid=uid, text=text, role=role, style_class=style_class, provenance=prov(page))
+    return Paragraph(
+        uid=uid, text=text, role=role, style_class=style_class, provenance=prov(page)
+    )
 
 
 def _heading(
@@ -35,10 +46,23 @@ def _heading(
     heading_id: str | None = None,
     style_class: str | None = None,
 ) -> Heading:
-    return Heading(uid=uid, text=text, id=heading_id, style_class=style_class, provenance=prov(page))
+    return Heading(
+        uid=uid,
+        text=text,
+        id=heading_id,
+        style_class=style_class,
+        provenance=prov(page),
+    )
 
 
-def _table(prov: Callable[..., Provenance], uid: str | None, html: str, page: int, *, table_title: str = "") -> Table:
+def _table(
+    prov: Callable[..., Provenance],
+    uid: str | None,
+    html: str,
+    page: int,
+    *,
+    table_title: str = "",
+) -> Table:
     return Table(uid=uid, html=html, table_title=table_title, provenance=prov(page))
 
 
@@ -51,7 +75,14 @@ def _footnote(
     paired: bool = False,
     orphan: bool = False,
 ) -> Footnote:
-    return Footnote(uid=uid, callout=callout, text=f"note {callout}", paired=paired, orphan=orphan, provenance=prov(page))
+    return Footnote(
+        uid=uid,
+        callout=callout,
+        text=f"note {callout}",
+        paired=paired,
+        orphan=orphan,
+        provenance=prov(page),
+    )
 
 
 def _chapter(uid: str | None, title: str, blocks: list) -> Chapter:
@@ -62,7 +93,9 @@ def _book(chapters: list[Chapter]) -> Book:
     return Book(title="Audit Fixture", chapters=chapters)
 
 
-def _memory(*, scanned: set[str] | None = None, open_question: bool = False) -> EditMemory:
+def _memory(
+    *, scanned: set[str] | None = None, open_question: bool = False
+) -> EditMemory:
     memory = EditMemory.create(
         book_id="book-1",
         updated_at="2026-04-23T08:00:00Z",
@@ -95,7 +128,13 @@ def test_table_detectors_flag_double_tbody_split_row_and_column_mismatch(prov) -
         "<tr><td>1</td><td>2</td></tr>"
         "</tbody></table>"
     )
-    book = _book([_chapter("ch-1", "Tables", [_table(prov, "tbl-1", html, 12, table_title="表1")])])
+    book = _book(
+        [
+            _chapter(
+                "ch-1", "Tables", [_table(prov, "tbl-1", html, 12, table_title="表1")]
+            )
+        ]
+    )
 
     issues = detect_table_issues(book).to_audit_notes()
     codes = {issue.hint.split()[0] for issue in issues}
@@ -105,7 +144,9 @@ def test_table_detectors_flag_double_tbody_split_row_and_column_mismatch(prov) -
     assert "table.column_count_mismatch" in codes
 
 
-def test_footnote_detectors_flag_duplicate_raw_residue_dangling_marker_and_conflicts(prov) -> None:
+def test_footnote_detectors_flag_duplicate_raw_residue_dangling_marker_and_conflicts(
+    prov,
+) -> None:
     marker_1 = make_fn_marker(7, "①")
     marker_2 = make_fn_marker(7, "②")
     book = _book(
@@ -135,7 +176,9 @@ def test_footnote_detectors_flag_duplicate_raw_residue_dangling_marker_and_confl
     assert "footnote.paired_without_marker" in codes
 
 
-def test_structure_and_invariant_detectors_flag_invalid_role_unknown_style_and_uid_problems(prov) -> None:
+def test_structure_and_invariant_detectors_flag_invalid_role_unknown_style_and_uid_problems(
+    prov,
+) -> None:
     book = _book(
         [
             _chapter(
@@ -143,7 +186,9 @@ def test_structure_and_invariant_detectors_flag_invalid_role_unknown_style_and_u
                 "Chapter One",
                 [
                     _para(prov, None, "body", 1, role="mystery_role"),
-                    _heading(prov, "dup-block", "Heading", 1, style_class="unknown-style"),
+                    _heading(
+                        prov, "dup-block", "Heading", 1, style_class="unknown-style"
+                    ),
                 ],
             ),
             _chapter(
@@ -156,8 +201,14 @@ def test_structure_and_invariant_detectors_flag_invalid_role_unknown_style_and_u
         ]
     )
 
-    structure_codes = {issue.hint.split()[0] for issue in detect_structure_issues(book).to_audit_notes()}
-    invariant_codes = {issue.hint.split()[0] for issue in detect_invariant_issues(book).to_audit_notes()}
+    structure_codes = {
+        issue.hint.split()[0]
+        for issue in detect_structure_issues(book).to_audit_notes()
+    }
+    invariant_codes = {
+        issue.hint.split()[0]
+        for issue in detect_invariant_issues(book).to_audit_notes()
+    }
 
     assert "structure.invalid_role" in structure_codes
     assert "structure.unknown_style_class" in structure_codes
@@ -168,11 +219,19 @@ def test_structure_and_invariant_detectors_flag_invalid_role_unknown_style_and_u
 
 def test_doctor_auto_runs_detectors_and_combines_issues_with_core_hints(prov) -> None:
     chapter_one_blocks: list[Block] = [_para(prov, "p-1", "1-2 3-4 5-6", 1)]
-    chapter_one_blocks.extend(_para(prov, f"z-{page}", f"page {page}", page) for page in range(2, 31))
+    chapter_one_blocks.extend(
+        _para(prov, f"z-{page}", f"page {page}", page) for page in range(2, 31)
+    )
 
-    chapter_two_blocks: list[Block] = [_para(prov, "p-2", "1—2 3—4 5—6", 31, role="invalid_role")]
-    chapter_two_blocks.extend(_para(prov, f"p-{page}", f"page {page}", page) for page in range(32, 60))
-    chapter_two_blocks.extend(_footnote(prov, f"fn-{index}", 60, f"*{index}") for index in range(10))
+    chapter_two_blocks: list[Block] = [
+        _para(prov, "p-2", "1—2 3—4 5—6", 31, role="invalid_role")
+    ]
+    chapter_two_blocks.extend(
+        _para(prov, f"p-{page}", f"page {page}", page) for page in range(32, 60)
+    )
+    chapter_two_blocks.extend(
+        _footnote(prov, f"fn-{index}", 60, f"*{index}") for index in range(10)
+    )
 
     book = _book(
         [
@@ -195,16 +254,28 @@ def test_doctor_auto_runs_detectors_and_combines_issues_with_core_hints(prov) ->
 
     assert "structure.invalid_role" in issue_codes
     assert report.readiness.chapters_unscanned == ["ch-2"]
-    assert {"needs_scan", "style_inconsistency", "unusual_density", "open_question"} <= hint_kinds
+    assert {
+        "needs_scan",
+        "style_inconsistency",
+        "unusual_density",
+        "open_question",
+    } <= hint_kinds
 
 
 def test_style_and_density_hints_are_deterministic_for_same_book(prov) -> None:
     chapter_one_blocks: list[Block] = [_para(prov, "p-1", "10-11 12-13 14-15", 1)]
-    chapter_one_blocks.extend(_para(prov, f"a-{page}", f"page {page}", page) for page in range(2, 31))
+    chapter_one_blocks.extend(
+        _para(prov, f"a-{page}", f"page {page}", page) for page in range(2, 31)
+    )
 
     chapter_two_blocks: list[Block] = [_para(prov, "p-2", "10—11 12—13 14—15", 31)]
-    chapter_two_blocks.extend(_para(prov, f"b-{page}", f"page {page}", page) for page in range(32, 60))
-    chapter_two_blocks.extend(_footnote(prov, f"fn-{index}", 60, str(index), paired=False) for index in range(10))
+    chapter_two_blocks.extend(
+        _para(prov, f"b-{page}", f"page {page}", page) for page in range(32, 60)
+    )
+    chapter_two_blocks.extend(
+        _footnote(prov, f"fn-{index}", 60, str(index), paired=False)
+        for index in range(10)
+    )
 
     book = _book(
         [

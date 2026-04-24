@@ -8,7 +8,12 @@ from uuid import uuid4
 
 from pydantic import Field, field_validator, model_validator
 
-from epubforge.editor._validators import StrictModel, require_non_empty, validate_utc_iso_timestamp, validate_uuid4
+from epubforge.editor._validators import (
+    StrictModel,
+    require_non_empty,
+    validate_utc_iso_timestamp,
+    validate_uuid4,
+)
 
 
 CONVENTION_TOPICS: TypeAlias = Literal[
@@ -34,7 +39,9 @@ def _sorted_unique(values: list[str]) -> list[str]:
     return sorted({value for value in values if value.strip()})
 
 
-def canonical_convention_key(scope: Literal["book", "chapter"], chapter_uid: str | None, topic: CONVENTION_TOPICS) -> str:
+def canonical_convention_key(
+    scope: Literal["book", "chapter"], chapter_uid: str | None, topic: CONVENTION_TOPICS
+) -> str:
     normalized_uid = chapter_uid if scope == "chapter" else None
     return f"{scope}:{normalized_uid or '-'}:{topic}"
 
@@ -48,7 +55,9 @@ def pattern_anchor_uids(affected_uids: list[str]) -> tuple[str, ...]:
 
 def canonical_pattern_key(topic: PATTERN_TOPICS, affected_uids: list[str]) -> str:
     anchors = pattern_anchor_uids(affected_uids)
-    digest = hashlib.sha256("\x1f".join((topic, *anchors)).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256("\x1f".join((topic, *anchors)).encode("utf-8")).hexdigest()[
+        :12
+    ]
     return f"{topic}:{digest}"
 
 
@@ -236,7 +245,12 @@ class EditMemory(StrictModel):
             chapter_uid: ChapterStatus(chapter_uid=chapter_uid)
             for chapter_uid in sorted(set(chapter_uids or []))
         }
-        return cls(book_id=book_id, updated_at=updated_at, updated_by=updated_by, chapter_status=statuses)
+        return cls(
+            book_id=book_id,
+            updated_at=updated_at,
+            updated_by=updated_by,
+            chapter_status=statuses,
+        )
 
 
 class MemoryPatch(StrictModel):
@@ -317,15 +331,21 @@ def _convention_fresh_signature(note: ConventionNote) -> tuple[str, float]:
     return (note.value, round(note.confidence, 6))
 
 
-def _pattern_fresh_signature(note: PatternNote) -> tuple[tuple[str, ...], bool, str | None]:
+def _pattern_fresh_signature(
+    note: PatternNote,
+) -> tuple[tuple[str, ...], bool, str | None]:
     return (tuple(note.affected_uids), note.resolved, note.suggested_fix)
 
 
-def _question_signature(question: OpenQuestion) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+def _question_signature(
+    question: OpenQuestion,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     return (question.question, tuple(question.context_uids), tuple(question.options))
 
 
-def _timestamps_order(existing: ConventionNote, incoming: ConventionNote) -> tuple[float, str]:
+def _timestamps_order(
+    existing: ConventionNote, incoming: ConventionNote
+) -> tuple[float, str]:
     return (incoming.confidence - existing.confidence, incoming.contributed_at)
 
 
@@ -337,10 +357,18 @@ def _merge_convention_note(
     recorded_by: str,
     question_id_factory: Callable[[], str],
     open_questions: list[OpenQuestion],
-) -> tuple[ConventionNote | None, MemoryMergeDecision, list[MemoryHistoryEntry], list[OpenQuestion]]:
+) -> tuple[
+    ConventionNote | None,
+    MemoryMergeDecision,
+    list[MemoryHistoryEntry],
+    list[OpenQuestion],
+]:
     history: list[MemoryHistoryEntry] = []
     new_questions: list[OpenQuestion] = []
-    if existing.value != incoming.value and abs(existing.confidence - incoming.confidence) < 0.15:
+    if (
+        existing.value != incoming.value
+        and abs(existing.confidence - incoming.confidence) < 0.15
+    ):
         options = [existing.value, incoming.value]
         conflict = OpenQuestion(
             q_id=question_id_factory(),
@@ -348,11 +376,17 @@ def _merge_convention_note(
                 f"Convention conflict for {existing.topic} in {existing.scope} scope: "
                 f"choose {existing.value!r} or {incoming.value!r}."
             ),
-            context_uids=_sorted_unique(existing.evidence_uids + incoming.evidence_uids),
+            context_uids=_sorted_unique(
+                existing.evidence_uids + incoming.evidence_uids
+            ),
             asked_by=recorded_by,
             options=options,
         )
-        if not any(not question.resolved and _question_signature(question) == _question_signature(conflict) for question in open_questions):
+        if not any(
+            not question.resolved
+            and _question_signature(question) == _question_signature(conflict)
+            for question in open_questions
+        ):
             new_questions.append(conflict)
         history.append(
             _history_entry(
@@ -381,21 +415,36 @@ def _merge_convention_note(
     choose_incoming = False
     if incoming.confidence > existing.confidence:
         choose_incoming = True
-    elif incoming.confidence == existing.confidence and incoming.contributed_at > existing.contributed_at:
+    elif (
+        incoming.confidence == existing.confidence
+        and incoming.contributed_at > existing.contributed_at
+    ):
         choose_incoming = True
 
     winner = incoming if choose_incoming else existing
     loser = existing if choose_incoming else incoming
     merged = winner.model_copy(
         update={
-            "evidence_uids": _sorted_unique(existing.evidence_uids + incoming.evidence_uids),
+            "evidence_uids": _sorted_unique(
+                existing.evidence_uids + incoming.evidence_uids
+            ),
             "supersedes": _sorted_unique(existing.supersedes + incoming.supersedes),
         }
     )
-    if choose_incoming and _convention_fresh_signature(existing) != _convention_fresh_signature(incoming):
-        merged = merged.model_copy(update={"supersedes": _sorted_unique(merged.supersedes + [existing.canonical_key])})
+    if choose_incoming and _convention_fresh_signature(
+        existing
+    ) != _convention_fresh_signature(incoming):
+        merged = merged.model_copy(
+            update={
+                "supersedes": _sorted_unique(
+                    merged.supersedes + [existing.canonical_key]
+                )
+            }
+        )
 
-    history_reason: Literal["replaced", "duplicate"] = "replaced" if choose_incoming else "duplicate"
+    history_reason: Literal["replaced", "duplicate"] = (
+        "replaced" if choose_incoming else "duplicate"
+    )
     history.append(
         _history_entry(
             item_type="convention",
@@ -407,9 +456,13 @@ def _merge_convention_note(
         )
     )
 
-    fresh_change = _convention_fresh_signature(existing) != _convention_fresh_signature(merged)
+    fresh_change = _convention_fresh_signature(existing) != _convention_fresh_signature(
+        merged
+    )
     stored_change = existing.model_dump(mode="json") != merged.model_dump(mode="json")
-    outcome: Literal["revised", "duplicate"] = "revised" if fresh_change else "duplicate"
+    outcome: Literal["revised", "duplicate"] = (
+        "revised" if fresh_change else "duplicate"
+    )
     if not choose_incoming and not stored_change:
         history = []
     return (
@@ -436,13 +489,19 @@ def _merge_pattern_note(
 ) -> tuple[PatternNote, MemoryMergeDecision, list[MemoryHistoryEntry]]:
     merged = existing.model_copy(
         update={
-            "affected_uids": _sorted_unique(existing.affected_uids + incoming.affected_uids),
+            "affected_uids": _sorted_unique(
+                existing.affected_uids + incoming.affected_uids
+            ),
             "suggested_fix": existing.suggested_fix or incoming.suggested_fix,
             "resolved": existing.resolved or incoming.resolved,
-            "contributed_by": incoming.contributed_by if incoming != existing else existing.contributed_by,
+            "contributed_by": incoming.contributed_by
+            if incoming != existing
+            else existing.contributed_by,
         }
     )
-    fresh_change = _pattern_fresh_signature(existing) != _pattern_fresh_signature(merged)
+    fresh_change = _pattern_fresh_signature(existing) != _pattern_fresh_signature(
+        merged
+    )
     stored_change = existing.model_dump(mode="json") != merged.model_dump(mode="json")
     history = []
     if existing.model_dump(mode="json") != incoming.model_dump(mode="json"):
@@ -470,7 +529,9 @@ def _merge_pattern_note(
     )
 
 
-def _merge_chapter_status(existing: ChapterStatus | None, incoming: ChapterStatus) -> tuple[ChapterStatus, MemoryMergeDecision]:
+def _merge_chapter_status(
+    existing: ChapterStatus | None, incoming: ChapterStatus
+) -> tuple[ChapterStatus, MemoryMergeDecision]:
     if existing is None:
         return (
             incoming,
@@ -506,7 +567,9 @@ def _merge_chapter_status(existing: ChapterStatus | None, incoming: ChapterStatu
     )
 
 
-def _merge_open_question(existing: OpenQuestion | None, incoming: OpenQuestion) -> tuple[OpenQuestion | None, MemoryMergeDecision]:
+def _merge_open_question(
+    existing: OpenQuestion | None, incoming: OpenQuestion
+) -> tuple[OpenQuestion | None, MemoryMergeDecision]:
     if existing is None:
         return (
             incoming,
@@ -628,7 +691,9 @@ def merge_edit_memory(
             stored_change_count += 1
 
     for status in patch.chapter_status:
-        merged, decision = _merge_chapter_status(next_memory.chapter_status.get(status.chapter_uid), status)
+        merged, decision = _merge_chapter_status(
+            next_memory.chapter_status.get(status.chapter_uid), status
+        )
         if decision.stored_change:
             next_memory.chapter_status[status.chapter_uid] = merged
         decisions.append(decision)
@@ -644,13 +709,17 @@ def merge_edit_memory(
             stored_change_count += 1
 
     for question in patch.open_questions:
-        existing = next((item for item in next_memory.open_questions if item.q_id == question.q_id), None)
+        existing = next(
+            (item for item in next_memory.open_questions if item.q_id == question.q_id),
+            None,
+        )
         merged, decision = _merge_open_question(existing, question)
         if existing is None and merged is not None:
             next_memory.open_questions.append(merged)
         elif existing is not None and merged is not None and decision.stored_change:
             next_memory.open_questions = [
-                merged if item.q_id == question.q_id else item for item in next_memory.open_questions
+                merged if item.q_id == question.q_id else item
+                for item in next_memory.open_questions
             ]
         decisions.append(decision)
         if decision.fresh_change:

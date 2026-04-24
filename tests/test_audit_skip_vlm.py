@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import pytest
 
 from epubforge.audit.candidates import detect_candidate_issues
 from epubforge.audit.footnotes import detect_footnote_issues
 from epubforge.audit.invariants import detect_invariant_issues, _is_single_draft_chapter
 from epubforge.audit.table_merge import detect_table_merge_issues
-from epubforge.editor.doctor import Hint, build_doctor_report
+from epubforge.editor.doctor import build_doctor_report
 from epubforge.editor.memory import EditMemory
 from epubforge.ir.semantic import (
     Book,
@@ -75,7 +74,12 @@ def _chapter(uid: str, title: str, blocks: list) -> Chapter:
     return Chapter(uid=uid, title=title, blocks=blocks)
 
 
-def _book(chapters: list[Chapter], *, stage3_mode: str = "unknown", complex_pages: list[int] | None = None) -> Book:
+def _book(
+    chapters: list[Chapter],
+    *,
+    stage3_mode: str = "unknown",
+    complex_pages: list[int] | None = None,
+) -> Book:
     extraction = ExtractionMetadata(
         stage3_mode=stage3_mode,  # type: ignore[arg-type]
         complex_pages=complex_pages or [],
@@ -83,7 +87,9 @@ def _book(chapters: list[Chapter], *, stage3_mode: str = "unknown", complex_page
     return Book(title="Test Book", chapters=chapters, extraction=extraction)
 
 
-def _memory(chapter_uids: list[str] | None = None, *, scanned: set[str] | None = None) -> EditMemory:
+def _memory(
+    chapter_uids: list[str] | None = None, *, scanned: set[str] | None = None
+) -> EditMemory:
     uids = chapter_uids or ["ch-1"]
     memory = EditMemory.create(
         book_id="book-skip-vlm",
@@ -106,7 +112,9 @@ def _memory(chapter_uids: list[str] | None = None, *, scanned: set[str] | None =
 
 def test_detect_candidate_issues_finds_candidate_roles(prov) -> None:
     blocks = [
-        _para(prov, "p-cand1", "Section title draft", 1, role="docling_heading_candidate"),
+        _para(
+            prov, "p-cand1", "Section title draft", 1, role="docling_heading_candidate"
+        ),
         _para(prov, "p-cand2", "Footnote draft", 1, role="docling_footnote_candidate"),
         _para(prov, "p-cand3", "Caption draft", 2, role="docling_caption_candidate"),
     ]
@@ -133,7 +141,10 @@ def test_detect_candidate_issues_all_candidate_role_variants(prov) -> None:
         "docling_checkbox_candidate",
         "docling_unknown_candidate",
     ]
-    blocks = [_para(prov, f"uid-{i}", "text", 1, role=role) for i, role in enumerate(candidate_roles)]
+    blocks = [
+        _para(prov, f"uid-{i}", "text", 1, role=role)
+        for i, role in enumerate(candidate_roles)
+    ]
     book = _book([_chapter("ch-1", "Chapter", blocks)])
     bundle = detect_candidate_issues(book)
 
@@ -218,8 +229,10 @@ def test_skip_vlm_complex_page_gets_needs_scan_hint(prov) -> None:
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
 
     skip_vlm_scan_hints = [
-        h for h in report.hints
-        if h.kind == "needs_scan" and h.chapter_uid == "ch-1"
+        h
+        for h in report.hints
+        if h.kind == "needs_scan"
+        and h.chapter_uid == "ch-1"
         and h.suggested_subagent_type == "scanner"
     ]
     assert len(skip_vlm_scan_hints) >= 1
@@ -326,7 +339,8 @@ def test_table_merge_detector_no_inference_on_plain_table(prov) -> None:
     book = _book([_chapter("ch-1", "Chapter", [tbl])])
     bundle = detect_table_merge_issues(book)
     merge_codes = [
-        issue.code for issue in bundle.issues
+        issue.code
+        for issue in bundle.issues
         if issue.code.startswith("table.merge_record")
         or issue.code == "table.merge_multi_page_and_continuation"
     ]
@@ -354,10 +368,12 @@ def test_single_draft_extraction_chapter_not_flagged(prov) -> None:
 def test_is_single_draft_chapter_helper(prov) -> None:
     blocks = [_para(prov, "p-1", "draft body", 1)]
     book_single = _book([_chapter("ch-1", "Draft extraction", blocks)])
-    book_multi = _book([
-        _chapter("ch-1", "Draft extraction", blocks),
-        _chapter("ch-2", "Chapter Two", blocks),
-    ])
+    book_multi = _book(
+        [
+            _chapter("ch-1", "Draft extraction", blocks),
+            _chapter("ch-2", "Chapter Two", blocks),
+        ]
+    )
     book_other_title = _book([_chapter("ch-1", "Chapter One", blocks)])
 
     assert _is_single_draft_chapter(book_single) is True

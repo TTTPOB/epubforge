@@ -8,21 +8,23 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-log = logging.getLogger(__name__)
-
 from docling_core.types.doc import (
     DocItemLabel,
     DoclingDocument,
 )
 
-_COMPLEX_LABELS: frozenset[DocItemLabel] = frozenset({
-    DocItemLabel.TABLE,
-    DocItemLabel.PICTURE,
-    DocItemLabel.FOOTNOTE,
-    DocItemLabel.FORMULA,
-    DocItemLabel.CODE,
-    DocItemLabel.CHART,
-})
+log = logging.getLogger(__name__)
+
+_COMPLEX_LABELS: frozenset[DocItemLabel] = frozenset(
+    {
+        DocItemLabel.TABLE,
+        DocItemLabel.PICTURE,
+        DocItemLabel.FOOTNOTE,
+        DocItemLabel.FORMULA,
+        DocItemLabel.CODE,
+        DocItemLabel.CHART,
+    }
+)
 
 _TOC_LABELS: frozenset[DocItemLabel] = frozenset({DocItemLabel.DOCUMENT_INDEX})
 
@@ -97,7 +99,10 @@ def classify_pages(raw_path: Path, out_path: Path) -> None:
     n_toc = sum(1 for p in pages_out if p["kind"] == "toc")
     log.info(
         "classify: simple=%d complex=%d toc=%d total=%d",
-        n_simple, n_complex, n_toc, len(pages_out),
+        n_simple,
+        n_complex,
+        n_toc,
+        len(pages_out),
     )
 
 
@@ -106,7 +111,7 @@ def _is_multicolumn(bboxes: list[tuple[float, float]], page_width: float) -> boo
     if len(bboxes) < 6:
         return False
 
-    x_mids = sorted((l + r) / 2 for l, r in bboxes)
+    x_mids = sorted((left + right) / 2 for left, right in bboxes)
     gap_threshold = page_width * _MULTICOLUMN_GAP_RATIO
 
     # Look for a gap in x-midpoints that splits the page into ≥2 columns

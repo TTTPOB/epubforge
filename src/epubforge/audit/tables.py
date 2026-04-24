@@ -43,7 +43,9 @@ def _row_logical_widths(rows: list[str]) -> list[int]:
     active_rowspans: list[int] = []
     for row_html in rows:
         inherited = len(active_rowspans)
-        active_rowspans = [remaining - 1 for remaining in active_rowspans if remaining > 1]
+        active_rowspans = [
+            remaining - 1 for remaining in active_rowspans if remaining > 1
+        ]
         cells = _parse_cells(row_html)
         if not cells and inherited == 0:
             continue

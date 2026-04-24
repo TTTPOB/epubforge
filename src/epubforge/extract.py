@@ -13,7 +13,6 @@ from typing import Any, TypedDict, cast
 import fitz
 from docling_core.types.doc import DocItemLabel, DoclingDocument
 from docling_core.types.doc.base import BoundingBox
-from docling_core.types.doc.document import DocItem
 
 from epubforge.config import Config
 from epubforge.ir.book_memory import BookMemory
@@ -25,10 +24,12 @@ from epubforge.stage3_artifacts import EvidenceIndex, Stage3ExtractionResult
 log = logging.getLogger(__name__)
 
 _HEADER_LABELS = frozenset({DocItemLabel.SECTION_HEADER, DocItemLabel.TITLE})
-_SKIP_LABELS = frozenset({
-    DocItemLabel.PAGE_HEADER,
-    DocItemLabel.PAGE_FOOTER,
-})
+_SKIP_LABELS = frozenset(
+    {
+        DocItemLabel.PAGE_HEADER,
+        DocItemLabel.PAGE_FOOTER,
+    }
+)
 
 
 class _AnchorItem(TypedDict):
@@ -42,7 +43,9 @@ class VLMGroupUnit:
     kind: str = "vlm_batch"
     contract_version: int = 3
     pages: list[int] = field(default_factory=list)
-    page_kinds: list[str] = field(default_factory=list)  # "simple" or "complex" per page
+    page_kinds: list[str] = field(
+        default_factory=list
+    )  # "simple" or "complex" per page
 
 
 Unit = VLMGroupUnit
@@ -116,19 +119,27 @@ def extract(
                     all_audit_notes.extend(data["audit_notes"])
                 log.info(
                     "extract unit %d/%d pages=%s reused=Y",
-                    idx + 1, len(units), unit.pages,
+                    idx + 1,
+                    len(units),
+                    unit.pages,
                 )
                 continue
 
             log.info(
                 "extract unit %d/%d pages=%s reused=N",
-                idx + 1, len(units), unit.pages,
+                idx + 1,
+                len(units),
+                unit.pages,
             )
 
             memory_arg = book_memory if cfg.extract.enable_book_memory else None
             blocks, unit_audit_notes, new_memory = _process_vlm_unit(
-                unit, fitz_doc, anchors,
-                vlm_client, memory_arg, cfg.extract.vlm_dpi,
+                unit,
+                fitz_doc,
+                anchors,
+                vlm_client,
+                memory_arg,
+                cfg.extract.vlm_dpi,
             )
 
             if cfg.extract.enable_book_memory and new_memory is not None:
@@ -240,7 +251,9 @@ def _process_vlm_unit(
         page_text = f"=== Page {pno} ===\nDetected text anchors:\n{anchor_text}"
         content.append({"type": "text", "text": page_text})
         img_b64, mime = _render_page(fitz_doc, pno, dpi)
-        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}}
+        )
 
     if len(unit.pages) > 1:
         pages_str = ", ".join(str(p) for p in unit.pages)
@@ -263,10 +276,13 @@ def _process_vlm_unit(
         )
     content.append({"type": "text", "text": final_instruction})
 
-    messages: list[Message] = cast(list[Message], [
-        {"role": "system", "content": VLM_SYSTEM},
-        {"role": "user", "content": content},
-    ])
+    messages: list[Message] = cast(
+        list[Message],
+        [
+            {"role": "system", "content": VLM_SYSTEM},
+            {"role": "user", "content": content},
+        ],
+    )
 
     try:
         result = client.chat_parsed(messages, response_format=VLMGroupOutput)
@@ -280,7 +296,9 @@ def _process_vlm_unit(
     if len(result.pages) < len(unit.pages):
         log.warning(
             "VLM returned %d pages for %d-page unit %s",
-            len(result.pages), len(unit.pages), unit.pages,
+            len(result.pages),
+            len(unit.pages),
+            unit.pages,
         )
 
     blocks: list[dict[str, Any]] = []
@@ -316,11 +334,14 @@ def _write_unit(
         "blocks": blocks,
         "audit_notes": audit_notes or [],
     }
-    out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _build_anchors(doc: DoclingDocument) -> dict[int, list[_AnchorItem]]:
     import itertools
+
     anchors: dict[int, list[_AnchorItem]] = {}
     for item in itertools.chain(
         doc.texts, doc.tables, doc.pictures, doc.key_value_items, doc.form_items
@@ -328,11 +349,13 @@ def _build_anchors(doc: DoclingDocument) -> dict[int, list[_AnchorItem]]:
         text = getattr(item, "text", "")
         for prov in item.prov:
             pno = prov.page_no
-            anchors.setdefault(pno, []).append({
-                "label": item.label,
-                "text": text,
-                "bbox": prov.bbox,
-            })
+            anchors.setdefault(pno, []).append(
+                {
+                    "label": item.label,
+                    "text": text,
+                    "bbox": prov.bbox,
+                }
+            )
     return anchors
 
 
@@ -346,7 +369,9 @@ def _format_anchors(items: list[_AnchorItem]) -> str:
             coord = f"({bbox.l:.0f},{bbox.t:.0f},{bbox.r:.0f},{bbox.b:.0f})"
         else:
             coord = "(?,?,?,?)"
-        label_str = it["label"].value if isinstance(it["label"], DocItemLabel) else it["label"]
+        label_str = (
+            it["label"].value if isinstance(it["label"], DocItemLabel) else it["label"]
+        )
         lines.append(f"  [{label_str}] {it['text']!r} @{coord}")
     return "\n".join(lines) if lines else "(none)"
 

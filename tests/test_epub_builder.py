@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -33,7 +32,9 @@ def _figure(
     caption: str = "",
     image_ref: str | None = None,
 ) -> Figure:
-    return Figure(caption=caption, image_ref=image_ref, provenance=prov(page, source="vlm"))
+    return Figure(
+        caption=caption, image_ref=image_ref, provenance=prov(page, source="vlm")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +96,19 @@ def test_build_epub_includes_images(prov, tmp_path: Path) -> None:
 
 def test_render_chapter_footnotes_numbered(prov) -> None:
     """Footnotes are numbered 1, 2, 3 per chapter regardless of original callout."""
-    fn1 = Footnote(callout="①", text="Note 1", paired=True, provenance=prov(1, source="llm"))
-    fn2 = Footnote(callout="*", text="Note 2", paired=True, provenance=prov(2, source="llm"))
-    fn3 = Footnote(callout="②", text="Note 3", paired=True, provenance=prov(3, source="llm"))
+    fn1 = Footnote(
+        callout="①", text="Note 1", paired=True, provenance=prov(1, source="llm")
+    )
+    fn2 = Footnote(
+        callout="*", text="Note 2", paired=True, provenance=prov(2, source="llm")
+    )
+    fn3 = Footnote(
+        callout="②", text="Note 3", paired=True, provenance=prov(3, source="llm")
+    )
 
-    p1 = Paragraph(text=f"Text \x02fn-1-①\x03 more", provenance=prov(1, source="llm"))
-    p2 = Paragraph(text=f"Text \x02fn-2-*\x03 more", provenance=prov(2, source="llm"))
-    p3 = Paragraph(text=f"Text \x02fn-3-②\x03 more", provenance=prov(3, source="llm"))
+    p1 = Paragraph(text="Text \x02fn-1-①\x03 more", provenance=prov(1, source="llm"))
+    p2 = Paragraph(text="Text \x02fn-2-*\x03 more", provenance=prov(2, source="llm"))
+    p3 = Paragraph(text="Text \x02fn-3-②\x03 more", provenance=prov(3, source="llm"))
 
     chapter = Chapter(title="Ch1", blocks=[p1, fn1, p2, fn2, p3, fn3])
     body_html, fn_html = _render_chapter(chapter, "ch1", {})
@@ -198,6 +205,7 @@ def _write_active_pointer(work_dir: Path, manifest_sha256: str) -> None:
     # just write the sha as a comment field is not possible directly, so we
     # instead create the manifest JSON and compute its real sha.
     from epubforge.stage3_artifacts import Stage3Manifest
+
     manifest = Stage3Manifest(
         mode="skip_vlm",
         artifact_id=artifact_id,
@@ -311,7 +319,9 @@ def test_figure_image_ref_works(prov, tmp_path: Path) -> None:
         assert 'src="images/p0003_a.png"' in content
 
 
-def test_figure_missing_image_ref_logs_warning_no_crash(prov, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_figure_missing_image_ref_logs_warning_no_crash(
+    prov, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """Figure with no image_ref logs a warning but does not crash."""
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -327,6 +337,7 @@ def test_figure_missing_image_ref_logs_warning_no_crash(prov, tmp_path: Path, ca
     out_epub = tmp_path / "out.epub"
 
     import logging
+
     with caplog.at_level(logging.WARNING, logger="epubforge.epub_builder"):
         build_epub(semantic, out_epub, images_dir=images_dir)
 
@@ -334,11 +345,15 @@ def test_figure_missing_image_ref_logs_warning_no_crash(prov, tmp_path: Path, ca
     assert any("no image_ref" in r.message for r in caplog.records)
 
     with zipfile.ZipFile(out_epub) as zf:
-        img_entries = [n for n in zf.namelist() if "images/" in n and n.endswith(".png")]
+        img_entries = [
+            n for n in zf.namelist() if "images/" in n and n.endswith(".png")
+        ]
         assert len(img_entries) == 0
 
 
-def test_figure_image_ref_file_missing_logs_warning(prov, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_figure_image_ref_file_missing_logs_warning(
+    prov, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """Figure with image_ref pointing to non-existent file logs warning, no crash."""
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -353,6 +368,7 @@ def test_figure_image_ref_file_missing_logs_warning(prov, tmp_path: Path, caplog
     out_epub = tmp_path / "out.epub"
 
     import logging
+
     with caplog.at_level(logging.WARNING, logger="epubforge.epub_builder"):
         build_epub(semantic, out_epub, images_dir=images_dir)
 
@@ -380,7 +396,9 @@ def test_figure_no_ordinal_fallback(prov, tmp_path: Path) -> None:
 
 def test_table_caption_footnote_renders(prov) -> None:
     """Table.caption with footnote marker is rendered as a linked noteref."""
-    fn = Footnote(callout="1", text="Note text", paired=True, provenance=prov(10, source="llm"))
+    fn = Footnote(
+        callout="1", text="Note text", paired=True, provenance=prov(10, source="llm")
+    )
     table = Table(
         html="<table><tr><td>Data</td></tr></table>",
         table_title="Title",
@@ -405,22 +423,21 @@ def test_borrowed_footnote_scan_table_caption(prov) -> None:
     """Footnote marker in Table.caption is found during cross-chapter pre-scan."""
     # Chapter 0 has the table (with a footnote marker in the caption)
     # Chapter 1 has the actual Footnote block
-    fn = Footnote(callout="x", text="Cross note", paired=True, provenance=prov(20, source="llm"))
+    fn = Footnote(
+        callout="x", text="Cross note", paired=True, provenance=prov(20, source="llm")
+    )
     table = Table(
         html="<table></table>",
         caption="See \x02fn-20-x\x03.",
         provenance=prov(1, source="docling"),
     )
     ch0 = Chapter(title="C0", blocks=[table])
-    ch1 = Chapter(title="C1", blocks=[fn])
-    book = Book(title="T", chapters=[ch0, ch1])
 
-    semantic = prov  # just need a work_dir placeholder — use tmp_path in actual integration
     # Use build_epub indirectly via _render_chapter with manually-constructed fn_map
     # The footnote should be borrowed into ch0 and rendered there
-    fn_key = (20, "x")
-    fn_map = {fn_key: (1, "c0-fn1")}
-    body_html, _ = _render_chapter(ch0, "c0", {}, borrowed_footnotes=[fn], borrowed_keys=None)
+    body_html, _ = _render_chapter(
+        ch0, "c0", {}, borrowed_footnotes=[fn], borrowed_keys=None
+    )
 
     assert "table-caption" in body_html
     assert 'epub:type="noteref"' in body_html
@@ -450,9 +467,21 @@ def test_candidate_role_renders_as_paragraph(prov) -> None:
 def test_candidate_roles_not_converted_to_semantics(prov) -> None:
     """docling_*_candidate blocks remain <p> elements for footnote, list, and table roles."""
     blocks = [
-        Paragraph(text="fn-like", role="docling_footnote_candidate", provenance=prov(1, source="docling")),
-        Paragraph(text="list-like", role="docling_list_candidate", provenance=prov(2, source="docling")),
-        Paragraph(text="table-like", role="docling_table_candidate", provenance=prov(3, source="docling")),
+        Paragraph(
+            text="fn-like",
+            role="docling_footnote_candidate",
+            provenance=prov(1, source="docling"),
+        ),
+        Paragraph(
+            text="list-like",
+            role="docling_list_candidate",
+            provenance=prov(2, source="docling"),
+        ),
+        Paragraph(
+            text="table-like",
+            role="docling_table_candidate",
+            provenance=prov(3, source="docling"),
+        ),
     ]
     chapter = Chapter(title="C", blocks=blocks)
     body_html, fn_html = _render_chapter(chapter, "c", {})

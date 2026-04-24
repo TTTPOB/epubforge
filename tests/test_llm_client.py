@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, cast
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 from openai import BadRequestError
@@ -58,8 +58,11 @@ class TestTruncationRetry:
         ok_result = _DummyOutput(value="done")
         ok_completion = _make_completion(ok_result, finish_reason="stop")
 
-        with patch.object(client._client.chat.completions, "parse",
-                          side_effect=[truncated, ok_completion]) as mock_parse:
+        with patch.object(
+            client._client.chat.completions,
+            "parse",
+            side_effect=[truncated, ok_completion],
+        ) as mock_parse:
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
@@ -75,8 +78,9 @@ class TestTruncationRetry:
         client.max_tokens = 4096
 
         truncated = _make_completion(None, finish_reason="length")
-        with patch.object(client._client.chat.completions, "parse",
-                          return_value=truncated):
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=truncated
+        ):
             with pytest.raises(RuntimeError, match="truncated after 3 attempts"):
                 client._call_parsed(
                     [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
@@ -89,8 +93,9 @@ class TestTruncationRetry:
         truncated = _make_completion(None, finish_reason="length")
         ok = _make_completion(_DummyOutput(value="ok"), finish_reason="stop")
 
-        with patch.object(client._client.chat.completions, "parse",
-                          side_effect=[truncated, ok]):
+        with patch.object(
+            client._client.chat.completions, "parse", side_effect=[truncated, ok]
+        ):
             with caplog.at_level(logging.WARNING, logger="epubforge.llm.client"):
                 client._call_parsed(
                     [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
@@ -103,7 +108,9 @@ class TestJsonObjectFallback:
     def _make_bad_request(self) -> BadRequestError:
         response = MagicMock()
         response.status_code = 400
-        response.json.return_value = {"error": {"message": "response_format not supported"}}
+        response.json.return_value = {
+            "error": {"message": "response_format not supported"}
+        }
         response.text = "response_format not supported"
         response.headers = {}
         response.request = MagicMock()
@@ -125,10 +132,16 @@ class TestJsonObjectFallback:
         fallback_completion.choices = [fallback_choice]
 
         with (
-            patch.object(client._client.chat.completions, "parse",
-                         side_effect=self._make_bad_request()),
-            patch.object(client._client.chat.completions, "create",
-                         return_value=fallback_completion),
+            patch.object(
+                client._client.chat.completions,
+                "parse",
+                side_effect=self._make_bad_request(),
+            ),
+            patch.object(
+                client._client.chat.completions,
+                "create",
+                return_value=fallback_completion,
+            ),
         ):
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
@@ -147,10 +160,16 @@ class TestJsonObjectFallback:
         fallback_completion.choices = [fallback_choice]
 
         with (
-            patch.object(client._client.chat.completions, "parse",
-                         side_effect=self._make_bad_request()),
-            patch.object(client._client.chat.completions, "create",
-                         return_value=fallback_completion),
+            patch.object(
+                client._client.chat.completions,
+                "parse",
+                side_effect=self._make_bad_request(),
+            ),
+            patch.object(
+                client._client.chat.completions,
+                "create",
+                return_value=fallback_completion,
+            ),
             caplog.at_level(logging.WARNING, logger="epubforge.llm.client"),
         ):
             client._call_parsed(
@@ -159,7 +178,9 @@ class TestJsonObjectFallback:
 
         assert any("json_object" in r.message.lower() for r in caplog.records)
 
-    def _make_fallback_completion(self, content: str, finish_reason: str = "stop") -> MagicMock:
+    def _make_fallback_completion(
+        self, content: str, finish_reason: str = "stop"
+    ) -> MagicMock:
         msg = MagicMock()
         msg.content = content
         choice = MagicMock()
@@ -174,14 +195,22 @@ class TestJsonObjectFallback:
         client = _make_client(tmp_path)
         client.max_tokens = 4096
 
-        truncated = self._make_fallback_completion('{"value": "tr', finish_reason="length")
-        ok = self._make_fallback_completion(json.dumps({"value": "ok"}), finish_reason="stop")
+        truncated = self._make_fallback_completion(
+            '{"value": "tr', finish_reason="length"
+        )
+        ok = self._make_fallback_completion(
+            json.dumps({"value": "ok"}), finish_reason="stop"
+        )
 
         with (
-            patch.object(client._client.chat.completions, "parse",
-                         side_effect=self._make_bad_request()),
-            patch.object(client._client.chat.completions, "create",
-                         side_effect=[truncated, ok]),
+            patch.object(
+                client._client.chat.completions,
+                "parse",
+                side_effect=self._make_bad_request(),
+            ),
+            patch.object(
+                client._client.chat.completions, "create", side_effect=[truncated, ok]
+            ),
         ):
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
@@ -198,10 +227,14 @@ class TestJsonObjectFallback:
         ok = self._make_fallback_completion(ok_json, finish_reason="stop")
 
         with (
-            patch.object(client._client.chat.completions, "parse",
-                         side_effect=self._make_bad_request()),
-            patch.object(client._client.chat.completions, "create",
-                         side_effect=[truncated, ok]),
+            patch.object(
+                client._client.chat.completions,
+                "parse",
+                side_effect=self._make_bad_request(),
+            ),
+            patch.object(
+                client._client.chat.completions, "create", side_effect=[truncated, ok]
+            ),
         ):
             result = client._call_parsed(
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
@@ -220,7 +253,9 @@ class TestVlmDefaultMaxTokens:
 
     def test_vlm_max_tokens_respects_explicit_config(self, tmp_path) -> None:
         cfg = Config(
-            vlm=ProviderSettings(base_url="https://example.com/v1", api_key="test-key", max_tokens=8192),
+            vlm=ProviderSettings(
+                base_url="https://example.com/v1", api_key="test-key", max_tokens=8192
+            ),
             runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
         )
         client = LLMClient(cfg, use_vlm=True)
@@ -235,7 +270,9 @@ class TestVlmDefaultMaxTokens:
         assert client.max_tokens is None
 
 
-def _make_usage_with_cached(prompt: int = 100, completion: int = 20, cached: int = 0) -> MagicMock:
+def _make_usage_with_cached(
+    prompt: int = 100, completion: int = 20, cached: int = 0
+) -> MagicMock:
     details = MagicMock()
     details.cached_tokens = cached
     usage = MagicMock()
@@ -252,10 +289,14 @@ class TestCachedTokensExtraction:
 
         client = _make_client(tmp_path)
         completion = _make_completion(_DummyOutput(value="ok"), finish_reason="stop")
-        completion.usage = _make_usage_with_cached(prompt=200, completion=30, cached=1500)
+        completion.usage = _make_usage_with_cached(
+            prompt=200, completion=30, cached=1500
+        )
 
         with (
-            patch.object(client._client.chat.completions, "parse", return_value=completion),
+            patch.object(
+                client._client.chat.completions, "parse", return_value=completion
+            ),
             caplog.at_level(logging.INFO, logger="epubforge.llm.client"),
         ):
             client.chat_parsed(
@@ -279,7 +320,9 @@ class TestCachedTokensExtraction:
         del usage.prompt_tokens_details
         completion.usage = usage
 
-        with patch.object(client._client.chat.completions, "parse", return_value=completion):
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=completion
+        ):
             client.chat_parsed(
                 [{"role": "user", "content": "no-cache-details"}],
                 response_format=_DummyOutput,
@@ -289,10 +332,13 @@ class TestCachedTokensExtraction:
 
 
 def _sys_user_msgs(sys_content: Any) -> list[ChatCompletionMessageParam]:
-    return cast(list[ChatCompletionMessageParam], [
-        {"role": "system", "content": sys_content},
-        {"role": "user", "content": "hi"},
-    ])
+    return cast(
+        list[ChatCompletionMessageParam],
+        [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": "hi"},
+        ],
+    )
 
 
 class TestPromptCaching:
@@ -310,10 +356,12 @@ class TestPromptCaching:
         assert block["cache_control"] == {"type": "ephemeral"}
 
     def test_system_list_attaches_cache_control_to_last_text_block(self) -> None:
-        msgs = _sys_user_msgs([
-            {"type": "text", "text": "First block."},
-            {"type": "text", "text": "Second block."},
-        ])
+        msgs = _sys_user_msgs(
+            [
+                {"type": "text", "text": "First block."},
+                {"type": "text", "text": "Second block."},
+            ]
+        )
         out = _apply_cache_control(msgs, enabled=True)
         sys_msg = next(m for m in out if m["role"] == "system")
         blocks = cast(list[dict[str, Any]], sys_msg["content"])

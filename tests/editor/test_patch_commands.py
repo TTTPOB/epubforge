@@ -17,7 +17,6 @@ from epubforge.editor.patch_commands import (
     PairFootnoteParams,
     PatchCommand,
     PatchCommandError,
-    PatchCommandOp,
     RelocateBlockParams,
     SplitBlockParams,
     SplitChapterParams,
@@ -33,13 +32,22 @@ from epubforge.editor.patch_commands import (
 )
 from epubforge.editor.patches import SetFieldChange, apply_book_patch
 from epubforge.editor.text_split import split_text
-from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import (
+    Book,
+    Chapter,
+    Footnote,
+    Heading,
+    Paragraph,
+    Provenance,
+    Table,
+)
 from epubforge.markers import make_fn_marker
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _cid() -> str:
     return str(uuid4())
@@ -458,12 +466,14 @@ class TestWrongParamTypes:
     def test_split_block_max_splits_as_string(self):
         # Pydantic may coerce or reject; with StrictModel's int field, string should fail
         with pytest.raises(ValidationError):
-            SplitBlockParams.model_validate({
-                "block_uid": "blk-001",
-                "strategy": "at_sentence",
-                "max_splits": "one",  # should be int
-                "new_block_uids": ["b2"],
-            })
+            SplitBlockParams.model_validate(
+                {
+                    "block_uid": "blk-001",
+                    "strategy": "at_sentence",
+                    "max_splits": "one",  # should be int
+                    "new_block_uids": ["b2"],
+                }
+            )
 
     def test_merge_blocks_join_invalid_value(self):
         with pytest.raises(ValidationError):
@@ -712,7 +722,13 @@ class TestJsonShapePreserved:
         assert dumped["params"]["block_uid"] == "blk-001"
         assert dumped["params"]["strategy"] == "at_sentence"
         # No extra top-level keys
-        assert set(dumped.keys()) == {"command_id", "op", "agent_id", "rationale", "params"}
+        assert set(dumped.keys()) == {
+            "command_id",
+            "op",
+            "agent_id",
+            "rationale",
+            "params",
+        }
 
     def test_json_key_order_shape(self):
         """Verify exact top-level keys match the Phase 2 shape."""
@@ -724,7 +740,13 @@ class TestJsonShapePreserved:
             params=_PAIR_FOOTNOTE_PARAMS,
         )
         dumped = json.loads(cmd.model_dump_json())
-        assert list(dumped.keys()) == ["command_id", "op", "agent_id", "rationale", "params"]
+        assert list(dumped.keys()) == [
+            "command_id",
+            "op",
+            "agent_id",
+            "rationale",
+            "params",
+        ]
 
     def test_model_validate_from_json(self):
         """model_validate on round-tripped dict works."""
@@ -782,12 +804,14 @@ class TestEdgeCases:
     def test_split_block_max_splits_zero_rejected(self):
         """max_splits < 1 is invalid."""
         with pytest.raises(ValidationError):
-            SplitBlockParams.model_validate({
-                "block_uid": "blk-001",
-                "strategy": "at_sentence",
-                "max_splits": 0,
-                "new_block_uids": [],
-            })
+            SplitBlockParams.model_validate(
+                {
+                    "block_uid": "blk-001",
+                    "strategy": "at_sentence",
+                    "max_splits": 0,
+                    "new_block_uids": [],
+                }
+            )
 
     def test_merge_blocks_single_uid_rejected(self):
         """block_uids with fewer than 2 items must fail."""
@@ -845,12 +869,14 @@ class TestEdgeCases:
     def test_split_merged_table_only_one_segment_rejected(self):
         """segment_html must contain at least 2 items."""
         with pytest.raises(ValidationError):
-            SplitMergedTableParams.model_validate({
-                "block_uid": "blk-tbl",
-                "segment_html": ["<t>A</t>"],
-                "segment_pages": [1],
-                "new_block_uids": ["b1"],
-            })
+            SplitMergedTableParams.model_validate(
+                {
+                    "block_uid": "blk-tbl",
+                    "segment_html": ["<t>A</t>"],
+                    "segment_pages": [1],
+                    "new_block_uids": ["b1"],
+                }
+            )
 
     def test_merge_chapters_source_chapter_uids_single_rejected(self):
         """source_chapter_uids must have at least 2 items."""
@@ -1062,16 +1088,36 @@ def _make_test_book() -> Book:
                 uid="ch-1",
                 title="Chapter 1",
                 blocks=[
-                    Paragraph(uid="p1", text="Hello world. This is a test.", role="body", provenance=_prov()),
-                    Paragraph(uid="p2", text="Second paragraph.", role="body", provenance=_prov()),
-                    Paragraph(uid="p3", text="Third paragraph.", role="body", provenance=_prov()),
+                    Paragraph(
+                        uid="p1",
+                        text="Hello world. This is a test.",
+                        role="body",
+                        provenance=_prov(),
+                    ),
+                    Paragraph(
+                        uid="p2",
+                        text="Second paragraph.",
+                        role="body",
+                        provenance=_prov(),
+                    ),
+                    Paragraph(
+                        uid="p3",
+                        text="Third paragraph.",
+                        role="body",
+                        provenance=_prov(),
+                    ),
                 ],
             ),
             Chapter(
                 uid="ch-2",
                 title="Chapter 2",
                 blocks=[
-                    Paragraph(uid="p4", text="Chapter two text.", role="body", provenance=_prov()),
+                    Paragraph(
+                        uid="p4",
+                        text="Chapter two text.",
+                        role="body",
+                        provenance=_prov(),
+                    ),
                 ],
             ),
         ],
@@ -1137,7 +1183,12 @@ class TestSplitBlockCompiler:
                     uid="ch-x",
                     title="X",
                     blocks=[
-                        Heading(uid="h1", text="First sentence. Second sentence.", level=1, provenance=prov),
+                        Heading(
+                            uid="h1",
+                            text="First sentence. Second sentence.",
+                            level=1,
+                            provenance=prov,
+                        ),
                     ],
                 )
             ],
@@ -1287,7 +1338,10 @@ class TestMergeBlocksCompiler:
             agent_id="fixer-1",
             rationale="test",
             params={
-                "block_uids": ["p1", "p3"],  # p1 and p3 are not adjacent (p2 is between)
+                "block_uids": [
+                    "p1",
+                    "p3",
+                ],  # p1 and p3 are not adjacent (p2 is between)
                 "join": "concat",
             },
         )
@@ -1500,9 +1554,15 @@ def _make_split_chapter_book() -> Book:
                 title="Long Chapter",
                 level=1,
                 blocks=[
-                    Paragraph(uid="blk-A1", text="First block.", role="body", provenance=prov),
-                    Paragraph(uid="blk-A2", text="Second block.", role="body", provenance=prov),
-                    Paragraph(uid="blk-A3", text="Third block.", role="body", provenance=prov),
+                    Paragraph(
+                        uid="blk-A1", text="First block.", role="body", provenance=prov
+                    ),
+                    Paragraph(
+                        uid="blk-A2", text="Second block.", role="body", provenance=prov
+                    ),
+                    Paragraph(
+                        uid="blk-A3", text="Third block.", role="body", provenance=prov
+                    ),
                 ],
             ),
         ],
@@ -1552,7 +1612,9 @@ class TestSplitChapterCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "first block" in str(exc_info.value)
 
     def test_split_at_block_uid_not_in_chapter_fails(self):
@@ -1571,7 +1633,9 @@ class TestSplitChapterCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not found" in str(exc_info.value)
 
     def test_new_chapter_uid_collision_fails(self):
@@ -1590,7 +1654,9 @@ class TestSplitChapterCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "already exists" in str(exc_info.value)
 
     def test_compiled_patch_applies_correctly(self):
@@ -1649,8 +1715,12 @@ def _make_merge_chapters_book() -> Book:
                 title="Chapter One",
                 level=1,
                 blocks=[
-                    Paragraph(uid="p1", text="Intro para.", role="body", provenance=prov),
-                    Paragraph(uid="p2", text="Second intro.", role="body", provenance=prov),
+                    Paragraph(
+                        uid="p1", text="Intro para.", role="body", provenance=prov
+                    ),
+                    Paragraph(
+                        uid="p2", text="Second intro.", role="body", provenance=prov
+                    ),
                 ],
             ),
             Chapter(
@@ -1658,7 +1728,9 @@ def _make_merge_chapters_book() -> Book:
                 title="Chapter Two",
                 level=1,
                 blocks=[
-                    Paragraph(uid="p3", text="Body para.", role="body", provenance=prov),
+                    Paragraph(
+                        uid="p3", text="Body para.", role="body", provenance=prov
+                    ),
                     Paragraph(uid="p4", text="Body end.", role="body", provenance=prov),
                 ],
             ),
@@ -1717,7 +1789,9 @@ class TestMergeChaptersCompiler:
         # The compiler should raise PatchCommandError.
         # NOTE: PatchCommand model allows mismatched counts; compiler catches it.
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "sections length" in str(exc_info.value)
 
     def test_new_chapter_uid_collision_fails(self):
@@ -1739,7 +1813,9 @@ class TestMergeChaptersCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "already exists" in str(exc_info.value)
 
     def test_compiled_patch_applies_correctly(self):
@@ -1825,7 +1901,9 @@ class TestMergeChaptersCompiler:
                     title="With Blocks",
                     level=1,
                     blocks=[
-                        Paragraph(uid="pe1", text="Only block.", role="body", provenance=prov),
+                        Paragraph(
+                            uid="pe1", text="Only block.", role="body", provenance=prov
+                        ),
                     ],
                 ),
             ],
@@ -2044,7 +2122,9 @@ class TestPairFootnoteCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not a footnote" in str(exc_info.value)
 
     def test_source_block_no_raw_callout_raises(self):
@@ -2086,7 +2166,9 @@ class TestPairFootnoteCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "no raw callout" in str(exc_info.value)
 
     def test_occurrence_index_out_of_range_raises(self):
@@ -2104,7 +2186,9 @@ class TestPairFootnoteCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "out of range" in str(exc_info.value)
 
     def test_compiled_patch_applies_correctly(self):
@@ -2136,6 +2220,7 @@ class TestPairFootnoteCompiler:
         assert expected_marker in src_block.text  # type: ignore[union-attr]
         # The raw callout should not appear outside markers
         from epubforge.markers import strip_markers
+
         assert "1)" not in strip_markers(src_block.text)  # type: ignore[union-attr]
 
     def test_pair_orphan_footnote_clears_orphan_first(self):
@@ -2252,7 +2337,9 @@ class TestUnpairFootnoteCompiler:
             params={"fn_block_uid": "fn-1"},
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not currently paired" in str(exc_info.value)
 
     def test_no_marker_found_raises(self):
@@ -2291,7 +2378,9 @@ class TestUnpairFootnoteCompiler:
             params={"fn_block_uid": "fn-x"},
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "no marker found" in str(exc_info.value)
 
     def test_fn_block_not_footnote_raises(self):
@@ -2305,7 +2394,9 @@ class TestUnpairFootnoteCompiler:
             params={"fn_block_uid": "p-src"},  # paragraph, not footnote
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not a footnote" in str(exc_info.value)
 
     def test_compiled_patch_applies_correctly(self):
@@ -2342,7 +2433,6 @@ class TestUnpairFootnoteCompiler:
 class TestMarkOrphanCompiler:
     def test_valid_mark_orphan_no_marker(self):
         """mark_orphan with no marker in book: orphan=True set, chapter-scoped."""
-        book = _make_footnote_book()
         # Source block has raw callout "1)" but no marker — so find_markers returns []
         # First, remove the raw callout from source so no marker exists at all
         prov = Provenance(page=3, source="passthrough")
@@ -2426,7 +2516,9 @@ class TestMarkOrphanCompiler:
             params={"fn_block_uid": "fn-1"},
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "already marked as orphan" in str(exc_info.value)
 
     def test_fn_block_not_footnote_raises(self):
@@ -2440,7 +2532,9 @@ class TestMarkOrphanCompiler:
             params={"fn_block_uid": "p-src"},  # paragraph
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not a footnote" in str(exc_info.value)
 
     def test_compiled_mark_orphan_no_marker_applies(self):
@@ -2527,7 +2621,7 @@ def _make_table_book(
     extra_blocks_after: bool = False,
 ) -> Book:
     """Create a book with a chapter containing a multi-page merged Table block."""
-    from epubforge.ir.semantic import Table, TableMergeRecord
+    from epubforge.ir.semantic import TableMergeRecord
 
     prov = Provenance(
         page=5,
@@ -2603,7 +2697,9 @@ class TestSplitMergedTableCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "not a table" in str(exc_info.value)
 
     def test_table_not_multi_page_raises(self):
@@ -2622,8 +2718,12 @@ class TestSplitMergedTableCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
-        assert "multi_page" in str(exc_info.value) or "multi-page" in str(exc_info.value)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
+        assert "multi_page" in str(exc_info.value) or "multi-page" in str(
+            exc_info.value
+        )
 
     def test_new_block_uids_collision_raises(self):
         """new_block_uid that already exists in book raises PatchCommandError."""
@@ -2649,7 +2749,9 @@ class TestSplitMergedTableCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "already exists" in str(exc_info.value)
 
     def test_new_block_uids_duplicates_raises(self):
@@ -2668,7 +2770,9 @@ class TestSplitMergedTableCompiler:
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
         assert "duplicate" in str(exc_info.value)
 
     # ---- Valid 2-segment split ----
@@ -2688,7 +2792,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         assert len(patch.changes) == 3
         assert patch.changes[0].op == "delete_node"
         assert patch.changes[1].op == "insert_node"
@@ -2709,7 +2815,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2", "seg-3"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         assert len(patch.changes) == 4
 
     def test_scope_is_chapter_scoped(self):
@@ -2727,7 +2835,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         assert patch.scope.chapter_uid == "ch-tbl"
 
     # ---- Table is first block: after_uid=None for first segment ----
@@ -2747,7 +2857,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         first_insert = patch.changes[1]
         assert first_insert.op == "insert_node"
         assert first_insert.after_uid is None  # type: ignore[union-attr]
@@ -2769,7 +2881,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         first_insert = patch.changes[1]
         assert first_insert.after_uid == "pre-blk"  # type: ignore[union-attr]
 
@@ -2790,7 +2904,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert len(ch.blocks) == 2
@@ -2812,11 +2928,13 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2", "seg-3"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
-        assert ch.blocks[0].caption == ""          # type: ignore[union-attr]
-        assert ch.blocks[1].caption == ""          # type: ignore[union-attr]
+        assert ch.blocks[0].caption == ""  # type: ignore[union-attr]
+        assert ch.blocks[1].caption == ""  # type: ignore[union-attr]
         assert ch.blocks[2].caption == "My Caption"  # type: ignore[union-attr]
 
     def test_applied_patch_continuation_flags(self):
@@ -2834,12 +2952,14 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2", "seg-3"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert ch.blocks[0].continuation is False  # type: ignore[union-attr]
-        assert ch.blocks[1].continuation is True   # type: ignore[union-attr]
-        assert ch.blocks[2].continuation is True   # type: ignore[union-attr]
+        assert ch.blocks[1].continuation is True  # type: ignore[union-attr]
+        assert ch.blocks[2].continuation is True  # type: ignore[union-attr]
 
     def test_applied_patch_provenance_full_preserved(self):
         """After applying, each segment preserves all provenance fields with only page overridden."""
@@ -2856,7 +2976,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
 
@@ -2897,7 +3019,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert ch.blocks[0].table_title == "Revenue Table"  # type: ignore[union-attr]
@@ -2918,7 +3042,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert ch.blocks[0].multi_page is False  # type: ignore[union-attr]
@@ -2939,7 +3065,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert ch.blocks[0].merge_record is None  # type: ignore[union-attr]
@@ -2960,10 +3088,12 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
-        assert ch.blocks[0].html == "<table>FIRST</table>"   # type: ignore[union-attr]
+        assert ch.blocks[0].html == "<table>FIRST</table>"  # type: ignore[union-attr]
         assert ch.blocks[1].html == "<table>SECOND</table>"  # type: ignore[union-attr]
 
     def test_applied_patch_surrounding_blocks_preserved(self):
@@ -2981,7 +3111,9 @@ class TestSplitMergedTableCompiler:
                 "new_block_uids": ["seg-1", "seg-2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
         assert len(ch.blocks) == 4  # pre-blk, seg-1, seg-2, post-blk
@@ -3014,7 +3146,9 @@ class TestSetFieldOldSerialization:
                 "new_block_uids": ["p-split"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-1")
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
         set_field = patch.changes[0]
         assert set_field.op == "set_field"
         # old should be the exact original text
@@ -3053,7 +3187,9 @@ class TestSetFieldOldSerialization:
                 "new_block_uids": ["cj2"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-cjk")
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-cjk"
+        )
         set_field = patch.changes[0]
         assert set_field.op == "set_field"
         assert set_field.old == "你好世界。这是测试。"
@@ -3093,7 +3229,9 @@ class TestSetFieldOldSerialization:
                 "new_block_uids": ["ps-new"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-ser")
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-ser"
+        )
         set_field = patch.changes[0]
         assert isinstance(set_field, SetFieldChange)
 
@@ -3140,7 +3278,9 @@ class TestSetFieldOldSerialization:
                 "new_block_uids": ["prt-new"],
             },
         )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-rt")
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-rt"
+        )
         # Applying should succeed — the old precondition matches
         new_book = apply_book_patch(book, patch)
         assert len(new_book.chapters[0].blocks) == 2
@@ -3225,7 +3365,9 @@ class TestPerformanceBaseline:
         assert result.patches is not None
         assert len(result.patches) == 2
         # The evolving book should have 5000 blocks after split+merge (net unchanged)
-        final_block_count = sum(len(ch.blocks) for ch in result.book_after_commands.chapters)
+        final_block_count = sum(
+            len(ch.blocks) for ch in result.book_after_commands.chapters
+        )
         assert final_block_count == total_blocks
 
         # Performance baseline: keep a broad regression guard but avoid a brittle

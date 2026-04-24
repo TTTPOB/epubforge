@@ -48,7 +48,7 @@ uv run epubforge run fixtures/example.pdf --skip-vlm
 | 2 | `epubforge classify` | `work/<name>/02_pages.json` |
 | 3 | `epubforge extract` | `work/<name>/03_extract/artifacts/<id>/` + `active_manifest.json` |
 | 4 | `epubforge assemble` | `work/<name>/05_semantic_raw.json` |
-| 8 | `epubforge build` | `out/<name>.epub` |
+| 5 | `epubforge build` | `out/<name>.epub` |
 
 `run` 只会串行执行 1-4。`build` 独立运行。
 
@@ -145,9 +145,8 @@ work/
     │   ├── book.json
     │   ├── meta.json
     │   ├── memory.json
-    │   ├── leases.json
-    │   ├── staging.jsonl
     │   ├── edit_log.jsonl
+    │   ├── agent_outputs/
     │   ├── audit/
     │   │   ├── doctor_report.json
     │   │   └── doctor_context.json
@@ -168,12 +167,12 @@ out/
 
 - `epubforge editor init`
 - `epubforge editor doctor`
-- `epubforge editor propose-op`
-- `epubforge editor apply-queue`
-- `epubforge editor acquire-lease`
-- `epubforge editor release-lease`
-- `epubforge editor acquire-book-lock`
-- `epubforge editor release-book-lock`
+- `epubforge editor agent-output begin`
+- `epubforge editor agent-output add-patch`
+- `epubforge editor agent-output add-command`
+- `epubforge editor agent-output add-memory-patch`
+- `epubforge editor agent-output validate`
+- `epubforge editor agent-output submit`
 - `epubforge editor run-script`
 - `epubforge editor compact`
 - `epubforge editor snapshot`
@@ -186,8 +185,9 @@ out/
 ```bash
 uv run epubforge --config config.toml editor init work/mybook
 uv run epubforge --config config.toml editor doctor work/mybook
-uv run epubforge --config config.toml editor propose-op work/mybook < ops.json
-uv run epubforge --config config.toml editor apply-queue work/mybook
+uv run epubforge --config config.toml editor agent-output begin work/mybook --kind fixer --agent fixer-1 --chapter <chapter_uid>
+uv run epubforge --config config.toml editor agent-output add-patch work/mybook <output_id> --patch-file patch.json
+uv run epubforge --config config.toml editor agent-output submit work/mybook <output_id> --apply
 
 # 渲染原始 PDF 页面为图像（无 LLM/VLM 调用）
 uv run epubforge --config config.toml editor render-page work/mybook --page 5
@@ -261,7 +261,6 @@ max_vlm_batch_pages  = 4
 enable_book_memory   = true
 
 [editor]
-lease_ttl_seconds = 1800
 compact_threshold = 50
 max_loops = 50
 ```

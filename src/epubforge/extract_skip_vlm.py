@@ -24,7 +24,11 @@ from epubforge.ir.semantic import (
     Provenance,
     Table,
 )
-from epubforge.stage3_artifacts import EvidenceIndex, Stage3ExtractionResult, Stage3Warning
+from epubforge.stage3_artifacts import (
+    EvidenceIndex,
+    Stage3ExtractionResult,
+    Stage3Warning,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,39 +37,49 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Labels that map to Paragraph with a specific role
-_BODY_LABELS = frozenset({
-    DocItemLabel.TEXT,
-    DocItemLabel.PARAGRAPH,
-    DocItemLabel.REFERENCE,
-})
+_BODY_LABELS = frozenset(
+    {
+        DocItemLabel.TEXT,
+        DocItemLabel.PARAGRAPH,
+        DocItemLabel.REFERENCE,
+    }
+)
 
-_EVIDENCE_ONLY_LABELS = frozenset({
-    DocItemLabel.PAGE_HEADER,
-    DocItemLabel.PAGE_FOOTER,
-    DocItemLabel.DOCUMENT_INDEX,
-    DocItemLabel.FORM,
-    DocItemLabel.KEY_VALUE_REGION,
-    DocItemLabel.FIELD_REGION,
-    DocItemLabel.EMPTY_VALUE,
-})
+_EVIDENCE_ONLY_LABELS = frozenset(
+    {
+        DocItemLabel.PAGE_HEADER,
+        DocItemLabel.PAGE_FOOTER,
+        DocItemLabel.DOCUMENT_INDEX,
+        DocItemLabel.FORM,
+        DocItemLabel.KEY_VALUE_REGION,
+        DocItemLabel.FIELD_REGION,
+        DocItemLabel.EMPTY_VALUE,
+    }
+)
 
-_FIELD_LABELS = frozenset({
-    DocItemLabel.FIELD_HEADING,
-    DocItemLabel.FIELD_ITEM,
-    DocItemLabel.FIELD_KEY,
-    DocItemLabel.FIELD_VALUE,
-    DocItemLabel.FIELD_HINT,
-})
+_FIELD_LABELS = frozenset(
+    {
+        DocItemLabel.FIELD_HEADING,
+        DocItemLabel.FIELD_ITEM,
+        DocItemLabel.FIELD_KEY,
+        DocItemLabel.FIELD_VALUE,
+        DocItemLabel.FIELD_HINT,
+    }
+)
 
-_CHECKBOX_LABELS = frozenset({
-    DocItemLabel.CHECKBOX_SELECTED,
-    DocItemLabel.CHECKBOX_UNSELECTED,
-})
+_CHECKBOX_LABELS = frozenset(
+    {
+        DocItemLabel.CHECKBOX_SELECTED,
+        DocItemLabel.CHECKBOX_UNSELECTED,
+    }
+)
 
-_PICTURE_LABELS = frozenset({
-    DocItemLabel.PICTURE,
-    DocItemLabel.CHART,
-})
+_PICTURE_LABELS = frozenset(
+    {
+        DocItemLabel.PICTURE,
+        DocItemLabel.CHART,
+    }
+)
 
 # Max items to record as leading / trailing per page
 _EDGE_ITEM_COUNT = 3
@@ -143,17 +157,27 @@ def extract_skip_vlm(
                 all_audit_notes.extend(data["audit_notes"])
             log.info(
                 "extract_skip_vlm unit %d/%d page=%d reused=Y",
-                idx + 1, len(selected_pages_data), pno,
+                idx + 1,
+                len(selected_pages_data),
+                pno,
             )
             continue
 
         log.info(
             "extract_skip_vlm unit %d/%d page=%d reused=N",
-            idx + 1, len(selected_pages_data), pno,
+            idx + 1,
+            len(selected_pages_data),
+            pno,
         )
 
-        draft_blocks, evidence_refs, page_warnings, page_audit_notes, candidate_edges = (
-            _process_page(doc, pno, page_kind, selected_set, artifact_id, images_dir=images_dir)
+        (
+            draft_blocks,
+            evidence_refs,
+            page_warnings,
+            page_audit_notes,
+            candidate_edges,
+        ) = _process_page(
+            doc, pno, page_kind, selected_set, artifact_id, images_dir=images_dir
         )
 
         all_warnings.extend(page_warnings)
@@ -194,7 +218,9 @@ def extract_skip_vlm(
 
     warnings_path = out_dir / "warnings.json"
     warnings_path.write_text(
-        json.dumps([w.model_dump() for w in all_warnings], ensure_ascii=False, indent=2),
+        json.dumps(
+            [w.model_dump() for w in all_warnings], ensure_ascii=False, indent=2
+        ),
         encoding="utf-8",
     )
 
@@ -226,10 +252,10 @@ def _process_page(
     images_dir: Path | None = None,
 ) -> tuple[
     list[dict[str, Any]],  # draft_blocks (serialised)
-    list[str],             # evidence_refs
+    list[str],  # evidence_refs
     list[Stage3Warning],
     list[dict[str, Any]],  # audit_notes
-    dict[str, Any],        # candidate_edges
+    dict[str, Any],  # candidate_edges
 ]:
     """Extract draft blocks and evidence refs from one page of *doc*."""
     draft_blocks: list[dict[str, Any]] = []
@@ -286,7 +312,11 @@ def _process_page(
     next_page = pno + 1 if (pno + 1) in selected_set else None
 
     leading = item_refs_in_order[:_EDGE_ITEM_COUNT]
-    trailing = item_refs_in_order[-_EDGE_ITEM_COUNT:] if len(item_refs_in_order) > _EDGE_ITEM_COUNT else []
+    trailing = (
+        item_refs_in_order[-_EDGE_ITEM_COUNT:]
+        if len(item_refs_in_order) > _EDGE_ITEM_COUNT
+        else []
+    )
 
     candidate_edges: dict[str, Any] = {}
     if prev_page is not None:
@@ -325,27 +355,37 @@ def _label_to_block(
     # --- Title candidate ---
     if label == DocItemLabel.TITLE:
         text = getattr(item, "text", "") or ""
-        return Paragraph(text=text, role="docling_title_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_title_candidate", provenance=provenance
+        )
 
     # --- Section header candidate ---
     if label == DocItemLabel.SECTION_HEADER:
         text = getattr(item, "text", "") or ""
-        return Paragraph(text=text, role="docling_heading_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_heading_candidate", provenance=provenance
+        )
 
     # --- Footnote candidate (not Footnote IR) ---
     if label == DocItemLabel.FOOTNOTE:
         text = getattr(item, "text", "") or ""
-        return Paragraph(text=text, role="docling_footnote_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_footnote_candidate", provenance=provenance
+        )
 
     # --- List item candidate (not list structure) ---
     if label == DocItemLabel.LIST_ITEM:
         text = getattr(item, "text", "") or ""
-        return Paragraph(text=text, role="docling_list_item_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_list_item_candidate", provenance=provenance
+        )
 
     # --- Caption candidate (not attributed to figure/table) ---
     if label == DocItemLabel.CAPTION:
         text = getattr(item, "text", "") or ""
-        return Paragraph(text=text, role="docling_caption_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_caption_candidate", provenance=provenance
+        )
 
     # --- Code (verbatim) ---
     if label == DocItemLabel.CODE:
@@ -358,21 +398,34 @@ def _label_to_block(
         msg = f"Handwritten text detected on page {pno} (ref={item.self_ref})"
         log.warning(msg)
         warnings.append(Stage3Warning(message=msg, page=pno, item_ref=item.self_ref))
-        audit_notes.append({"kind": "other", "page": pno, "hint": "handwritten_text detected", "block_index": None})
-        return Paragraph(text=text, role="docling_handwritten_candidate", provenance=provenance)
+        audit_notes.append(
+            {
+                "kind": "other",
+                "page": pno,
+                "hint": "handwritten_text detected",
+                "block_index": None,
+            }
+        )
+        return Paragraph(
+            text=text, role="docling_handwritten_candidate", provenance=provenance
+        )
 
     # --- Field labels (only when non-empty text) ---
     if label in _FIELD_LABELS:
         text = getattr(item, "text", "") or ""
         if text:
-            return Paragraph(text=text, role="docling_field_candidate", provenance=provenance)
+            return Paragraph(
+                text=text, role="docling_field_candidate", provenance=provenance
+            )
         return None
 
     # --- Checkbox labels (only when non-empty text) ---
     if label in _CHECKBOX_LABELS:
         text = getattr(item, "text", "") or ""
         if text:
-            return Paragraph(text=text, role="docling_checkbox_candidate", provenance=provenance)
+            return Paragraph(
+                text=text, role="docling_checkbox_candidate", provenance=provenance
+            )
         return None
 
     # --- Grading scale — field candidate + warning ---
@@ -381,8 +434,17 @@ def _label_to_block(
         msg = f"Grading scale detected on page {pno} (ref={item.self_ref})"
         log.warning(msg)
         warnings.append(Stage3Warning(message=msg, page=pno, item_ref=item.self_ref))
-        audit_notes.append({"kind": "other", "page": pno, "hint": "grading_scale detected", "block_index": None})
-        return Paragraph(text=text, role="docling_field_candidate", provenance=provenance)
+        audit_notes.append(
+            {
+                "kind": "other",
+                "page": pno,
+                "hint": "grading_scale detected",
+                "block_index": None,
+            }
+        )
+        return Paragraph(
+            text=text, role="docling_field_candidate", provenance=provenance
+        )
 
     # --- Formula → Equation ---
     if label == DocItemLabel.FORMULA:
@@ -397,8 +459,17 @@ def _label_to_block(
         except Exception as exc:
             msg = f"Table HTML export failed on page {pno} (ref={item.self_ref}): {exc}"
             log.warning(msg)
-            warnings.append(Stage3Warning(message=msg, page=pno, item_ref=item.self_ref))
-            audit_notes.append({"kind": "other", "page": pno, "hint": "table_export_failed", "block_index": None})
+            warnings.append(
+                Stage3Warning(message=msg, page=pno, item_ref=item.self_ref)
+            )
+            audit_notes.append(
+                {
+                    "kind": "other",
+                    "page": pno,
+                    "hint": "table_export_failed",
+                    "block_index": None,
+                }
+            )
             html = "<!-- table export failed -->"
         return Table(
             html=html,
@@ -417,18 +488,25 @@ def _label_to_block(
         page_for_ref = pno
         image_ref = f"p{page_for_ref:04d}_{ref_id}.png"
         if images_dir is not None and not (images_dir / image_ref).is_file():
-            warnings.append(Stage3Warning(
-                page=pno, item_ref=item.self_ref,
-                message=f"Figure crop not found: {image_ref}",
-            ))
+            warnings.append(
+                Stage3Warning(
+                    page=pno,
+                    item_ref=item.self_ref,
+                    message=f"Figure crop not found: {image_ref}",
+                )
+            )
             image_ref = None
-        return Figure(image_ref=image_ref, caption="", bbox=provenance.bbox, provenance=provenance)
+        return Figure(
+            image_ref=image_ref, caption="", bbox=provenance.bbox, provenance=provenance
+        )
 
     # --- Marker: evidence only unless non-empty text ---
     if label == DocItemLabel.MARKER:
         text = getattr(item, "text", "") or ""
         if text:
-            return Paragraph(text=text, role="docling_unknown_candidate", provenance=provenance)
+            return Paragraph(
+                text=text, role="docling_unknown_candidate", provenance=provenance
+            )
         return None
 
     # --- Evidence-only labels ---
@@ -442,9 +520,16 @@ def _label_to_block(
         msg = f"Unknown Docling label '{label_str}' with text on page {pno} (ref={item.self_ref})"
         log.warning(msg)
         warnings.append(Stage3Warning(message=msg, page=pno, item_ref=item.self_ref))
-        return Paragraph(text=text, role="docling_unknown_candidate", provenance=provenance)
+        return Paragraph(
+            text=text, role="docling_unknown_candidate", provenance=provenance
+        )
     else:
-        log.debug("Unknown label '%s' without text on page %d ref=%s — evidence only", label_str, pno, item.self_ref)
+        log.debug(
+            "Unknown label '%s' without text on page %d ref=%s — evidence only",
+            label_str,
+            pno,
+            item.self_ref,
+        )
         return None
 
 
@@ -476,7 +561,9 @@ def _write_unit(
         "candidate_edges": candidate_edges,
         "audit_notes": audit_notes,
     }
-    out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 # ---------------------------------------------------------------------------

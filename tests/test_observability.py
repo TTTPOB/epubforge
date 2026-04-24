@@ -24,6 +24,7 @@ def _reset():
 # UsageTracker
 # ---------------------------------------------------------------------------
 
+
 class TestUsageTracker:
     def test_record_hit(self):
         t = obs.UsageTracker()
@@ -75,6 +76,7 @@ class TestUsageTracker:
 # setup_logging idempotency
 # ---------------------------------------------------------------------------
 
+
 class TestSetupLogging:
     def setup_method(self):
         _reset()
@@ -108,6 +110,7 @@ class TestSetupLogging:
 # ---------------------------------------------------------------------------
 # stage_timer
 # ---------------------------------------------------------------------------
+
 
 class TestStageTimer:
     def setup_method(self):
