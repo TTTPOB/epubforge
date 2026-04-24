@@ -1,7 +1,7 @@
 ---
 description: 专业实现 worker — 使用 pro 模型执行复杂实现任务
 mode: subagent
-model: deepseek/deepseek-v4-pro
+model: openai/gpt-5.5
 reasoningEffort: high
 steps: 35
 permission:

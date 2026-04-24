@@ -76,6 +76,7 @@ git add -A && git commit -m "..." && bd close <issue-id>
 ```
 
 ### 7. 推送
+暂时不要推送，本项目目前没有remote
 ```bash
 git push && bd dolt push
 ```
