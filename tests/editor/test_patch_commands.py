@@ -2529,7 +2529,15 @@ def _make_table_book(
     """Create a book with a chapter containing a multi-page merged Table block."""
     from epubforge.ir.semantic import Table, TableMergeRecord
 
-    prov = Provenance(page=5, source="llm")
+    prov = Provenance(
+        page=5,
+        bbox=[10.0, 20.0, 300.0, 400.0],
+        source="llm",
+        raw_ref="raw-table-1",
+        raw_label="Table 1.1",
+        artifact_id="artifact-abc123",
+        evidence_ref="evidence/page_005.json",
+    )
     table = Table(
         uid=table_uid,
         html="<table><tr><td>merged</td></tr></table>",
@@ -2833,8 +2841,8 @@ class TestSplitMergedTableCompiler:
         assert ch.blocks[1].continuation is True   # type: ignore[union-attr]
         assert ch.blocks[2].continuation is True   # type: ignore[union-attr]
 
-    def test_applied_patch_provenance_pages(self):
-        """After applying, each segment has provenance.page from segment_pages."""
+    def test_applied_patch_provenance_full_preserved(self):
+        """After applying, each segment preserves all provenance fields with only page overridden."""
         book = _make_table_book()
         cmd = PatchCommand(
             command_id=str(uuid4()),
@@ -2851,8 +2859,28 @@ class TestSplitMergedTableCompiler:
         patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
         new_book = apply_book_patch(book, patch)
         ch = new_book.chapters[0]
-        assert ch.blocks[0].provenance.page == 5  # type: ignore[union-attr]
-        assert ch.blocks[1].provenance.page == 6  # type: ignore[union-attr]
+
+        # First segment: page=5, all other fields from original provenance
+        assert ch.blocks[0].provenance == Provenance(  # type: ignore[union-attr]
+            page=5,
+            bbox=[10.0, 20.0, 300.0, 400.0],
+            source="llm",
+            raw_ref="raw-table-1",
+            raw_label="Table 1.1",
+            artifact_id="artifact-abc123",
+            evidence_ref="evidence/page_005.json",
+        )
+
+        # Second segment: page=6, all other fields from original provenance
+        assert ch.blocks[1].provenance == Provenance(  # type: ignore[union-attr]
+            page=6,
+            bbox=[10.0, 20.0, 300.0, 400.0],
+            source="llm",
+            raw_ref="raw-table-1",
+            raw_label="Table 1.1",
+            artifact_id="artifact-abc123",
+            evidence_ref="evidence/page_005.json",
+        )
 
     def test_applied_patch_table_title_inherited(self):
         """After applying, all segments inherit table_title from original."""
@@ -2895,27 +2923,6 @@ class TestSplitMergedTableCompiler:
         ch = new_book.chapters[0]
         assert ch.blocks[0].multi_page is False  # type: ignore[union-attr]
         assert ch.blocks[1].multi_page is False  # type: ignore[union-attr]
-
-    def test_applied_patch_provenance_source_inherited(self):
-        """After applying, all segments inherit provenance.source from original."""
-        book = _make_table_book()  # provenance.source = "llm"
-        cmd = PatchCommand(
-            command_id=str(uuid4()),
-            op="split_merged_table",
-            agent_id="fixer-1",
-            rationale="split",
-            params={
-                "block_uid": "tbl-1",
-                "segment_html": ["<t>A</t>", "<t>B</t>"],
-                "segment_pages": [5, 6],
-                "new_block_uids": ["seg-1", "seg-2"],
-            },
-        )
-        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
-        new_book = apply_book_patch(book, patch)
-        ch = new_book.chapters[0]
-        assert ch.blocks[0].provenance.source == "llm"  # type: ignore[union-attr]
-        assert ch.blocks[1].provenance.source == "llm"  # type: ignore[union-attr]
 
     def test_applied_patch_merge_record_none(self):
         """After applying, all segments have merge_record=None."""

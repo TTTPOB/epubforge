@@ -1143,8 +1143,8 @@ def _compile_split_merged_table(
                 "multi_page": False,
                 "bbox": table.bbox,
                 "provenance": {
+                    **table.provenance.model_dump(mode="python"),
                     "page": params.segment_pages[i],
-                    "source": table.provenance.source,
                 },
             },
         })
