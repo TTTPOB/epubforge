@@ -2,7 +2,7 @@
 description: 代码审查 agent — 只读审查，不做任何代码修改
 mode: subagent
 model: openai/gpt-5.5
-reasoningEffort: high
+reasoningEffort: xhigh
 steps: 20
 permission:
   edit: deny
@@ -47,16 +47,13 @@ permission:
 - [ ] 输入验证是否充分
 
 ### 项目特定
-- [ ] Semantic IR 的数据完整性是否保持
-- [ ] 编辑器的 OpEnvelope 事务语义是否正确
-- [ ] Stage 管线的幂等性是否保持
 
 ## 审查流程
 
 1. 读取 orchestrator 指定的变更文件
 2. 对比 `git diff` 理解变更内容
-3. 运行 `pytest` 确认测试通过
-4. 运行 `ruff check` 确认 lint 通过
+3. 运行 `uv run pytest` 确认测试通过
+4. 运行 `uv run pyrefly check` 确认 lint 通过
 5. 给出结构化的审查报告：通过/需修改/阻塞
 
 ## 输出格式
