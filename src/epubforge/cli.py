@@ -71,11 +71,15 @@ def _init_logging(cfg: Config, pdf_path: Path, log_file_override: Path | None) -
 
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
     log.info(
-        "epubforge startup: model=%s/%s cache_dir=%s editor=ttl:%d/compact:%d/max_loops:%d log=%s",
+        "epubforge startup: model=%s/%s cache_dir=%s editor=ttl:%d/compact:%d/max_loops:%d"
+        " skip_vlm=%s stage3_mode=%s max_vlm_batch_pages=%d log=%s",
         cfg.llm.model, cfg.vlm.model, cfg.runtime.cache_dir,
         cfg.editor.lease_ttl_seconds,
         cfg.editor.compact_threshold,
         cfg.editor.max_loops,
+        cfg.extract.skip_vlm,
+        "skip_vlm" if cfg.extract.skip_vlm else "vlm",
+        cfg.extract.max_vlm_batch_pages,
         log_path or "(stderr only)",
     )
 
@@ -102,11 +106,16 @@ def run(
     force: bool = typer.Option(False, "--force-rerun", "-f", help="Re-run stages even if outputs exist"),
     from_stage: int = typer.Option(1, "--from", min=1, max=4, help="Start from stage N (1–4); existing outputs are reused unless --force-rerun"),
     pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
+    skip_vlm: bool | None = typer.Option(
+        None,
+        "--skip-vlm/--no-skip-vlm",
+        help="Skip Stage 3 pipeline VLM and use a Docling-derived evidence draft",
+    ),
 ) -> None:
     """Run the ingestion pipeline (parse → classify → extract → assemble)."""
     cfg = _get_config(ctx)
-    cfg.require_llm()
-    cfg.require_vlm()
+    if skip_vlm is not None:
+        cfg = cfg.model_copy(update={"extract": cfg.extract.model_copy(update={"skip_vlm": skip_vlm})})
     app_ctx = ctx.find_root().obj
     log_file_override = app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
     log_path = _init_logging(cfg, pdf_path, log_file_override)
@@ -149,16 +158,22 @@ def extract(
     ctx: typer.Context,
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
+    pages: str | None = typer.Option(None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"),
+    skip_vlm: bool | None = typer.Option(
+        None,
+        "--skip-vlm/--no-skip-vlm",
+        help="Skip Stage 3 pipeline VLM and use a Docling-derived evidence draft",
+    ),
 ) -> None:
-    """Stage 3 — LLM+VLM extraction (simple and complex pages) → work/<name>/03_extract/."""
+    """Stage 3 — VLM extraction → work/<name>/03_extract/."""
     cfg = _get_config(ctx)
-    cfg.require_llm()
-    cfg.require_vlm()
+    if skip_vlm is not None:
+        cfg = cfg.model_copy(update={"extract": cfg.extract.model_copy(update={"skip_vlm": skip_vlm})})
     app_ctx = ctx.find_root().obj
     log_file_override = app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
     log_path = _init_logging(cfg, pdf_path, log_file_override)
     _log_startup_banner(cfg, log_path)
-    pipeline.run_extract(pdf_path, cfg, force=force)
+    pipeline.run_extract(pdf_path, cfg, force=force, pages=_parse_pages(pages))
 
 
 @app.command()

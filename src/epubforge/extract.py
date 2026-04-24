@@ -72,8 +72,7 @@ def extract(
     units = _build_units(
         pages_data,
         anchors,
-        max_simple_batch=cfg.extract.max_simple_batch_pages,
-        max_complex_batch=cfg.extract.max_complex_batch_pages,
+        max_vlm_batch=cfg.extract.max_vlm_batch_pages,
     )
 
     vlm_client = LLMClient(cfg, use_vlm=True)
@@ -149,11 +148,10 @@ def extract(
 def _build_units(
     pages_data: list[dict[str, Any]],
     anchors: dict[int, list[_AnchorItem]],
-    max_simple_batch: int = 8,
-    max_complex_batch: int = 12,
+    max_vlm_batch: int = 4,
 ) -> list[VLMGroupUnit]:
+    """Build VLM processing units by batching consecutive pages up to max_vlm_batch."""
     units: list[VLMGroupUnit] = []
-    unit_page_kinds: list[str] = []  # tracks dominant kind of each unit ("simple"/"complex")
 
     for page_info in pages_data:
         pno = page_info["page"]
@@ -162,27 +160,16 @@ def _build_units(
         can_append = False
         if units:
             last = units[-1]
-            last_kind = unit_page_kinds[-1]
             last_pno = last.pages[-1]
 
-            if kind == "simple" and last_kind == "simple":
-                if len(last.pages) < max_simple_batch and last_pno + 1 == pno:
-                    can_append = True
-            elif kind == "complex" and last_kind == "complex":
-                if (
-                    len(last.pages) < max_complex_batch
-                    and last_pno + 1 == pno
-                    and _page_trailing_element_label(anchors.get(last_pno, []))
-                    in _TABLE_LIKE_LABELS
-                ):
-                    can_append = True
+            if len(last.pages) < max_vlm_batch and last_pno + 1 == pno:
+                can_append = True
 
         if can_append:
             units[-1].pages.append(pno)
             units[-1].page_kinds.append(kind)
         else:
             units.append(VLMGroupUnit(pages=[pno], page_kinds=[kind]))
-            unit_page_kinds.append(kind)
 
     return units
 

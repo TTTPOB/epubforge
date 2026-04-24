@@ -54,8 +54,8 @@ class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vlm_dpi: int = 200
-    max_simple_batch_pages: int = 8
-    max_complex_batch_pages: int = 12
+    skip_vlm: bool = False
+    max_vlm_batch_pages: int = 4
     enable_book_memory: bool = True
 
 
@@ -144,8 +144,8 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD",              "editor",  "compact_threshold",         int),
     ("EPUBFORGE_EDITOR_MAX_LOOPS",                      "editor",  "max_loops",                 int),
     ("EPUBFORGE_EXTRACT_VLM_DPI",                       "extract", "vlm_dpi",                   int),
-    ("EPUBFORGE_EXTRACT_MAX_SIMPLE_BATCH_PAGES",        "extract", "max_simple_batch_pages",    int),
-    ("EPUBFORGE_EXTRACT_MAX_COMPLEX_BATCH_PAGES",       "extract", "max_complex_batch_pages",   int),
+    ("EPUBFORGE_EXTRACT_SKIP_VLM",                      "extract", "skip_vlm",                  _bool_env),
+    ("EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES",           "extract", "max_vlm_batch_pages",       int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),
 ]
 

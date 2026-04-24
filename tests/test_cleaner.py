@@ -30,7 +30,7 @@ class TestBuildUnitsSimple:
 
     def test_simple_batch_cap(self) -> None:
         data = _pages(list(range(1, 10)))  # 9 simple pages
-        units = _build_units(data, {}, max_simple_batch=8)
+        units = _build_units(data, {}, max_vlm_batch=8)
         assert len(units) == 2
         assert units[0].pages == list(range(1, 9))
         assert units[1].pages == [9]
@@ -40,17 +40,16 @@ class TestBuildUnitsSimple:
         units = _build_units(data, {})
         assert len(units) == 2
 
-    def test_cross_kind_always_splits(self) -> None:
+    def test_cross_kind_batches_together_when_adjacent(self) -> None:
+        # New behaviour: kind is no longer a split boundary; consecutive pages batch together
         data = [
             {"page": 1, "kind": "simple"},
             {"page": 2, "kind": "complex"},
             {"page": 3, "kind": "simple"},
         ]
         units = _build_units(data, {})
-        assert len(units) == 3
-        assert units[0].pages == [1]
-        assert units[1].pages == [2]
-        assert units[2].pages == [3]
+        assert len(units) == 1
+        assert units[0].pages == [1, 2, 3]
 
     def test_all_units_are_vlm_group(self) -> None:
         data = _pages([1, 2]) + [{"page": 3, "kind": "complex"}]
@@ -59,59 +58,26 @@ class TestBuildUnitsSimple:
 
 
 class TestBuildUnitsComplex:
-    def _anchors_with_trailing_table(self, pno: int) -> dict:
-        """Anchors for a page whose last meaningful element is a TABLE."""
-        return {
-            pno: [
-                _anchor(DocItemLabel.TEXT, t=700.0),
-                _anchor(DocItemLabel.TABLE, t=300.0),  # last in reading order (lowest t)
-                _anchor(DocItemLabel.FOOTNOTE, t=50.0),  # bottom noise, filtered out
-            ]
-        }
-
-    def _anchors_with_trailing_text(self, pno: int) -> dict:
-        """Anchors for a page whose last meaningful element is a paragraph."""
-        return {
-            pno: [
-                _anchor(DocItemLabel.TEXT, t=700.0),
-                _anchor(DocItemLabel.TABLE, t=500.0),
-                _anchor(DocItemLabel.TEXT, t=200.0),  # last in reading order
-            ]
-        }
-
-    def test_complex_merges_when_trailing_table(self) -> None:
+    def test_complex_adjacent_pages_batch_together(self) -> None:
+        # Consecutive complex pages always batch together up to max_vlm_batch
         data = [{"page": 10, "kind": "complex"}, {"page": 11, "kind": "complex"}]
-        anchors = self._anchors_with_trailing_table(10)
-        units = _build_units(data, anchors)
+        units = _build_units(data, {})
         assert len(units) == 1
         assert units[0].pages == [10, 11]
 
-    def test_complex_breaks_when_trailing_text(self) -> None:
-        data = [{"page": 10, "kind": "complex"}, {"page": 11, "kind": "complex"}]
-        anchors = self._anchors_with_trailing_text(10)
-        units = _build_units(data, anchors)
-        assert len(units) == 2
-
-    def test_complex_no_anchors_does_not_merge(self) -> None:
-        data = [{"page": 10, "kind": "complex"}, {"page": 11, "kind": "complex"}]
+    def test_non_adjacent_complex_not_grouped(self) -> None:
+        data = [{"page": 10, "kind": "complex"}, {"page": 12, "kind": "complex"}]
         units = _build_units(data, {})
         assert len(units) == 2
 
     def test_complex_batch_cap(self) -> None:
         n = 15
         data = [{"page": p, "kind": "complex"} for p in range(1, n + 1)]
-        anchors: dict = {}
-        for p in range(1, n):
-            anchors[p] = [_anchor(DocItemLabel.TABLE, t=300.0)]
-        units = _build_units(data, anchors, max_complex_batch=12)
-        # First unit: 12 pages; then remaining 3 pages in subsequent units
-        assert units[0].pages == list(range(1, 13))
-
-    def test_non_adjacent_complex_not_grouped(self) -> None:
-        data = [{"page": 10, "kind": "complex"}, {"page": 12, "kind": "complex"}]
-        anchors = self._anchors_with_trailing_table(10)
-        units = _build_units(data, anchors)
-        assert len(units) == 2
+        units = _build_units(data, {}, max_vlm_batch=4)
+        # With max_vlm_batch=4 and 15 pages: 4+4+4+3 = 4 units
+        assert units[0].pages == [1, 2, 3, 4]
+        assert units[1].pages == [5, 6, 7, 8]
+        assert len(units) == 4
 
 
 class TestPageTrailingElement:
