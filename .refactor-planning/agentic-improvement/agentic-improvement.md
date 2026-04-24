@@ -803,7 +803,7 @@ Expected behavior:
 `diff_books` 只做结构差异检测，不推断高层意图（如 footnote pairing、chapter split）。
 
 处理策略：
-- diff 输出的 changes 按 node 空间邻近性排序（相关 UID 的变化组合在一起），方便 agent/reviewer 自行推断意图。
+- diff 输出的 changes 按 block 顺序做 1D 距离层次聚类（hclust），将空间邻近的变化分组输出。每个 change 的坐标是其 target block 在 chapter block list 中的 index；跨 chapter 的 changes 按 chapter 顺序再做一层分组。组内按 block index 排序，组间按最小 block index 排序。这样 agent/reviewer 看到的 diff 天然反映局部编辑意图，无需语义推断。
 - 不做启发式语义推断——这会引入另一套需要维护的规则体系。
 - validator 仍然校验最终状态的语义合法性（footnote invariants、table HTML 等），但不要求 patch 本身表达意图。
 
