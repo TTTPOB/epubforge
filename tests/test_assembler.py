@@ -1,7 +1,7 @@
 """Tests for assembler._pair_footnotes page-scoped pairing."""
 
 from epubforge.assembler import _cjk_join, _is_continuation_plausible, _pair_footnotes
-from epubforge.ir.semantic import Block, Footnote, Heading, Paragraph, Provenance, Table
+from epubforge.ir.semantic import Block, Equation, Figure, Footnote, Heading, Paragraph, Provenance, Table
 
 
 def _para(text: str, page: int) -> Paragraph:
@@ -484,3 +484,113 @@ class TestCjkJoin:
     # Hiragana left + Katakana right — no space (both are no-space scripts)
     def test_hiragana_katakana_boundary(self) -> None:
         assert _cjk_join("ひらがな", "カタカナ") == "ひらがなカタカナ"
+
+
+# ---------------------------------------------------------------------------
+# TestParseBlock — unit tests for _parse_block (VLM and skip-VLM formats)
+# ---------------------------------------------------------------------------
+
+
+class TestParseBlock:
+    """Unit tests for _parse_block covering VLM and skip-VLM formats."""
+
+    def test_vlm_format_paragraph(self):
+        """VLM-format block: flat page, no role, no nested provenance."""
+        from epubforge.assembler import _parse_block
+        raw = {"kind": "paragraph", "text": "Hello", "page": 3}
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert isinstance(block, Paragraph)
+        assert block.text == "Hello"
+        assert block.role == "body"
+        assert block.provenance.page == 3
+        assert block.provenance.source == "vlm"
+        assert block.provenance.bbox is None
+
+    def test_skip_vlm_format_paragraph_preserves_role(self):
+        """Skip-VLM block: nested provenance, role preserved."""
+        from epubforge.assembler import _parse_block
+        raw = {
+            "kind": "paragraph",
+            "text": "Chapter 1",
+            "role": "docling_heading_candidate",
+            "provenance": {
+                "page": 5,
+                "bbox": [100, 200, 500, 230],
+                "source": "docling",
+                "raw_ref": "#/texts/42",
+                "raw_label": "section_header",
+                "artifact_id": "abc123",
+                "evidence_ref": "#/texts/42",
+            },
+        }
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert isinstance(block, Paragraph)
+        assert block.role == "docling_heading_candidate"
+        assert block.provenance.page == 5
+        assert block.provenance.bbox == [100, 200, 500, 230]
+        assert block.provenance.source == "docling"
+        assert block.provenance.raw_ref == "#/texts/42"
+        assert block.provenance.raw_label == "section_header"
+        assert block.provenance.artifact_id == "abc123"
+        assert block.provenance.evidence_ref == "#/texts/42"
+
+    def test_skip_vlm_format_table_preserves_bbox(self):
+        """Skip-VLM Table block preserves bbox."""
+        from epubforge.assembler import _parse_block
+        raw = {
+            "kind": "table",
+            "html": "<table><tr><td>A</td></tr></table>",
+            "table_title": "",
+            "caption": "",
+            "continuation": False,
+            "bbox": [50, 100, 550, 400],
+            "provenance": {"page": 3, "source": "docling"},
+        }
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert isinstance(block, Table)
+        assert block.bbox == [50, 100, 550, 400]
+        assert block.provenance.page == 3
+
+    def test_skip_vlm_format_figure_preserves_bbox(self):
+        """Skip-VLM Figure block preserves bbox."""
+        from epubforge.assembler import _parse_block
+        raw = {
+            "kind": "figure",
+            "caption": "Fig 1",
+            "image_ref": "p0005_img.png",
+            "bbox": [50, 100, 550, 400],
+            "provenance": {"page": 5, "source": "docling"},
+        }
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert isinstance(block, Figure)
+        assert block.bbox == [50, 100, 550, 400]
+        assert block.image_ref == "p0005_img.png"
+
+    def test_skip_vlm_format_equation_preserves_bbox(self):
+        """Skip-VLM Equation block preserves bbox."""
+        from epubforge.assembler import _parse_block
+        raw = {
+            "kind": "equation",
+            "latex": "E=mc^2",
+            "bbox": [100, 300, 400, 350],
+            "provenance": {"page": 7, "source": "docling"},
+        }
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert isinstance(block, Equation)
+        assert block.bbox == [100, 300, 400, 350]
+        assert block.latex == "E=mc^2"
+
+    def test_vlm_format_uses_default_page(self):
+        """VLM block without page key uses default_page."""
+        from epubforge.assembler import _parse_block
+        raw = {"kind": "paragraph", "text": "test"}
+        block = _parse_block(raw, default_page=10, source="vlm")
+        assert isinstance(block, Paragraph)
+        assert block.provenance.page == 10
+
+    def test_unknown_kind_returns_none(self):
+        """Unknown block kind returns None."""
+        from epubforge.assembler import _parse_block
+        raw = {"kind": "unknown_thing", "text": "test"}
+        block = _parse_block(raw, default_page=1, source="vlm")
+        assert block is None

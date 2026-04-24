@@ -150,7 +150,16 @@ def _fake_extract_skip_vlm(
             {
                 "kind": "paragraph",
                 "text": "Hello world.",
-                "provenance": {"page": 1, "source": "docling"},
+                "role": "docling_heading_candidate",
+                "provenance": {
+                    "page": 1,
+                    "bbox": [0, 792, 612, 0],
+                    "source": "docling",
+                    "raw_ref": "#/texts/0",
+                    "raw_label": "section_header",
+                    "artifact_id": "fake-artifact",
+                    "evidence_ref": "#/texts/0",
+                },
             }
         ],
         "evidence_refs": [],
@@ -263,6 +272,17 @@ def test_skip_vlm_e2e_no_api_key(
 
     # Book must have at least one chapter with at least one block
     assert book.chapters, "Assembled book must have at least one chapter"
+
+    # Verify role and provenance survive assembly
+    first_block = book.chapters[0].blocks[0]
+    assert isinstance(first_block, Paragraph)
+    assert first_block.role == "docling_heading_candidate", f"Expected role preserved, got {first_block.role!r}"
+    assert first_block.provenance.source == "docling"
+    assert first_block.provenance.bbox == [0, 792, 612, 0]
+    assert first_block.provenance.raw_ref == "#/texts/0"
+    assert first_block.provenance.raw_label == "section_header"
+    assert first_block.provenance.artifact_id == "fake-artifact"
+    assert first_block.provenance.evidence_ref == "#/texts/0"
 
     # -----------------------------------------------------------------------
     # Editor init

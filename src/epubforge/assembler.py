@@ -90,27 +90,36 @@ def assemble_from_manifest(work_dir: Path, manifest: Any) -> Book:
 
 def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block | None:
     kind = raw.get("kind", "")
-    page = raw.get("page", default_page)
-    prov = Provenance(page=page, source=source)  # type: ignore[arg-type]
+
+    # Detect block format: skip-VLM has nested provenance dict, VLM has flat page
+    prov_raw = raw.get("provenance")
+    if isinstance(prov_raw, dict):
+        page = prov_raw.get("page", default_page)
+        prov = Provenance(**prov_raw)
+    else:
+        page = raw.get("page", default_page)
+        prov = Provenance(page=page, source=source)  # type: ignore[arg-type]
+
     try:
         if kind == "paragraph":
-            return Paragraph(text=raw.get("text", ""), provenance=prov)
+            return Paragraph(text=raw.get("text", ""), role=raw.get("role", "body"), provenance=prov)
         if kind == "heading":
             return Heading(text=raw.get("text", ""), level=raw.get("level", 1), provenance=prov)
         if kind == "footnote":
             return Footnote(callout=str(raw.get("callout", "")), text=raw.get("text", ""), provenance=prov)
         if kind == "figure":
-            return Figure(caption=raw.get("caption", ""), image_ref=raw.get("image_ref"), provenance=prov)
+            return Figure(caption=raw.get("caption", ""), image_ref=raw.get("image_ref"), bbox=raw.get("bbox"), provenance=prov)
         if kind == "table":
             return Table(
                 html=raw.get("html", ""),
                 table_title=str(raw.get("table_title") or ""),
                 caption=str(raw.get("caption") or ""),
                 continuation=bool(raw.get("continuation", False)),
+                bbox=raw.get("bbox"),
                 provenance=prov,
             )
         if kind == "equation":
-            return Equation(latex=raw.get("latex", ""), provenance=prov)
+            return Equation(latex=raw.get("latex", ""), bbox=raw.get("bbox"), provenance=prov)
     except Exception as exc:
         log.warning("Skipping malformed block %s: %s", raw, exc)
     return None
