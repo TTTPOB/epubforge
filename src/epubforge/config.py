@@ -50,6 +50,17 @@ class EditorSettings(BaseModel):
     max_loops: int = 50
 
 
+class OcrSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    force_full_page_ocr: bool = True
+    ocr_version: str = "PP-OCRv5"
+    model_type: str = "mobile"
+    backend: str = "onnxruntime"
+    text_score: float = 0.5
+    bitmap_area_threshold: float = 0.05
+
+
 class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -57,6 +68,7 @@ class ExtractSettings(BaseModel):
     skip_vlm: bool = False
     max_vlm_batch_pages: int = 4
     enable_book_memory: bool = True
+    ocr: OcrSettings = Field(default_factory=OcrSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +159,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EXTRACT_SKIP_VLM",                      "extract", "skip_vlm",                  _bool_env),
     ("EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES",           "extract", "max_vlm_batch_pages",       int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY",                    "extract", "enable_book_memory",        _bool_env),
+    ("EPUBFORGE_EXTRACT_OCR_ENABLED",                   "extract.ocr", "enabled",              _bool_env),
 ]
 
 _SECTION_MODELS = {
@@ -167,7 +180,10 @@ def _apply_env_overrides(base: dict[str, Any]) -> dict[str, Any]:
         v = os.environ.get(env_name)
         if v is None:
             continue
-        section_data = base.setdefault(section, {})
+        parts = section.split(".")
+        section_data = base
+        for part in parts:
+            section_data = section_data.setdefault(part, {})
         section_data[field] = cast(v)
     return base
 

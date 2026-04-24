@@ -142,7 +142,7 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     source_pdf, _source_meta = _persist_source_pdf(pdf_path, work)
     log.info("Stage 1: parsing %s...", pdf_path.name)
     with stage_timer(log, "1 parse"):
-        parse_pdf(source_pdf, out, images_dir=work / "images")
+        parse_pdf(source_pdf, out, images_dir=work / "images", ocr_settings=cfg.extract.ocr)
     log.info("  -> %s", out)
 
 

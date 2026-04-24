@@ -20,7 +20,7 @@ def test_run_parse_persists_source_pdf_and_uses_it_for_docling(
     cfg = Config(runtime=RuntimeSettings(work_dir=tmp_path / "work"))
     calls: list[Path] = []
 
-    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path) -> None:
+    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs) -> None:
         calls.append(pdf_path)
         out_path.write_text('{"pages": {}}', encoding="utf-8")
 
@@ -56,7 +56,7 @@ def test_run_parse_falls_back_to_copy2_when_hardlink_fails(
     cfg = Config(runtime=RuntimeSettings(work_dir=tmp_path / "work"))
     copied: list[tuple[Path, Path]] = []
 
-    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path) -> None:
+    def fake_parse_pdf(pdf_path: Path, out_path: Path, *, images_dir: Path, **kwargs) -> None:
         out_path.write_text('{"pages": {}}', encoding="utf-8")
 
     def fake_link(src: Path, dst: Path) -> None:

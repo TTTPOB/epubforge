@@ -39,3 +39,11 @@ vlm_dpi              = 200   # DPI for page rendering sent to VLM
 skip_vlm             = false # skip Stage 3 VLM; use Docling-derived evidence draft
 max_vlm_batch_pages  = 4     # max pages per mechanical VLM batch
 enable_book_memory   = true  # maintain rolling BookMemory across extraction units
+
+[extract.ocr]
+enabled              = false        # enable RapidOCR for scanned PDFs (requires: pip install epubforge[ocr])
+# force_full_page_ocr = true        # OCR entire page (for fully scanned PDFs)
+# ocr_version         = "PP-OCRv5"  # PP-OCRv4 or PP-OCRv5
+# model_type          = "mobile"    # mobile (fast) or server (accurate)
+# backend             = "onnxruntime"
+# text_score          = 0.5         # detection confidence threshold
