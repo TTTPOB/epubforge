@@ -311,7 +311,9 @@ from epubforge.editor.patches import (  # noqa: E402
     _serialize_field_value as _serialize_field_value,
     apply_book_patch,
 )
-from epubforge.ir.semantic import Block, Book, Chapter  # noqa: E402
+from epubforge.editor.text_split import split_text  # noqa: E402
+from epubforge.ir.semantic import Block, Book, Chapter, Paragraph  # noqa: E402
+from epubforge.text_utils import cjk_join  # noqa: E402
 
 
 # PatchCommandAgentKind — local copy to avoid circular import from agent_output.py
@@ -382,6 +384,224 @@ def _check_uid_collision(book: Book, uid: str, command_id: str) -> None:
         for block in chapter.blocks:
             if block.uid == uid:
                 raise PatchCommandError(f"uid {uid!r} already exists (block)", command_id)
+
+
+# ---------------------------------------------------------------------------
+# WP3: split_block compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_split_block(
+    book: Book, command: PatchCommand, params: SplitBlockParams
+) -> tuple[list, PatchScope]:
+    chapter, block, _block_idx = _find_block(book, params.block_uid, command.command_id)
+
+    # Check text-bearing
+    if not hasattr(block, "text"):
+        raise PatchCommandError(
+            f"split_block only supports text-bearing blocks; got {block.kind}",
+            command.command_id,
+        )
+    text = getattr(block, "text")
+    if not isinstance(text, str):
+        raise PatchCommandError("block text field must be a string", command.command_id)
+
+    # Check new_block_uids for collisions
+    for uid in params.new_block_uids:
+        _check_uid_collision(book, uid, command.command_id)
+
+    # Check no duplicate UIDs within the command
+    all_new_uids = params.new_block_uids
+    if len(set(all_new_uids)) != len(all_new_uids):
+        raise PatchCommandError("new_block_uids contains duplicates", command.command_id)
+
+    # Get display_lines for at_line_index
+    display_lines = getattr(block, "display_lines", None) if isinstance(block, Paragraph) else None
+
+    # Split text
+    try:
+        segments = split_text(
+            text,
+            strategy=params.strategy,
+            marker_occurrence=params.marker_occurrence,
+            line_index=params.line_index,
+            text_match=params.text_match,
+            max_splits=params.max_splits,
+            display_lines=display_lines,
+        )
+    except ValueError as exc:
+        raise PatchCommandError(str(exc), command.command_id) from exc
+
+    # Validate segment count matches new_block_uids + 1 (original block keeps first segment)
+    expected_segments = params.max_splits + 1
+    if len(segments) != expected_segments:
+        raise PatchCommandError(
+            f"split produced {len(segments)} segments but expected {expected_segments}",
+            command.command_id,
+        )
+
+    changes: list = []
+
+    # 1. SetFieldChange: update original block text to first segment
+    old_text = _serialize_field_value(text)
+    changes.append({
+        "op": "set_field",
+        "target_uid": params.block_uid,
+        "field": "text",
+        "old": old_text,
+        "new": segments[0],
+    })
+
+    # 2. InsertNodeChange for each subsequent segment
+    prev_uid = params.block_uid
+    block_dump = block.model_dump(mode="python")
+    for i, segment in enumerate(segments[1:]):
+        new_uid = params.new_block_uids[i]
+        new_node = dict(block_dump)
+        new_node["uid"] = new_uid
+        new_node["text"] = segment
+        changes.append({
+            "op": "insert_node",
+            "parent_uid": chapter.uid,
+            "after_uid": prev_uid,
+            "node": new_node,
+        })
+        prev_uid = new_uid
+
+    scope = PatchScope(chapter_uid=chapter.uid)
+    return changes, scope
+
+
+_COMPILERS["split_block"] = _compile_split_block  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP3: merge_blocks compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_merge_blocks(
+    book: Book, command: PatchCommand, params: MergeBlocksParams
+) -> tuple[list, PatchScope]:
+    # Find all blocks and verify same chapter, contiguous, correct order
+    chapter = None
+    block_positions: list[tuple[Block, int]] = []
+
+    for uid in params.block_uids:
+        ch, blk, idx = _find_block(book, uid, command.command_id)
+        if chapter is None:
+            chapter = ch
+        elif ch.uid != chapter.uid:
+            raise PatchCommandError(
+                f"merge_blocks: all blocks must be in same chapter; "
+                f"{uid!r} is in {ch.uid!r} but first block is in {chapter.uid!r}",
+                command.command_id,
+            )
+        block_positions.append((blk, idx))
+
+    assert chapter is not None  # block_uids has min 2 items
+
+    # Check contiguous and in order
+    indices = [idx for _, idx in block_positions]
+    for i in range(1, len(indices)):
+        if indices[i] != indices[i - 1] + 1:
+            raise PatchCommandError(
+                "merge_blocks: blocks must be contiguous in chapter order",
+                command.command_id,
+            )
+
+    # Check all have the target field as a string
+    texts: list[str] = []
+    for blk, _ in block_positions:
+        field_val = getattr(blk, params.target_field, None)
+        if not isinstance(field_val, str):
+            raise PatchCommandError(
+                f"merge_blocks: block {blk.uid!r} has no text field '{params.target_field}'",
+                command.command_id,
+            )
+        texts.append(field_val)
+
+    # Join texts
+    if params.join == "cjk":
+        merged_text = cjk_join(texts)
+    elif params.join == "newline":
+        merged_text = "\n".join(texts)
+    else:  # concat
+        merged_text = "".join(texts)
+
+    changes: list = []
+
+    # 1. SetFieldChange on first block
+    first_block = block_positions[0][0]
+    old_text = _serialize_field_value(getattr(first_block, params.target_field))
+    changes.append({
+        "op": "set_field",
+        "target_uid": params.block_uids[0],
+        "field": params.target_field,
+        "old": old_text,
+        "new": merged_text,
+    })
+
+    # 2. DeleteNodeChange for remaining blocks
+    for uid in reversed(params.block_uids[1:]):
+        _ch, blk, _idx = _find_block(book, uid, command.command_id)
+        changes.append({
+            "op": "delete_node",
+            "target_uid": uid,
+            "old_node": blk.model_dump(mode="python"),
+        })
+
+    scope = PatchScope(chapter_uid=chapter.uid)
+    return changes, scope
+
+
+_COMPILERS["merge_blocks"] = _compile_merge_blocks  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP3: relocate_block compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_relocate_block(
+    book: Book, command: PatchCommand, params: RelocateBlockParams
+) -> tuple[list, PatchScope]:
+    src_chapter, _block, _idx = _find_block(book, params.block_uid, command.command_id)
+    tgt_chapter, _tgt_idx = _find_chapter(book, params.target_chapter_uid, command.command_id)
+
+    if params.after_uid is not None:
+        if params.after_uid == params.block_uid:
+            raise PatchCommandError(
+                "relocate_block: after_uid cannot be the same as block_uid",
+                command.command_id,
+            )
+        # Verify after_uid exists in target chapter
+        found = any(blk.uid == params.after_uid for blk in tgt_chapter.blocks)
+        if not found:
+            raise PatchCommandError(
+                f"relocate_block: after_uid {params.after_uid!r} not found in "
+                f"target chapter {params.target_chapter_uid!r}",
+                command.command_id,
+            )
+
+    changes: list = [{
+        "op": "move_node",
+        "target_uid": params.block_uid,
+        "from_parent_uid": src_chapter.uid,
+        "to_parent_uid": tgt_chapter.uid,
+        "after_uid": params.after_uid,
+    }]
+
+    # Same chapter = chapter scope, cross chapter = book-wide
+    if src_chapter.uid == tgt_chapter.uid:
+        scope = PatchScope(chapter_uid=src_chapter.uid)
+    else:
+        scope = PatchScope(chapter_uid=None)
+
+    return changes, scope
+
+
+_COMPILERS["relocate_block"] = _compile_relocate_block  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

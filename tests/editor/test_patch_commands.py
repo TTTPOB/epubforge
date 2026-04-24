@@ -27,9 +27,12 @@ from epubforge.editor.patch_commands import (
     _find_block,
     _find_chapter,
     command_params,
+    compile_patch_command,
     compile_patch_commands,
 )
-from epubforge.ir.semantic import Book, Chapter, Paragraph, Provenance
+from epubforge.editor.patches import apply_book_patch
+from epubforge.editor.text_split import split_text
+from epubforge.ir.semantic import Book, Chapter, Heading, Paragraph, Provenance
 
 
 # ---------------------------------------------------------------------------
@@ -948,14 +951,14 @@ class TestCompilerInfrastructure:
         book = _make_book()
         cmd = PatchCommand(
             command_id=str(uuid4()),
-            op="split_block",
+            op="split_chapter",
             agent_id="fixer-1",
             rationale="test",
             params={
-                "block_uid": "blk-1",
-                "strategy": "at_sentence",
-                "max_splits": 1,
-                "new_block_uids": ["blk-new"],
+                "chapter_uid": "ch-1",
+                "split_at_block_uid": "blk-1",
+                "new_chapter_title": "Part Two",
+                "new_chapter_uid": str(uuid4()),
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
@@ -1028,3 +1031,444 @@ class TestCompilerInfrastructure:
         book = _make_book()
         # Should not raise
         _check_uid_collision(book, "brand-new-uid-xyz", "cmd-test")
+
+
+# ---------------------------------------------------------------------------
+# §11 WP3 Compiler: split_block
+# ---------------------------------------------------------------------------
+
+
+def _prov(page: int = 1) -> Provenance:
+    return Provenance(page=page, source="passthrough")
+
+
+def _make_test_book() -> Book:
+    """Book with 2 chapters, several blocks each."""
+    return Book(
+        title="Test Book",
+        uid_seed="test-seed",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(uid="p1", text="Hello world. This is a test.", role="body", provenance=_prov()),
+                    Paragraph(uid="p2", text="Second paragraph.", role="body", provenance=_prov()),
+                    Paragraph(uid="p3", text="Third paragraph.", role="body", provenance=_prov()),
+                ],
+            ),
+            Chapter(
+                uid="ch-2",
+                title="Chapter 2",
+                blocks=[
+                    Paragraph(uid="p4", text="Chapter two text.", role="body", provenance=_prov()),
+                ],
+            ),
+        ],
+    )
+
+
+class TestSplitBlockCompiler:
+    def test_split_at_sentence(self):
+        """Valid split_block at_sentence produces correct changes."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="Split at sentence",
+            params={
+                "block_uid": "p1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["p1-b"],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        # Should have 2 changes: set_field + insert_node
+        assert len(patch.changes) == 2
+        assert patch.scope.chapter_uid == "ch-1"
+
+    def test_split_at_text_match(self):
+        """Valid split_block at_text_match produces correct changes."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="Split at text match",
+            params={
+                "block_uid": "p1",
+                "strategy": "at_text_match",
+                "text_match": "This is",
+                "max_splits": 1,
+                "new_block_uids": ["p1-b"],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        assert len(patch.changes) == 2
+        # Verify the set_field change has correct old and new values
+        set_field = patch.changes[0]
+        assert set_field.op == "set_field"
+        assert set_field.old == "Hello world. This is a test."  # full original text
+        assert set_field.new == "Hello world. "  # first segment (up to "This is")
+
+    def test_split_block_on_heading_with_text(self):
+        """split_block works on a Heading block (which has a 'text' field)."""
+        prov = _prov()
+        book = Book(
+            title="T",
+            chapters=[
+                Chapter(
+                    uid="ch-x",
+                    title="X",
+                    blocks=[
+                        Heading(uid="h1", text="First sentence. Second sentence.", level=1, provenance=prov),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "h1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["h2"],
+            },
+        )
+        # Heading has text field — compiler should succeed
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-x"
+        )
+        assert patch is not None
+        assert len(patch.changes) == 2
+
+    def test_new_block_uid_collision_fails(self):
+        """new_block_uids that collide with existing UIDs raises PatchCommandError."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "p1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["p2"],  # p2 already exists
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+            )
+        assert "already exists" in str(exc_info.value)
+
+    def test_compiled_patch_applies(self):
+        """split_block compiled patch can be applied via apply_book_patch."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="Split at sentence boundary",
+            params={
+                "block_uid": "p1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["p1-new"],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        new_book = apply_book_patch(book, patch)
+        # ch-1 should now have 4 blocks (was 3, +1 from split)
+        assert len(new_book.chapters[0].blocks) == 4
+        # Verify the new block uid exists
+        uids = [b.uid for b in new_book.chapters[0].blocks]
+        assert "p1-new" in uids
+
+
+# ---------------------------------------------------------------------------
+# §12 WP3 Compiler: merge_blocks
+# ---------------------------------------------------------------------------
+
+
+class TestMergeBlocksCompiler:
+    def test_merge_two_adjacent_blocks_concat(self):
+        """Valid merge_blocks of 2 adjacent blocks with concat join."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="Merge adjacent",
+            params={
+                "block_uids": ["p1", "p2"],
+                "join": "concat",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        # Should have 2 changes: set_field + delete_node
+        assert len(patch.changes) == 2
+        assert patch.scope.chapter_uid == "ch-1"
+        assert patch.changes[0].op == "set_field"
+        assert patch.changes[1].op == "delete_node"
+
+    def test_merge_with_cjk_join(self):
+        """merge_blocks with cjk join produces correct merged text."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="CJK merge",
+            params={
+                "block_uids": ["p2", "p3"],
+                "join": "cjk",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        assert len(patch.changes) == 2
+        # The new text should be the cjk_join of "Second paragraph." and "Third paragraph."
+        set_change = patch.changes[0]
+        assert set_change.op == "set_field"
+        assert "Second paragraph" in set_change.new
+        assert "Third paragraph" in set_change.new
+
+    def test_blocks_in_different_chapters_fails(self):
+        """merge_blocks across different chapters raises PatchCommandError."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uids": ["p3", "p4"],  # p3 in ch-1, p4 in ch-2
+                "join": "concat",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
+        assert "same chapter" in str(exc_info.value)
+
+    def test_non_contiguous_blocks_fails(self):
+        """merge_blocks with non-contiguous blocks raises PatchCommandError."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uids": ["p1", "p3"],  # p1 and p3 are not adjacent (p2 is between)
+                "join": "concat",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+            )
+        assert "contiguous" in str(exc_info.value)
+
+    def test_compiled_merge_applies(self):
+        """merge_blocks compiled patch can be applied via apply_book_patch."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="Merge blocks",
+            params={
+                "block_uids": ["p1", "p2"],
+                "join": "concat",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        new_book = apply_book_patch(book, patch)
+        # ch-1 should now have 2 blocks (was 3, -1 from merge)
+        assert len(new_book.chapters[0].blocks) == 2
+        # p2 should be gone
+        uids = [b.uid for b in new_book.chapters[0].blocks]
+        assert "p2" not in uids
+        assert "p1" in uids
+
+
+# ---------------------------------------------------------------------------
+# §13 WP3 Compiler: relocate_block
+# ---------------------------------------------------------------------------
+
+
+class TestRelocateBlockCompiler:
+    def test_same_chapter_move(self):
+        """relocate_block within same chapter produces chapter scope."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="relocate_block",
+            agent_id="fixer-1",
+            rationale="Reorder within chapter",
+            params={
+                "block_uid": "p1",
+                "target_chapter_uid": "ch-1",
+                "after_uid": "p3",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        assert patch.scope.chapter_uid == "ch-1"
+        assert len(patch.changes) == 1
+        assert patch.changes[0].op == "move_node"
+
+    def test_cross_chapter_move_book_scope(self):
+        """relocate_block across chapters produces book-wide scope (chapter_uid=None)."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="relocate_block",
+            agent_id="fixer-1",
+            rationale="Move to chapter 2",
+            params={
+                "block_uid": "p1",
+                "target_chapter_uid": "ch-2",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        assert patch.scope.chapter_uid is None
+        assert len(patch.changes) == 1
+        assert patch.changes[0].op == "move_node"
+
+    def test_after_uid_not_in_target_chapter_fails(self):
+        """after_uid not in target chapter raises PatchCommandError."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="relocate_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "p1",
+                "target_chapter_uid": "ch-2",
+                "after_uid": "p2",  # p2 is in ch-1, not ch-2
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(
+                book, cmd, output_kind="fixer", output_chapter_uid=None
+            )
+        assert "after_uid" in str(exc_info.value)
+
+    def test_compiled_relocate_applies(self):
+        """relocate_block compiled patch can be applied via apply_book_patch."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="relocate_block",
+            agent_id="fixer-1",
+            rationale="Move p1 to chapter 2",
+            params={
+                "block_uid": "p1",
+                "target_chapter_uid": "ch-2",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        new_book = apply_book_patch(book, patch)
+        # ch-1 should have 2 blocks now (was 3)
+        assert len(new_book.chapters[0].blocks) == 2
+        # ch-2 should have 2 blocks now (was 1)
+        assert len(new_book.chapters[1].blocks) == 2
+        ch2_uids = [b.uid for b in new_book.chapters[1].blocks]
+        assert "p1" in ch2_uids
+
+
+# ---------------------------------------------------------------------------
+# §14 text_split.split_text unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestSplitText:
+    def test_at_sentence_basic(self):
+        """at_sentence splits text at sentence boundary."""
+        result = split_text(
+            "Hello world. This is second.",
+            strategy="at_sentence",
+            max_splits=1,
+        )
+        assert len(result) == 2
+        assert result[0] == "Hello world. "
+        assert result[1] == "This is second."
+
+    def test_at_text_match_basic(self):
+        """at_text_match splits at the given substring."""
+        result = split_text(
+            "Hello world. This is second.",
+            strategy="at_text_match",
+            text_match="This",
+        )
+        assert len(result) == 2
+        assert result[0] == "Hello world. "
+        assert result[1] == "This is second."
+
+    def test_at_text_match_no_match_fails(self):
+        """at_text_match raises ValueError when text_match not found."""
+        with pytest.raises(ValueError, match="not found"):
+            split_text("Hello world.", strategy="at_text_match", text_match="xyz")
+
+    def test_at_text_match_requires_text_match(self):
+        """at_text_match raises ValueError when text_match is None."""
+        with pytest.raises(ValueError, match="text_match is required"):
+            split_text("Hello world.", strategy="at_text_match")
+
+    def test_at_line_index_basic(self):
+        """at_line_index splits at the given line boundary."""
+        result = split_text(
+            "line1\nline2\nline3",
+            strategy="at_line_index",
+            line_index=0,
+            display_lines=["line1", "line2", "line3"],
+        )
+        assert len(result) == 2
+        assert result[0] == "line1"
+        assert result[1] == "line2\nline3"
+
+    def test_at_line_index_requires_display_lines(self):
+        """at_line_index raises ValueError when display_lines is None."""
+        with pytest.raises(ValueError, match="display_lines"):
+            split_text("hello", strategy="at_line_index", line_index=0)
+
+    def test_at_sentence_not_enough_breaks_fails(self):
+        """at_sentence raises ValueError if not enough sentence breaks."""
+        with pytest.raises(ValueError, match="could not produce"):
+            split_text("No sentence break here", strategy="at_sentence", max_splits=1)
+
+    def test_at_sentence_multiple_splits(self):
+        """at_sentence with max_splits=2 produces 3 segments."""
+        result = split_text(
+            "First. Second. Third.",
+            strategy="at_sentence",
+            max_splits=2,
+        )
+        assert len(result) == 3

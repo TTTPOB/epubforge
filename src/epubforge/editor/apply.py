@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,11 +48,9 @@ from epubforge.ir.semantic import (
     Table,
     TableMergeRecord,
 )
+from epubforge.editor.text_split import split_text as _split_text_fn
 from epubforge.markers import FN_MARKER_FULL_RE, has_raw_callout, make_fn_marker, replace_first_raw, replace_nth_raw
 from epubforge.text_utils import cjk_join
-
-
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
 
 
 class ApplyError(RuntimeError):
@@ -213,49 +210,24 @@ def _join_text(parts: list[str], join: Literal["concat", "cjk", "newline"]) -> s
 def _split_text(block: Block, op: SplitBlock, *, op_id: str) -> list[str]:
     if not hasattr(block, "text"):
         raise ApplyError(f"split_block only supports text-bearing blocks; got {block.kind}", op_id)
-
     text = getattr(block, "text")
     if not isinstance(text, str):
         raise ApplyError("split_block text field must be a string", op_id)
 
-    if op.strategy == "at_text_match":
-        assert op.text_match is not None
-        idx = text.find(op.text_match)
-        if idx <= 0:
-            raise ApplyError(f"text_match {op.text_match!r} not found for split", op_id)
-        return [text[:idx], text[idx:]]
+    display_lines = getattr(block, "display_lines", None) if isinstance(block, Paragraph) else None
 
-    if op.strategy == "at_marker":
-        assert op.marker_occurrence is not None
-        matches = list(FN_MARKER_FULL_RE.finditer(text))
-        if len(matches) < op.marker_occurrence:
-            raise ApplyError("marker occurrence for split_block not found", op_id)
-        cut = matches[op.marker_occurrence - 1].end()
-        return [text[:cut], text[cut:]]
-
-    if op.strategy == "at_line_index":
-        if not isinstance(block, Paragraph) or block.display_lines is None:
-            raise ApplyError("at_line_index requires paragraph.display_lines", op_id)
-        assert op.line_index is not None
-        if op.line_index >= len(block.display_lines) - 1:
-            raise ApplyError("line_index must leave content on both sides of split", op_id)
-        left = "\n".join(block.display_lines[: op.line_index + 1])
-        right = "\n".join(block.display_lines[op.line_index + 1 :])
-        return [left, right]
-
-    sentence_breaks = [match.end() for match in _SENTENCE_SPLIT_RE.finditer(text)]
-    if len(sentence_breaks) < op.max_splits:
-        raise ApplyError("at_sentence could not produce enough segments", op_id)
-    cut_positions = sentence_breaks[: op.max_splits]
-    segments: list[str] = []
-    start = 0
-    for cut in cut_positions:
-        segments.append(text[start:cut])
-        start = cut
-    segments.append(text[start:])
-    if any(segment == "" for segment in segments):
-        raise ApplyError("at_sentence produced an empty split segment", op_id)
-    return segments
+    try:
+        return _split_text_fn(
+            text,
+            strategy=op.strategy,
+            marker_occurrence=op.marker_occurrence or 1,
+            line_index=op.line_index,
+            text_match=op.text_match,
+            max_splits=op.max_splits,
+            display_lines=display_lines,
+        )
+    except ValueError as exc:
+        raise ApplyError(str(exc), op_id) from exc
 
 
 def _make_block(kind: str, uid: str, payload: dict[str, object]) -> Block:
