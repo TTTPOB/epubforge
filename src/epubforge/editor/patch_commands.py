@@ -312,7 +312,10 @@ from epubforge.editor.patches import (  # noqa: E402
     apply_book_patch,
 )
 from epubforge.editor.text_split import split_text  # noqa: E402
-from epubforge.ir.semantic import Block, Book, Chapter, Paragraph  # noqa: E402
+from epubforge.fields import iter_block_text_fields  # noqa: E402
+from epubforge.ir.semantic import Block, Book, Chapter, Footnote, Paragraph  # noqa: E402
+from epubforge.markers import count_raw_callout, has_raw_callout, make_fn_marker, replace_nth_raw  # noqa: E402
+from epubforge.query import find_markers  # noqa: E402
 from epubforge.text_utils import cjk_join  # noqa: E402
 
 
@@ -799,6 +802,278 @@ def _compile_merge_chapters(
 
 
 _COMPILERS["merge_chapters"] = _compile_merge_chapters  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP5: pair_footnote compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_pair_footnote(
+    book: Book, command: PatchCommand, params: PairFootnoteParams
+) -> tuple[list, PatchScope]:
+    # 1. Find footnote block and verify it is a Footnote
+    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    if not isinstance(fn_block, Footnote):
+        raise PatchCommandError(
+            f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
+            command.command_id,
+        )
+    fn = fn_block
+
+    # 2. Find source block
+    source_chapter, source_block, _source_idx = _find_block(
+        book, params.source_block_uid, command.command_id
+    )
+
+    # 3. Find the text field that contains the raw callout
+    found_field: str | None = None
+    found_value: str | None = None
+    for field_name, field_value in iter_block_text_fields(source_block):
+        if has_raw_callout(field_value, fn.callout):
+            found_field = field_name
+            found_value = field_value
+            break
+
+    if found_field is None or found_value is None:
+        raise PatchCommandError(
+            f"source block {params.source_block_uid!r} has no raw callout {fn.callout!r}",
+            command.command_id,
+        )
+
+    # 4. Validate occurrence_index
+    callout_count = count_raw_callout(found_value, fn.callout)
+    if params.occurrence_index >= callout_count:
+        raise PatchCommandError(
+            f"occurrence_index {params.occurrence_index} is out of range "
+            f"(callout {fn.callout!r} appears {callout_count} time(s) in field {found_field!r})",
+            command.command_id,
+        )
+
+    # 5. Generate replacement text: raw callout → fn marker
+    marker = make_fn_marker(fn.provenance.page, fn.callout)
+    new_text = replace_nth_raw(found_value, fn.callout, marker, params.occurrence_index)
+
+    changes: list = []
+
+    # 6a. If footnote is orphan=True, clear it first
+    if fn.orphan:
+        changes.append({
+            "op": "set_field",
+            "target_uid": params.fn_block_uid,
+            "field": "orphan",
+            "old": True,
+            "new": False,
+        })
+
+    # 6b. Update source block text field: raw callout → marker
+    changes.append({
+        "op": "set_field",
+        "target_uid": params.source_block_uid,
+        "field": found_field,
+        "old": _serialize_field_value(found_value),
+        "new": new_text,
+    })
+
+    # 6c. Set paired=True
+    changes.append({
+        "op": "set_field",
+        "target_uid": params.fn_block_uid,
+        "field": "paired",
+        "old": fn.paired,
+        "new": True,
+    })
+
+    # 7. Determine scope
+    if fn_chapter.uid == source_chapter.uid:
+        scope = PatchScope(chapter_uid=fn_chapter.uid)
+    else:
+        scope = PatchScope(chapter_uid=None)
+
+    return changes, scope
+
+
+_COMPILERS["pair_footnote"] = _compile_pair_footnote  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP5: unpair_footnote compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_unpair_footnote(
+    book: Book, command: PatchCommand, params: UnpairFootnoteParams
+) -> tuple[list, PatchScope]:
+    # 1. Find footnote block and verify it is a Footnote
+    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    if not isinstance(fn_block, Footnote):
+        raise PatchCommandError(
+            f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
+            command.command_id,
+        )
+    fn = fn_block
+
+    # 2. Must be currently paired
+    if not fn.paired:
+        raise PatchCommandError(
+            f"footnote {params.fn_block_uid!r} is not currently paired",
+            command.command_id,
+        )
+
+    # 3. Find marker in the book
+    markers = find_markers(book, page=fn.provenance.page, callout=fn.callout)
+    if not markers:
+        raise PatchCommandError(
+            f"footnote {params.fn_block_uid!r} is paired but no marker found in book",
+            command.command_id,
+        )
+    if params.occurrence_index >= len(markers):
+        raise PatchCommandError(
+            f"occurrence_index {params.occurrence_index} is out of range "
+            f"(found {len(markers)} marker(s))",
+            command.command_id,
+        )
+    marker_ref = markers[params.occurrence_index]
+
+    # 4. Reconstruct source text: replace marker with raw callout
+    current_value = getattr(marker_ref.block, marker_ref.field)
+    new_value = current_value.replace(marker_ref.marker, fn.callout, 1)
+
+    changes: list = []
+
+    # 5a. Update source field: marker → raw callout
+    changes.append({
+        "op": "set_field",
+        "target_uid": marker_ref.block.uid,
+        "field": marker_ref.field,
+        "old": _serialize_field_value(current_value),
+        "new": new_value,
+    })
+
+    # 5b. Set paired=False
+    changes.append({
+        "op": "set_field",
+        "target_uid": params.fn_block_uid,
+        "field": "paired",
+        "old": True,
+        "new": False,
+    })
+
+    # 6. Determine scope
+    assert marker_ref.block.uid is not None
+    marker_chapter, _marker_block, _marker_idx = _find_block(
+        book, marker_ref.block.uid, command.command_id
+    )
+    if fn_chapter.uid == marker_chapter.uid:
+        scope = PatchScope(chapter_uid=fn_chapter.uid)
+    else:
+        scope = PatchScope(chapter_uid=None)
+
+    return changes, scope
+
+
+_COMPILERS["unpair_footnote"] = _compile_unpair_footnote  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP5: mark_orphan compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_mark_orphan(
+    book: Book, command: PatchCommand, params: MarkOrphanParams
+) -> tuple[list, PatchScope]:
+    # 1. Find footnote block and verify it is a Footnote
+    fn_chapter, fn_block, _fn_idx = _find_block(book, params.fn_block_uid, command.command_id)
+    if not isinstance(fn_block, Footnote):
+        raise PatchCommandError(
+            f"block {params.fn_block_uid!r} is not a footnote (kind={fn_block.kind!r})",
+            command.command_id,
+        )
+    fn = fn_block
+
+    # 2. Must not already be orphan
+    if fn.orphan:
+        raise PatchCommandError(
+            f"footnote {params.fn_block_uid!r} is already marked as orphan",
+            command.command_id,
+        )
+
+    # 3. Check if a marker exists
+    markers = find_markers(book, page=fn.provenance.page, callout=fn.callout)
+
+    changes: list = []
+
+    if markers and params.occurrence_index < len(markers):
+        # Marker exists — restore source field and clear paired
+        marker_ref = markers[params.occurrence_index]
+        current_value = getattr(marker_ref.block, marker_ref.field)
+        new_value = current_value.replace(marker_ref.marker, fn.callout, 1)
+
+        # Restore source field: marker → raw callout
+        changes.append({
+            "op": "set_field",
+            "target_uid": marker_ref.block.uid,
+            "field": marker_ref.field,
+            "old": _serialize_field_value(current_value),
+            "new": new_value,
+        })
+
+        # Clear paired if needed
+        if fn.paired:
+            changes.append({
+                "op": "set_field",
+                "target_uid": params.fn_block_uid,
+                "field": "paired",
+                "old": True,
+                "new": False,
+            })
+
+        # Set orphan=True
+        changes.append({
+            "op": "set_field",
+            "target_uid": params.fn_block_uid,
+            "field": "orphan",
+            "old": False,
+            "new": True,
+        })
+
+        # Scope: consider both fn chapter and marker source chapter
+        assert marker_ref.block.uid is not None
+        marker_chapter, _marker_block, _marker_idx = _find_block(
+            book, marker_ref.block.uid, command.command_id
+        )
+        if fn_chapter.uid == marker_chapter.uid:
+            scope = PatchScope(chapter_uid=fn_chapter.uid)
+        else:
+            scope = PatchScope(chapter_uid=None)
+
+    else:
+        # No marker — just set paired=False (if needed) and orphan=True
+        if fn.paired:
+            changes.append({
+                "op": "set_field",
+                "target_uid": params.fn_block_uid,
+                "field": "paired",
+                "old": True,
+                "new": False,
+            })
+
+        changes.append({
+            "op": "set_field",
+            "target_uid": params.fn_block_uid,
+            "field": "orphan",
+            "old": False,
+            "new": True,
+        })
+
+        # Chapter-scoped (fn chapter only)
+        scope = PatchScope(chapter_uid=fn_chapter.uid)
+
+    return changes, scope
+
+
+_COMPILERS["mark_orphan"] = _compile_mark_orphan  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

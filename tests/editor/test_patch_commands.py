@@ -32,7 +32,8 @@ from epubforge.editor.patch_commands import (
 )
 from epubforge.editor.patches import apply_book_patch
 from epubforge.editor.text_split import split_text
-from epubforge.ir.semantic import Book, Chapter, Heading, Paragraph, Provenance
+from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance
+from epubforge.markers import make_fn_marker
 
 
 # ---------------------------------------------------------------------------
@@ -951,12 +952,14 @@ class TestCompilerInfrastructure:
         book = _make_book()
         cmd = PatchCommand(
             command_id=str(uuid4()),
-            op="pair_footnote",
+            op="split_merged_table",
             agent_id="fixer-1",
             rationale="test",
             params={
-                "fn_block_uid": "fn-001",
-                "source_block_uid": "blk-1",
+                "block_uid": "blk-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [1, 2],
+                "new_block_uids": ["t1", "t2"],
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
@@ -1845,3 +1848,656 @@ class TestMergeChaptersCompiler:
         assert merged.blocks[0].uid == "se1"
         assert merged.blocks[1].uid == "se2"
         assert merged.blocks[2].uid == "pe1"
+
+
+# ---------------------------------------------------------------------------
+# §17 WP5 Helpers: footnote test book builders
+# ---------------------------------------------------------------------------
+
+
+def _make_footnote_book() -> Book:
+    """Book with one chapter containing a paragraph with raw callout and a footnote block."""
+    prov_p1 = Provenance(page=3, source="passthrough")
+    prov_fn = Provenance(page=3, source="passthrough")
+    return Book(
+        title="Footnote Test",
+        chapters=[
+            Chapter(
+                uid="ch-fn",
+                title="Chapter with Footnotes",
+                blocks=[
+                    Paragraph(
+                        uid="p-src",
+                        text="See note 1) for details.",
+                        role="body",
+                        provenance=prov_p1,
+                    ),
+                    Footnote(
+                        uid="fn-1",
+                        callout="1)",
+                        text="This is footnote text.",
+                        paired=False,
+                        orphan=False,
+                        provenance=prov_fn,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _make_footnote_book_paired() -> Book:
+    """Book where footnote is already paired (marker in source text)."""
+    prov_p1 = Provenance(page=3, source="passthrough")
+    prov_fn = Provenance(page=3, source="passthrough")
+    marker = make_fn_marker(3, "1)")
+    return Book(
+        title="Footnote Test",
+        chapters=[
+            Chapter(
+                uid="ch-fn",
+                title="Chapter with Footnotes",
+                blocks=[
+                    Paragraph(
+                        uid="p-src",
+                        text=f"See {marker} for details.",
+                        role="body",
+                        provenance=prov_p1,
+                    ),
+                    Footnote(
+                        uid="fn-1",
+                        callout="1)",
+                        text="This is footnote text.",
+                        paired=True,
+                        orphan=False,
+                        provenance=prov_fn,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _make_footnote_book_orphan() -> Book:
+    """Book where footnote is orphan=True (no marker in source text, raw callout missing too)."""
+    prov_fn = Provenance(page=3, source="passthrough")
+    return Book(
+        title="Footnote Test",
+        chapters=[
+            Chapter(
+                uid="ch-fn",
+                title="Chapter with Footnotes",
+                blocks=[
+                    Paragraph(
+                        uid="p-src",
+                        text="See note 1) for details.",
+                        role="body",
+                        provenance=Provenance(page=3, source="passthrough"),
+                    ),
+                    Footnote(
+                        uid="fn-1",
+                        callout="1)",
+                        text="This is footnote text.",
+                        paired=False,
+                        orphan=True,
+                        provenance=prov_fn,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _make_cross_chapter_footnote_book() -> Book:
+    """Book with footnote in ch-2, source paragraph in ch-1 (cross-chapter scenario)."""
+    prov1 = Provenance(page=1, source="passthrough")
+    prov2 = Provenance(page=2, source="passthrough")
+    return Book(
+        title="Cross Chapter Test",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter One",
+                blocks=[
+                    Paragraph(
+                        uid="p-cross",
+                        text="Text with 2) callout here.",
+                        role="body",
+                        provenance=prov1,
+                    ),
+                ],
+            ),
+            Chapter(
+                uid="ch-2",
+                title="Chapter Two",
+                blocks=[
+                    Footnote(
+                        uid="fn-cross",
+                        callout="2)",
+                        text="Cross-chapter footnote.",
+                        paired=False,
+                        orphan=False,
+                        provenance=prov2,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# §18 WP5 Compiler: pair_footnote
+# ---------------------------------------------------------------------------
+
+
+class TestPairFootnoteCompiler:
+    def test_valid_pair(self):
+        """Valid pair_footnote: source block has raw callout, footnote gets paired."""
+        book = _make_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="Pair footnote with callout in source",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-src",
+                "occurrence_index": 0,
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        # Changes: set_field text, set_field paired (2 changes; no orphan change since orphan=False)
+        assert len(patch.changes) == 2
+        assert patch.scope.chapter_uid == "ch-fn"
+        text_change = patch.changes[0]
+        paired_change = patch.changes[1]
+        assert text_change.op == "set_field"
+        assert text_change.target_uid == "p-src"
+        assert text_change.field == "text"
+        assert paired_change.op == "set_field"
+        assert paired_change.target_uid == "fn-1"
+        assert paired_change.field == "paired"
+        assert paired_change.new is True
+
+    def test_fn_block_not_footnote_raises(self):
+        """fn_block_uid pointing to non-footnote raises PatchCommandError."""
+        book = _make_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "fn_block_uid": "p-src",  # paragraph, not footnote
+                "source_block_uid": "p-src",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not a footnote" in str(exc_info.value)
+
+    def test_source_block_no_raw_callout_raises(self):
+        """Source block without the raw callout raises PatchCommandError."""
+        prov = Provenance(page=3, source="passthrough")
+        book = Book(
+            title="Test",
+            chapters=[
+                Chapter(
+                    uid="ch-fn",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="p-no-callout",
+                            text="No footnote reference here.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                        Footnote(
+                            uid="fn-1",
+                            callout="1)",
+                            text="Footnote text.",
+                            paired=False,
+                            orphan=False,
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-no-callout",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "no raw callout" in str(exc_info.value)
+
+    def test_occurrence_index_out_of_range_raises(self):
+        """occurrence_index >= callout count raises PatchCommandError."""
+        book = _make_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-src",
+                "occurrence_index": 5,  # callout appears only once
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "out of range" in str(exc_info.value)
+
+    def test_compiled_patch_applies_correctly(self):
+        """Compiled pair_footnote patch applies: marker in text, paired=True."""
+        book = _make_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="Pair footnote",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-src",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        new_book = apply_book_patch(book, patch)
+
+        ch = new_book.chapters[0]
+        src_block = ch.blocks[0]
+        fn_block = ch.blocks[1]
+        assert isinstance(fn_block, Footnote)
+        assert fn_block.paired is True
+        assert fn_block.orphan is False
+        # Raw callout should be replaced with marker
+        expected_marker = make_fn_marker(3, "1)")
+        assert expected_marker in src_block.text  # type: ignore[union-attr]
+        # The raw callout should not appear outside markers
+        from epubforge.markers import strip_markers
+        assert "1)" not in strip_markers(src_block.text)  # type: ignore[union-attr]
+
+    def test_pair_orphan_footnote_clears_orphan_first(self):
+        """pair_footnote on orphan=True footnote generates orphan=False change first."""
+        book = _make_footnote_book_orphan()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="Pair an orphan footnote",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-src",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        # Changes: orphan=False, text update, paired=True (3 changes)
+        assert len(patch.changes) == 3
+        orphan_change = patch.changes[0]
+        paired_change = patch.changes[2]
+        assert orphan_change.op == "set_field"
+        assert orphan_change.field == "orphan"
+        assert orphan_change.old is True
+        assert orphan_change.new is False
+        assert paired_change.field == "paired"  # type: ignore[union-attr]
+        assert paired_change.new is True  # type: ignore[union-attr]
+
+    def test_pair_orphan_applies_correctly(self):
+        """Compiled pair_footnote on orphan footnote results in paired=True, orphan=False."""
+        book = _make_footnote_book_orphan()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="Pair an orphan footnote",
+            params={
+                "fn_block_uid": "fn-1",
+                "source_block_uid": "p-src",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        new_book = apply_book_patch(book, patch)
+        fn_block = new_book.chapters[0].blocks[1]
+        assert isinstance(fn_block, Footnote)
+        assert fn_block.paired is True
+        assert fn_block.orphan is False
+
+    def test_cross_chapter_pair_is_book_wide(self):
+        """pair_footnote where fn and source are in different chapters → scope book-wide."""
+        book = _make_cross_chapter_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="pair_footnote",
+            agent_id="fixer-1",
+            rationale="Cross-chapter pair",
+            params={
+                "fn_block_uid": "fn-cross",
+                "source_block_uid": "p-cross",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        assert patch.scope.chapter_uid is None
+
+
+# ---------------------------------------------------------------------------
+# §19 WP5 Compiler: unpair_footnote
+# ---------------------------------------------------------------------------
+
+
+class TestUnpairFootnoteCompiler:
+    def test_valid_unpair(self):
+        """Valid unpair_footnote: marker in source replaced with raw callout, paired=False."""
+        book = _make_footnote_book_paired()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="unpair_footnote",
+            agent_id="fixer-1",
+            rationale="Remove pairing",
+            params={
+                "fn_block_uid": "fn-1",
+                "occurrence_index": 0,
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        # 2 changes: text field update, paired=False
+        assert len(patch.changes) == 2
+        assert patch.scope.chapter_uid == "ch-fn"
+        text_change = patch.changes[0]
+        paired_change = patch.changes[1]
+        assert text_change.op == "set_field"
+        assert text_change.target_uid == "p-src"
+        assert text_change.field == "text"
+        assert paired_change.op == "set_field"
+        assert paired_change.field == "paired"
+        assert paired_change.old is True
+        assert paired_change.new is False
+
+    def test_footnote_not_paired_raises(self):
+        """unpair_footnote on unpaired footnote raises PatchCommandError."""
+        book = _make_footnote_book()  # paired=False by default
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="unpair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={"fn_block_uid": "fn-1"},
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not currently paired" in str(exc_info.value)
+
+    def test_no_marker_found_raises(self):
+        """unpair_footnote when footnote.paired=True but no marker in book raises."""
+        prov = Provenance(page=5, source="passthrough")
+        book = Book(
+            title="Test",
+            chapters=[
+                Chapter(
+                    uid="ch-x",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="p-x",
+                            text="No marker here.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                        Footnote(
+                            uid="fn-x",
+                            callout="*",
+                            text="Orphan-like.",
+                            paired=True,  # inconsistent state — no marker in book
+                            orphan=False,
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="unpair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={"fn_block_uid": "fn-x"},
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "no marker found" in str(exc_info.value)
+
+    def test_fn_block_not_footnote_raises(self):
+        """unpair_footnote with non-footnote uid raises PatchCommandError."""
+        book = _make_footnote_book_paired()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="unpair_footnote",
+            agent_id="fixer-1",
+            rationale="test",
+            params={"fn_block_uid": "p-src"},  # paragraph, not footnote
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not a footnote" in str(exc_info.value)
+
+    def test_compiled_patch_applies_correctly(self):
+        """Compiled unpair_footnote patch: marker removed from source, paired=False."""
+        book = _make_footnote_book_paired()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="unpair_footnote",
+            agent_id="fixer-1",
+            rationale="Unpair footnote",
+            params={"fn_block_uid": "fn-1"},
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        new_book = apply_book_patch(book, patch)
+
+        ch = new_book.chapters[0]
+        src_block = ch.blocks[0]
+        fn_block = ch.blocks[1]
+        assert isinstance(fn_block, Footnote)
+        assert fn_block.paired is False
+        # Marker should be gone, replaced with raw callout
+        marker = make_fn_marker(3, "1)")
+        assert marker not in src_block.text  # type: ignore[union-attr]
+        assert "1)" in src_block.text  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# §20 WP5 Compiler: mark_orphan
+# ---------------------------------------------------------------------------
+
+
+class TestMarkOrphanCompiler:
+    def test_valid_mark_orphan_no_marker(self):
+        """mark_orphan with no marker in book: orphan=True set, chapter-scoped."""
+        book = _make_footnote_book()
+        # Source block has raw callout "1)" but no marker — so find_markers returns []
+        # First, remove the raw callout from source so no marker exists at all
+        prov = Provenance(page=3, source="passthrough")
+        book_no_callout = Book(
+            title="Test",
+            chapters=[
+                Chapter(
+                    uid="ch-fn",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="p-src",
+                            text="No reference here.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                        Footnote(
+                            uid="fn-1",
+                            callout="1)",
+                            text="Footnote text.",
+                            paired=False,
+                            orphan=False,
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="Mark as orphan",
+            params={"fn_block_uid": "fn-1"},
+        )
+        patch = compile_patch_command(
+            book_no_callout, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        # 1 change: orphan=True (no paired=False needed since paired=False already)
+        assert len(patch.changes) == 1
+        assert patch.scope.chapter_uid == "ch-fn"
+        orphan_change = patch.changes[0]
+        assert orphan_change.op == "set_field"
+        assert orphan_change.field == "orphan"
+        assert orphan_change.new is True
+
+    def test_valid_mark_orphan_with_marker(self):
+        """mark_orphan with existing marker: marker removed, paired=False, orphan=True."""
+        book = _make_footnote_book_paired()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="Mark as orphan despite marker",
+            params={"fn_block_uid": "fn-1"},
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        # 3 changes: restore source text, paired=False, orphan=True
+        assert len(patch.changes) == 3
+        text_change = patch.changes[0]
+        paired_change = patch.changes[1]
+        orphan_change = patch.changes[2]
+        assert text_change.op == "set_field"
+        assert text_change.target_uid == "p-src"
+        assert paired_change.field == "paired"  # type: ignore[union-attr]
+        assert paired_change.old is True  # type: ignore[union-attr]
+        assert paired_change.new is False  # type: ignore[union-attr]
+        assert orphan_change.field == "orphan"  # type: ignore[union-attr]
+        assert orphan_change.new is True  # type: ignore[union-attr]
+
+    def test_already_orphan_raises(self):
+        """mark_orphan on already-orphan footnote raises PatchCommandError."""
+        book = _make_footnote_book_orphan()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="test",
+            params={"fn_block_uid": "fn-1"},
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "already marked as orphan" in str(exc_info.value)
+
+    def test_fn_block_not_footnote_raises(self):
+        """mark_orphan with non-footnote uid raises PatchCommandError."""
+        book = _make_footnote_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="test",
+            params={"fn_block_uid": "p-src"},  # paragraph
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not a footnote" in str(exc_info.value)
+
+    def test_compiled_mark_orphan_no_marker_applies(self):
+        """Compiled mark_orphan (no marker) patch applies: orphan=True."""
+        prov = Provenance(page=3, source="passthrough")
+        book = Book(
+            title="Test",
+            chapters=[
+                Chapter(
+                    uid="ch-fn",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="p-src",
+                            text="No reference.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                        Footnote(
+                            uid="fn-1",
+                            callout="1)",
+                            text="Footnote.",
+                            paired=False,
+                            orphan=False,
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="Mark orphan",
+            params={"fn_block_uid": "fn-1"},
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        new_book = apply_book_patch(book, patch)
+        fn_block = new_book.chapters[0].blocks[1]
+        assert isinstance(fn_block, Footnote)
+        assert fn_block.orphan is True
+        assert fn_block.paired is False
+
+    def test_compiled_mark_orphan_with_marker_applies(self):
+        """Compiled mark_orphan (with marker) applies: marker removed, orphan=True, paired=False."""
+        book = _make_footnote_book_paired()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="mark_orphan",
+            agent_id="fixer-1",
+            rationale="Mark orphan",
+            params={"fn_block_uid": "fn-1"},
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid="ch-fn"
+        )
+        new_book = apply_book_patch(book, patch)
+
+        ch = new_book.chapters[0]
+        src_block = ch.blocks[0]
+        fn_block = ch.blocks[1]
+        assert isinstance(fn_block, Footnote)
+        assert fn_block.orphan is True
+        assert fn_block.paired is False
+        marker = make_fn_marker(3, "1)")
+        assert marker not in src_block.text  # type: ignore[union-attr]
