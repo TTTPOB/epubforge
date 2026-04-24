@@ -965,6 +965,9 @@ def validate_book_patch(book: Book, patch: BookPatch) -> None:
 
     # Step 3: per-change static checks (no precondition evaluation)
     insert_uids_seen: set[str] = set()
+    # Track chapter UIDs inserted within this patch so that subsequent move_node
+    # changes targeting those chapters can be validated correctly.
+    inserted_chapter_uids: set[str] = set()
 
     for change in patch.changes:
         if isinstance(change, SetFieldChange):
@@ -975,16 +978,21 @@ def validate_book_patch(book: Book, patch: BookPatch) -> None:
 
         elif isinstance(change, InsertNodeChange):
             _validate_static_insert_node(
-                change, block_index, chapter_index, insert_uids_seen, pid
+                change, block_index, chapter_index, insert_uids_seen, pid,
+                inserted_chapter_uids=inserted_chapter_uids,
             )
             node_uid = change.node.get("uid")
             if node_uid is not None:
                 insert_uids_seen.add(node_uid)
+                # Track if this insert adds a chapter (parent_uid=None means chapter insert)
+                if change.parent_uid is None:
+                    inserted_chapter_uids.add(node_uid)
 
         elif isinstance(change, DeleteNodeChange):
             if (
                 change.target_uid not in block_index
                 and change.target_uid not in chapter_index
+                and change.target_uid not in inserted_chapter_uids
             ):
                 raise PatchError(
                     f"delete_node target_uid {change.target_uid!r} not found",
@@ -992,7 +1000,10 @@ def validate_book_patch(book: Book, patch: BookPatch) -> None:
                 )
 
         elif isinstance(change, MoveNodeChange):
-            _validate_static_move_node(change, block_index, chapter_index, pid)
+            _validate_static_move_node(
+                change, block_index, chapter_index, pid,
+                inserted_chapter_uids=inserted_chapter_uids,
+            )
 
     # Step 5: PatchScope range check
     scope_uid = patch.scope.chapter_uid
@@ -1083,8 +1094,14 @@ def _validate_static_insert_node(
     chapter_index: dict[str, int],
     insert_uids_seen: set[str],
     pid: str,
+    *,
+    inserted_chapter_uids: set[str] | None = None,
 ) -> None:
-    """Static checks for InsertNodeChange."""
+    """Static checks for InsertNodeChange.
+
+    inserted_chapter_uids: UIDs of chapters inserted earlier in the same patch,
+    so that inserting a block into a newly-inserted chapter is not wrongly rejected.
+    """
     node_uid = change.node.get("uid")
     node_kind = change.node.get("kind")
 
@@ -1101,8 +1118,10 @@ def _validate_static_insert_node(
             pid,
         )
 
+    all_chapter_uids = set(chapter_index.keys()) | (inserted_chapter_uids or set())
+
     if change.parent_uid is not None:
-        if change.parent_uid not in chapter_index:
+        if change.parent_uid not in all_chapter_uids:
             raise PatchError(
                 f"insert_node parent_uid {change.parent_uid!r} not found as a chapter",
                 pid,
@@ -1138,8 +1157,16 @@ def _validate_static_move_node(
     block_index: dict[str, tuple[int, int]],
     chapter_index: dict[str, int],
     pid: str,
+    *,
+    inserted_chapter_uids: set[str] | None = None,
 ) -> None:
-    """Static checks for MoveNodeChange."""
+    """Static checks for MoveNodeChange.
+
+    inserted_chapter_uids: UIDs of chapters inserted earlier in the same patch,
+    so that move_node targeting those new chapters is not wrongly rejected.
+    """
+    all_chapter_uids = set(chapter_index.keys()) | (inserted_chapter_uids or set())
+
     if change.target_uid not in block_index and change.target_uid not in chapter_index:
         raise PatchError(
             f"move_node target_uid {change.target_uid!r} not found",
@@ -1155,7 +1182,7 @@ def _validate_static_move_node(
                 pid,
             )
     else:
-        if change.to_parent_uid is not None and change.to_parent_uid not in chapter_index:
+        if change.to_parent_uid is not None and change.to_parent_uid not in all_chapter_uids:
             raise PatchError(
                 f"move_node to_parent_uid {change.to_parent_uid!r} not found",
                 pid,

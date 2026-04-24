@@ -605,6 +605,203 @@ _COMPILERS["relocate_block"] = _compile_relocate_block  # type: ignore[assignmen
 
 
 # ---------------------------------------------------------------------------
+# WP4: split_chapter compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_split_chapter(
+    book: Book, command: PatchCommand, params: SplitChapterParams
+) -> tuple[list, PatchScope]:
+    # 1. Find the chapter
+    chapter, _ch_idx = _find_chapter(book, params.chapter_uid, command.command_id)
+
+    # 2. Find split_at_block_uid within that chapter
+    split_idx: int | None = None
+    for i, blk in enumerate(chapter.blocks):
+        if blk.uid == params.split_at_block_uid:
+            split_idx = i
+            break
+    if split_idx is None:
+        raise PatchCommandError(
+            f"split_at_block_uid {params.split_at_block_uid!r} not found in chapter {params.chapter_uid!r}",
+            command.command_id,
+        )
+
+    # 3. Split at first block would leave original chapter empty — disallow
+    if split_idx == 0:
+        raise PatchCommandError(
+            "split_at_block_uid is the first block; splitting here would leave the original chapter empty",
+            command.command_id,
+        )
+
+    # 4. Check new_chapter_uid for collision
+    _check_uid_collision(book, params.new_chapter_uid, command.command_id)
+
+    changes: list = []
+
+    # 5a. InsertNodeChange — insert empty new chapter after original chapter
+    changes.append({
+        "op": "insert_node",
+        "parent_uid": None,  # insert into book.chapters
+        "after_uid": params.chapter_uid,
+        "node": {
+            "uid": params.new_chapter_uid,
+            "kind": "chapter",
+            "title": params.new_chapter_title,
+            "level": chapter.level,
+            "id": None,
+            "blocks": [],
+        },
+    })
+
+    # 5b. MoveNodeChange for each block from split_at_block_uid to end
+    prev_uid: str | None = None
+    for blk in chapter.blocks[split_idx:]:
+        changes.append({
+            "op": "move_node",
+            "target_uid": blk.uid,
+            "from_parent_uid": params.chapter_uid,
+            "to_parent_uid": params.new_chapter_uid,
+            "after_uid": prev_uid,
+        })
+        prev_uid = blk.uid
+
+    # 6. Always book-wide scope for chapter topology commands
+    scope = PatchScope(chapter_uid=None)
+    return changes, scope
+
+
+_COMPILERS["split_chapter"] = _compile_split_chapter  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP4: merge_chapters compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_merge_chapters(
+    book: Book, command: PatchCommand, params: MergeChaptersParams
+) -> tuple[list, PatchScope]:
+    # 1. Find all source chapters — each must exist
+    source_chapters: list[tuple[Chapter, int]] = []
+    for uid in params.source_chapter_uids:
+        ch, idx = _find_chapter(book, uid, command.command_id)
+        source_chapters.append((ch, idx))
+
+    # 2. Validate sections count == source_chapter_uids count
+    if len(params.sections) != len(params.source_chapter_uids):
+        raise PatchCommandError(
+            f"sections length ({len(params.sections)}) must equal "
+            f"source_chapter_uids length ({len(params.source_chapter_uids)})",
+            command.command_id,
+        )
+
+    # 3. Check new_chapter_uid for collision
+    _check_uid_collision(book, params.new_chapter_uid, command.command_id)
+
+    # 4. Check all section.new_block_uid for collision and mutual uniqueness
+    seen_section_uids: set[str] = set()
+    for section in params.sections:
+        if section.new_block_uid in seen_section_uids:
+            raise PatchCommandError(
+                f"section new_block_uid {section.new_block_uid!r} is duplicated within sections",
+                command.command_id,
+            )
+        seen_section_uids.add(section.new_block_uid)
+        _check_uid_collision(book, section.new_block_uid, command.command_id)
+
+    # 5. Find insertion point: min(source_indexes)
+    source_indexes = [idx for _ch, idx in source_chapters]
+    min_index = min(source_indexes)
+    after_uid: str | None = None if min_index == 0 else book.chapters[min_index - 1].uid
+
+    changes: list = []
+
+    # 6a. InsertNodeChange — insert empty new chapter at insertion point
+    changes.append({
+        "op": "insert_node",
+        "parent_uid": None,
+        "after_uid": after_uid,
+        "node": {
+            "uid": params.new_chapter_uid,
+            "kind": "chapter",
+            "title": params.new_title,
+            "level": 1,
+            "id": None,
+            "blocks": [],
+        },
+    })
+
+    # 6b. For each source chapter: insert section heading + move blocks
+    last_inserted_uid: str | None = None
+    for (source_chapter, _src_idx), section in zip(source_chapters, params.sections):
+        # Determine provenance for the section heading from first block (or passthrough)
+        if source_chapter.blocks:
+            prov = source_chapter.blocks[0].provenance.model_dump(mode="python")
+        else:
+            prov = {"page": 1, "source": "passthrough"}
+
+        # Insert section heading block into new chapter
+        changes.append({
+            "op": "insert_node",
+            "parent_uid": params.new_chapter_uid,
+            "after_uid": last_inserted_uid,
+            "node": {
+                "uid": section.new_block_uid,
+                "kind": "heading",
+                "level": 2,
+                "text": section.text,
+                "id": section.id,
+                "style_class": section.style_class,
+                "provenance": prov,
+            },
+        })
+
+        # Move each block from source chapter to new chapter, after the heading
+        prev_uid: str = section.new_block_uid
+        for block in source_chapter.blocks:
+            changes.append({
+                "op": "move_node",
+                "target_uid": block.uid,
+                "from_parent_uid": source_chapter.uid,
+                "to_parent_uid": params.new_chapter_uid,
+                "after_uid": prev_uid,
+            })
+            assert block.uid is not None  # run_init guarantees all blocks have UIDs
+            prev_uid = block.uid
+
+        # Track last_inserted_uid for the next section heading's after_uid
+        # If source chapter had blocks, last block uid; otherwise the heading uid
+        if source_chapter.blocks:
+            last_inserted_uid = source_chapter.blocks[-1].uid
+        else:
+            last_inserted_uid = section.new_block_uid
+
+    # 6c. Delete each source chapter (will be empty after moves)
+    for (source_chapter, _src_idx) in source_chapters:
+        empty_chapter_dump = {
+            "kind": "chapter",
+            "uid": source_chapter.uid,
+            "title": source_chapter.title,
+            "level": source_chapter.level,
+            "id": source_chapter.id,
+            "blocks": [],
+        }
+        changes.append({
+            "op": "delete_node",
+            "target_uid": source_chapter.uid,
+            "old_node": empty_chapter_dump,
+        })
+
+    # 7. Always book-wide scope
+    scope = PatchScope(chapter_uid=None)
+    return changes, scope
+
+
+_COMPILERS["merge_chapters"] = _compile_merge_chapters  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
 # compile_patch_command
 # ---------------------------------------------------------------------------
 

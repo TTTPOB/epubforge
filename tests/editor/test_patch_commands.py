@@ -951,14 +951,12 @@ class TestCompilerInfrastructure:
         book = _make_book()
         cmd = PatchCommand(
             command_id=str(uuid4()),
-            op="split_chapter",
+            op="pair_footnote",
             agent_id="fixer-1",
             rationale="test",
             params={
-                "chapter_uid": "ch-1",
-                "split_at_block_uid": "blk-1",
-                "new_chapter_title": "Part Two",
-                "new_chapter_uid": str(uuid4()),
+                "fn_block_uid": "fn-001",
+                "source_block_uid": "blk-1",
             },
         )
         with pytest.raises(PatchCommandError) as exc_info:
@@ -1472,3 +1470,378 @@ class TestSplitText:
             max_splits=2,
         )
         assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# §15 WP4 Compiler: split_chapter
+# ---------------------------------------------------------------------------
+
+
+def _make_split_chapter_book() -> Book:
+    """Book with one chapter containing 3 blocks, for split_chapter tests."""
+    prov = _prov()
+    return Book(
+        title="Split Test",
+        chapters=[
+            Chapter(
+                uid="ch-A",
+                title="Long Chapter",
+                level=1,
+                blocks=[
+                    Paragraph(uid="blk-A1", text="First block.", role="body", provenance=prov),
+                    Paragraph(uid="blk-A2", text="Second block.", role="body", provenance=prov),
+                    Paragraph(uid="blk-A3", text="Third block.", role="body", provenance=prov),
+                ],
+            ),
+        ],
+    )
+
+
+class TestSplitChapterCompiler:
+    def test_valid_split_at_second_block(self):
+        """Splitting at block 2 keeps original chapter with 1 block, new chapter gets 2."""
+        book = _make_split_chapter_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_chapter",
+            agent_id="fixer-1",
+            rationale="Split chapter into two",
+            params={
+                "chapter_uid": "ch-A",
+                "split_at_block_uid": "blk-A2",
+                "new_chapter_title": "Second Half",
+                "new_chapter_uid": "ch-B",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        # Must be book-wide scope
+        assert patch.scope.chapter_uid is None
+        # 1 insert_node + 2 move_nodes (blk-A2 and blk-A3)
+        assert len(patch.changes) == 3
+        assert patch.changes[0].op == "insert_node"
+        assert patch.changes[1].op == "move_node"
+        assert patch.changes[2].op == "move_node"
+
+    def test_split_at_first_block_fails(self):
+        """Splitting at the first block would empty original chapter — must fail."""
+        book = _make_split_chapter_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_chapter",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "chapter_uid": "ch-A",
+                "split_at_block_uid": "blk-A1",
+                "new_chapter_title": "New",
+                "new_chapter_uid": "ch-B",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "first block" in str(exc_info.value)
+
+    def test_split_at_block_uid_not_in_chapter_fails(self):
+        """split_at_block_uid not belonging to chapter must fail."""
+        book = _make_split_chapter_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_chapter",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "chapter_uid": "ch-A",
+                "split_at_block_uid": "nonexistent-blk",
+                "new_chapter_title": "New",
+                "new_chapter_uid": "ch-B",
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not found" in str(exc_info.value)
+
+    def test_new_chapter_uid_collision_fails(self):
+        """new_chapter_uid that already exists must fail."""
+        book = _make_split_chapter_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_chapter",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "chapter_uid": "ch-A",
+                "split_at_block_uid": "blk-A2",
+                "new_chapter_title": "New",
+                "new_chapter_uid": "ch-A",  # collision with existing chapter
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "already exists" in str(exc_info.value)
+
+    def test_compiled_patch_applies_correctly(self):
+        """Compiled split_chapter patch applies: original keeps 1 block, new gets 2."""
+        book = _make_split_chapter_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_chapter",
+            agent_id="fixer-1",
+            rationale="Split at second block",
+            params={
+                "chapter_uid": "ch-A",
+                "split_at_block_uid": "blk-A2",
+                "new_chapter_title": "Second Half",
+                "new_chapter_uid": "ch-B",
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        new_book = apply_book_patch(book, patch)
+
+        # Should now have 2 chapters
+        assert len(new_book.chapters) == 2
+        ch_a = new_book.chapters[0]
+        ch_b = new_book.chapters[1]
+
+        assert ch_a.uid == "ch-A"
+        assert ch_b.uid == "ch-B"
+        assert ch_b.title == "Second Half"
+        assert ch_b.level == 1
+
+        # Original chapter keeps only the first block
+        assert len(ch_a.blocks) == 1
+        assert ch_a.blocks[0].uid == "blk-A1"
+
+        # New chapter gets the remaining 2 blocks in order
+        assert len(ch_b.blocks) == 2
+        assert ch_b.blocks[0].uid == "blk-A2"
+        assert ch_b.blocks[1].uid == "blk-A3"
+
+
+# ---------------------------------------------------------------------------
+# §16 WP4 Compiler: merge_chapters
+# ---------------------------------------------------------------------------
+
+
+def _make_merge_chapters_book() -> Book:
+    """Book with 2 chapters each having 2 blocks, for merge_chapters tests."""
+    prov = _prov()
+    return Book(
+        title="Merge Test",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter One",
+                level=1,
+                blocks=[
+                    Paragraph(uid="p1", text="Intro para.", role="body", provenance=prov),
+                    Paragraph(uid="p2", text="Second intro.", role="body", provenance=prov),
+                ],
+            ),
+            Chapter(
+                uid="ch-2",
+                title="Chapter Two",
+                level=1,
+                blocks=[
+                    Paragraph(uid="p3", text="Body para.", role="body", provenance=prov),
+                    Paragraph(uid="p4", text="Body end.", role="body", provenance=prov),
+                ],
+            ),
+        ],
+    )
+
+
+class TestMergeChaptersCompiler:
+    def test_valid_merge_two_chapters(self):
+        """Valid merge of 2 chapters produces insert + section headings + moves + deletes."""
+        book = _make_merge_chapters_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="Combine chapters into one",
+            params={
+                "source_chapter_uids": ["ch-1", "ch-2"],
+                "new_title": "Combined Chapter",
+                "new_chapter_uid": "ch-merged",
+                "sections": [
+                    {"text": "Part One", "new_block_uid": "sec-1"},
+                    {"text": "Part Two", "new_block_uid": "sec-2"},
+                ],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        assert patch.scope.chapter_uid is None
+        # Changes: 1 insert chapter + 2*(1 insert heading + 2 move blocks) + 2 delete chapters
+        # = 1 + 2*3 + 2 = 9
+        assert len(patch.changes) == 9
+        assert patch.changes[0].op == "insert_node"  # new chapter
+
+    def test_sections_count_mismatch_fails(self):
+        """sections count != source_chapter_uids count must fail."""
+        book = _make_merge_chapters_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "source_chapter_uids": ["ch-1", "ch-2"],
+                "new_title": "Combined",
+                "new_chapter_uid": "ch-new",
+                "sections": [
+                    {"text": "Only one section", "new_block_uid": "sec-1"},
+                    # Missing second section
+                ],
+            },
+        )
+        # This will actually fail at PatchCommand validation since we have 2 source_chapter_uids
+        # and 1 section. Let's make it clear: sections=[1] while source_chapter_uids=[2] items.
+        # The compiler should raise PatchCommandError.
+        # NOTE: PatchCommand model allows mismatched counts; compiler catches it.
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "sections length" in str(exc_info.value)
+
+    def test_new_chapter_uid_collision_fails(self):
+        """new_chapter_uid that already exists must fail."""
+        book = _make_merge_chapters_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "source_chapter_uids": ["ch-1", "ch-2"],
+                "new_title": "Combined",
+                "new_chapter_uid": "ch-1",  # collision
+                "sections": [
+                    {"text": "S1", "new_block_uid": "sec-1"},
+                    {"text": "S2", "new_block_uid": "sec-2"},
+                ],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "already exists" in str(exc_info.value)
+
+    def test_compiled_patch_applies_correctly(self):
+        """Merged book has correct structure: headings inserted, blocks moved, sources deleted."""
+        book = _make_merge_chapters_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="Merge two chapters",
+            params={
+                "source_chapter_uids": ["ch-1", "ch-2"],
+                "new_title": "Combined",
+                "new_chapter_uid": "ch-merged",
+                "sections": [
+                    {"text": "Part One", "new_block_uid": "sec-1"},
+                    {"text": "Part Two", "new_block_uid": "sec-2"},
+                ],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        new_book = apply_book_patch(book, patch)
+
+        # Only the merged chapter should remain
+        assert len(new_book.chapters) == 1
+        merged = new_book.chapters[0]
+        assert merged.uid == "ch-merged"
+        assert merged.title == "Combined"
+
+        # Should have: sec-1 heading, p1, p2, sec-2 heading, p3, p4
+        assert len(merged.blocks) == 6
+        block_uids = [b.uid for b in merged.blocks]
+        assert block_uids == ["sec-1", "p1", "p2", "sec-2", "p3", "p4"]
+
+        # Section headings should be heading kind at level 2
+        assert merged.blocks[0].kind == "heading"
+        assert merged.blocks[0].level == 2  # type: ignore[attr-defined]
+        assert merged.blocks[0].text == "Part One"  # type: ignore[attr-defined]
+
+        assert merged.blocks[3].kind == "heading"
+        assert merged.blocks[3].level == 2  # type: ignore[attr-defined]
+        assert merged.blocks[3].text == "Part Two"  # type: ignore[attr-defined]
+
+    def test_source_chapters_deleted_after_merge(self):
+        """Source chapters are deleted from the book after merge."""
+        book = _make_merge_chapters_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="Merge",
+            params={
+                "source_chapter_uids": ["ch-1", "ch-2"],
+                "new_title": "All Together",
+                "new_chapter_uid": "ch-all",
+                "sections": [
+                    {"text": "Section A", "new_block_uid": "sa"},
+                    {"text": "Section B", "new_block_uid": "sb"},
+                ],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        new_book = apply_book_patch(book, patch)
+
+        chapter_uids = [ch.uid for ch in new_book.chapters]
+        assert "ch-1" not in chapter_uids
+        assert "ch-2" not in chapter_uids
+        assert "ch-all" in chapter_uids
+
+    def test_merge_with_empty_source_chapter(self):
+        """Merging chapters where one source chapter has no blocks still works."""
+        prov = _prov()
+        book = Book(
+            title="Test",
+            chapters=[
+                Chapter(uid="ch-e1", title="Empty", level=1, blocks=[]),
+                Chapter(
+                    uid="ch-e2",
+                    title="With Blocks",
+                    level=1,
+                    blocks=[
+                        Paragraph(uid="pe1", text="Only block.", role="body", provenance=prov),
+                    ],
+                ),
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_chapters",
+            agent_id="fixer-1",
+            rationale="Merge empty + non-empty",
+            params={
+                "source_chapter_uids": ["ch-e1", "ch-e2"],
+                "new_title": "Merged",
+                "new_chapter_uid": "ch-m",
+                "sections": [
+                    {"text": "Empty Section", "new_block_uid": "se1"},
+                    {"text": "Content Section", "new_block_uid": "se2"},
+                ],
+            },
+        )
+        patch = compile_patch_command(
+            book, cmd, output_kind="fixer", output_chapter_uid=None
+        )
+        new_book = apply_book_patch(book, patch)
+
+        assert len(new_book.chapters) == 1
+        merged = new_book.chapters[0]
+        # se1 heading (empty source), se2 heading, pe1 block
+        assert len(merged.blocks) == 3
+        assert merged.blocks[0].uid == "se1"
+        assert merged.blocks[1].uid == "se2"
+        assert merged.blocks[2].uid == "pe1"
