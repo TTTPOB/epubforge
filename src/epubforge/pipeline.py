@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
+import json
 import logging
+import os
+import shutil
 from pathlib import Path
 
 from epubforge.config import Config
@@ -20,6 +25,83 @@ def _skip(path: Path, force: bool, label: str) -> bool:
         log.info("skip %s — reusing %s (pass --force-rerun to re-run)", label, path)
         return True
     return False
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_paths(work: Path) -> tuple[Path, Path]:
+    source_dir = work / "source"
+    return source_dir / "source.pdf", source_dir / "source_meta.json"
+
+
+def _ensure_existing_parse_source(work: Path) -> None:
+    source_pdf, source_meta = _source_paths(work)
+    missing = [
+        str(path.relative_to(work))
+        for path in (source_pdf, source_meta)
+        if not path.is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Existing parse output is missing stable source artifact(s): "
+            f"{', '.join(missing)}. Rerun parse with --force-rerun."
+        )
+
+
+def _persist_source_pdf(pdf_path: Path, work: Path) -> tuple[Path, dict[str, object]]:
+    source_pdf, source_meta = _source_paths(work)
+    source_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    original = pdf_path.resolve()
+    if not original.is_file():
+        raise FileNotFoundError(f"PDF not found: {original}")
+
+    if source_pdf.exists():
+        try:
+            if source_pdf.samefile(original):
+                pass
+            else:
+                source_pdf.unlink()
+        except FileNotFoundError:
+            pass
+
+    if not source_pdf.exists():
+        try:
+            os.link(original, source_pdf)
+            copy_method = "hardlink"
+        except OSError:
+            shutil.copy2(original, source_pdf)
+            copy_method = "copy2"
+    else:
+        copy_method = "existing"
+
+    if not os.access(source_pdf, os.R_OK):
+        raise RuntimeError(f"Persisted source PDF is not readable: {source_pdf}")
+
+    sha256 = _sha256_file(source_pdf)
+    meta: dict[str, object] = {
+        "source_pdf": "source/source.pdf",
+        "original_pdf_abs": str(original),
+        "sha256": sha256,
+        "size_bytes": source_pdf.stat().st_size,
+        "copied_at": datetime.now(timezone.utc).isoformat(),
+    }
+    source_meta.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    log.info(
+        "parse source: original=%s target=%s sha256=%s size_bytes=%s method=%s",
+        original,
+        source_pdf,
+        sha256,
+        meta["size_bytes"],
+        copy_method,
+    )
+    return source_pdf, meta
 
 
 def run_all(
@@ -49,11 +131,13 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     work = cfg.book_work_dir(pdf_path)
     out = _stage_path(work, "01_raw.json")
     if _skip(out, force, "parse"):
+        _ensure_existing_parse_source(work)
         return
     work.mkdir(parents=True, exist_ok=True)
+    source_pdf, _source_meta = _persist_source_pdf(pdf_path, work)
     log.info("Stage 1: parsing %s...", pdf_path.name)
     with stage_timer(log, "1 parse"):
-        parse_pdf(pdf_path, out, images_dir=work / "images")
+        parse_pdf(source_pdf, out, images_dir=work / "images")
     log.info("  -> %s", out)
 
 
