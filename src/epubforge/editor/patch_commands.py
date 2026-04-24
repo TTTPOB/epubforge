@@ -313,7 +313,7 @@ from epubforge.editor.patches import (  # noqa: E402
 )
 from epubforge.editor.text_split import split_text  # noqa: E402
 from epubforge.fields import iter_block_text_fields  # noqa: E402
-from epubforge.ir.semantic import Block, Book, Chapter, Footnote, Paragraph  # noqa: E402
+from epubforge.ir.semantic import Block, Book, Chapter, Footnote, Paragraph, Table  # noqa: E402
 from epubforge.markers import count_raw_callout, has_raw_callout, make_fn_marker, replace_nth_raw  # noqa: E402
 from epubforge.query import find_markers  # noqa: E402
 from epubforge.text_utils import cjk_join  # noqa: E402
@@ -1074,6 +1074,87 @@ def _compile_mark_orphan(
 
 
 _COMPILERS["mark_orphan"] = _compile_mark_orphan  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# WP6: split_merged_table compiler
+# ---------------------------------------------------------------------------
+
+
+def _compile_split_merged_table(
+    book: Book, command: PatchCommand, params: SplitMergedTableParams
+) -> tuple[list, PatchScope]:
+    # 1. Find the block and verify it is a Table
+    chapter, block, block_idx = _find_block(book, params.block_uid, command.command_id)
+    if not isinstance(block, Table):
+        raise PatchCommandError(
+            f"block {params.block_uid!r} is not a table (kind={block.kind!r})",
+            command.command_id,
+        )
+    table = block
+
+    # 2. Verify table.multi_page is True
+    if not table.multi_page:
+        raise PatchCommandError(
+            f"table {params.block_uid!r} is not a multi-page merged table (multi_page=False)",
+            command.command_id,
+        )
+
+    # 3. Check all new_block_uids for collision and mutual uniqueness
+    seen_uids: set[str] = set()
+    for uid in params.new_block_uids:
+        if uid in seen_uids:
+            raise PatchCommandError(
+                f"new_block_uids contains duplicate: {uid!r}",
+                command.command_id,
+            )
+        seen_uids.add(uid)
+        _check_uid_collision(book, uid, command.command_id)
+
+    # 4. Record previous_uid: block before the table in the chapter
+    previous_uid: str | None = None
+    if block_idx > 0:
+        previous_uid = chapter.blocks[block_idx - 1].uid
+
+    changes: list = []
+
+    # 5a. DeleteNodeChange — delete the original merged table
+    changes.append({
+        "op": "delete_node",
+        "target_uid": params.block_uid,
+        "old_node": table.model_dump(mode="python"),
+    })
+
+    # 5b. InsertNodeChange for each segment
+    n = len(params.segment_html)
+    for i in range(n):
+        after_uid = previous_uid if i == 0 else params.new_block_uids[i - 1]
+        changes.append({
+            "op": "insert_node",
+            "parent_uid": chapter.uid,
+            "after_uid": after_uid,
+            "node": {
+                "uid": params.new_block_uids[i],
+                "kind": "table",
+                "html": params.segment_html[i],
+                "table_title": table.table_title,
+                "caption": table.caption if i == n - 1 else "",
+                "continuation": i > 0,
+                "multi_page": False,
+                "bbox": table.bbox,
+                "provenance": {
+                    "page": params.segment_pages[i],
+                    "source": table.provenance.source,
+                },
+            },
+        })
+
+    # 6. Chapter-scoped: all changes happen within one chapter
+    scope = PatchScope(chapter_uid=chapter.uid)
+    return changes, scope
+
+
+_COMPILERS["split_merged_table"] = _compile_split_merged_table  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

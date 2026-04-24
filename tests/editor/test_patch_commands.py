@@ -23,6 +23,7 @@ from epubforge.editor.patch_commands import (
     SplitChapterParams,
     SplitMergedTableParams,
     UnpairFootnoteParams,
+    _COMPILERS,
     _check_uid_collision,
     _find_block,
     _find_chapter,
@@ -32,7 +33,7 @@ from epubforge.editor.patch_commands import (
 )
 from epubforge.editor.patches import apply_book_patch
 from epubforge.editor.text_split import split_text
-from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance
+from epubforge.ir.semantic import Book, Chapter, Footnote, Heading, Paragraph, Provenance, Table
 from epubforge.markers import make_fn_marker
 
 
@@ -948,26 +949,34 @@ class TestCompilerInfrastructure:
         assert result.book_after_commands == book
 
     def test_compile_unimplemented_op_raises(self):
-        """Compiling a command whose op compiler is not yet registered raises PatchCommandError."""
+        """Compiling a command whose op compiler is not registered raises PatchCommandError.
+
+        All 9 ops now have compilers, so we simulate an unregistered op by
+        temporarily removing 'split_block' from the _COMPILERS registry.
+        """
         book = _make_book()
         cmd = PatchCommand(
             command_id=str(uuid4()),
-            op="split_merged_table",
+            op="split_block",
             agent_id="fixer-1",
             rationale="test",
             params={
                 "block_uid": "blk-1",
-                "segment_html": ["<t>A</t>", "<t>B</t>"],
-                "segment_pages": [1, 2],
-                "new_block_uids": ["t1", "t2"],
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["blk-new-1"],
             },
         )
-        with pytest.raises(PatchCommandError) as exc_info:
-            compile_patch_commands(
-                book, [cmd], output_kind="supervisor", output_chapter_uid=None
-            )
-        assert "not implemented" in str(exc_info.value)
-        assert exc_info.value.command_id == cmd.command_id
+        saved = _COMPILERS.pop("split_block")
+        try:
+            with pytest.raises(PatchCommandError) as exc_info:
+                compile_patch_commands(
+                    book, [cmd], output_kind="supervisor", output_chapter_uid=None
+                )
+            assert "not implemented" in str(exc_info.value)
+            assert exc_info.value.command_id == cmd.command_id
+        finally:
+            _COMPILERS["split_block"] = saved
 
     def test_compile_result_is_compiled_commands(self):
         """compile_patch_commands returns a CompiledCommands instance."""
@@ -2501,3 +2510,475 @@ class TestMarkOrphanCompiler:
         assert fn_block.paired is False
         marker = make_fn_marker(3, "1)")
         assert marker not in src_block.text  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# §20 WP6 Compiler: split_merged_table
+# ---------------------------------------------------------------------------
+
+
+def _make_table_book(
+    *,
+    multi_page: bool = True,
+    table_uid: str = "tbl-1",
+    table_title: str = "Table 1",
+    caption: str = "This is the caption.",
+    extra_blocks_before: bool = False,
+    extra_blocks_after: bool = False,
+) -> Book:
+    """Create a book with a chapter containing a multi-page merged Table block."""
+    from epubforge.ir.semantic import Table, TableMergeRecord
+
+    prov = Provenance(page=5, source="llm")
+    table = Table(
+        uid=table_uid,
+        html="<table><tr><td>merged</td></tr></table>",
+        table_title=table_title,
+        caption=caption,
+        continuation=False,
+        multi_page=multi_page,
+        bbox=[0.0, 0.0, 100.0, 200.0],
+        provenance=prov,
+        merge_record=TableMergeRecord(
+            segment_html=["<tr><td>A</td></tr>", "<tr><td>B</td></tr>"],
+            segment_pages=[5, 6],
+            segment_order=[0, 1],
+            column_widths=[1, 1],
+        ),
+    )
+
+    blocks: list = []
+    if extra_blocks_before:
+        blocks.append(
+            Paragraph(
+                uid="pre-blk",
+                text="Before table",
+                role="body",
+                provenance=Provenance(page=4, source="passthrough"),
+            )
+        )
+    blocks.append(table)
+    if extra_blocks_after:
+        blocks.append(
+            Paragraph(
+                uid="post-blk",
+                text="After table",
+                role="body",
+                provenance=Provenance(page=7, source="passthrough"),
+            )
+        )
+
+    return Book(
+        title="Table Test Book",
+        chapters=[Chapter(uid="ch-tbl", title="Chapter with Table", blocks=blocks)],
+    )
+
+
+class TestSplitMergedTableCompiler:
+    """Tests for _compile_split_merged_table (WP6)."""
+
+    # ---- Error cases ----
+
+    def test_block_not_a_table_raises(self):
+        """block_uid pointing to non-Table block raises PatchCommandError."""
+        book = _make_book()  # has Paragraph blocks
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "blk-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [1, 2],
+                "new_block_uids": ["n1", "n2"],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "not a table" in str(exc_info.value)
+
+    def test_table_not_multi_page_raises(self):
+        """Table with multi_page=False raises PatchCommandError."""
+        book = _make_table_book(multi_page=False)
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["n1", "n2"],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "multi_page" in str(exc_info.value) or "multi-page" in str(exc_info.value)
+
+    def test_new_block_uids_collision_raises(self):
+        """new_block_uid that already exists in book raises PatchCommandError."""
+        book = _make_table_book()
+        book.chapters[0].blocks.append(
+            Paragraph(
+                uid="existing-uid",
+                text="x",
+                role="body",
+                provenance=Provenance(page=1, source="passthrough"),
+            )
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["existing-uid", "n2"],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "already exists" in str(exc_info.value)
+
+    def test_new_block_uids_duplicates_raises(self):
+        """Duplicate UIDs within new_block_uids raises PatchCommandError."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["same-uid", "same-uid"],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert "duplicate" in str(exc_info.value)
+
+    # ---- Valid 2-segment split ----
+
+    def test_valid_split_2_segments_change_count(self):
+        """Valid 2-segment split produces 1 delete + 2 insert = 3 changes."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<table>A</table>", "<table>B</table>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert len(patch.changes) == 3
+        assert patch.changes[0].op == "delete_node"
+        assert patch.changes[1].op == "insert_node"
+        assert patch.changes[2].op == "insert_node"
+
+    def test_valid_split_3_segments_change_count(self):
+        """Valid 3-segment split produces 1 delete + 3 insert = 4 changes."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>", "<t>C</t>"],
+                "segment_pages": [5, 6, 7],
+                "new_block_uids": ["seg-1", "seg-2", "seg-3"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert len(patch.changes) == 4
+
+    def test_scope_is_chapter_scoped(self):
+        """Compiled patch scope is chapter_uid of the containing chapter."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        assert patch.scope.chapter_uid == "ch-tbl"
+
+    # ---- Table is first block: after_uid=None for first segment ----
+
+    def test_table_is_first_block_after_uid_none(self):
+        """When table is the first block, first insert has after_uid=None."""
+        book = _make_table_book()  # table is the only block (index 0)
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        first_insert = patch.changes[1]
+        assert first_insert.op == "insert_node"
+        assert first_insert.after_uid is None  # type: ignore[union-attr]
+
+    # ---- Table is middle block: after_uid = previous block's uid ----
+
+    def test_table_is_middle_block_correct_previous_uid(self):
+        """When table has a preceding block, first insert uses that block's uid as after_uid."""
+        book = _make_table_book(extra_blocks_before=True)  # pre-blk before tbl-1
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        first_insert = patch.changes[1]
+        assert first_insert.after_uid == "pre-blk"  # type: ignore[union-attr]
+
+    # ---- Full apply correctness ----
+
+    def test_applied_patch_segment_order(self):
+        """After applying, book has segments in correct order (original table removed)."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<table>seg-A</table>", "<table>seg-B</table>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert len(ch.blocks) == 2
+        assert ch.blocks[0].uid == "seg-1"
+        assert ch.blocks[1].uid == "seg-2"
+
+    def test_applied_patch_caption_only_on_last_segment(self):
+        """After applying, caption is on last segment only; others have empty caption."""
+        book = _make_table_book(caption="My Caption")
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>", "<t>C</t>"],
+                "segment_pages": [5, 6, 7],
+                "new_block_uids": ["seg-1", "seg-2", "seg-3"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].caption == ""          # type: ignore[union-attr]
+        assert ch.blocks[1].caption == ""          # type: ignore[union-attr]
+        assert ch.blocks[2].caption == "My Caption"  # type: ignore[union-attr]
+
+    def test_applied_patch_continuation_flags(self):
+        """After applying, continuation=False for first segment, True for rest."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>", "<t>C</t>"],
+                "segment_pages": [5, 6, 7],
+                "new_block_uids": ["seg-1", "seg-2", "seg-3"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].continuation is False  # type: ignore[union-attr]
+        assert ch.blocks[1].continuation is True   # type: ignore[union-attr]
+        assert ch.blocks[2].continuation is True   # type: ignore[union-attr]
+
+    def test_applied_patch_provenance_pages(self):
+        """After applying, each segment has provenance.page from segment_pages."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].provenance.page == 5  # type: ignore[union-attr]
+        assert ch.blocks[1].provenance.page == 6  # type: ignore[union-attr]
+
+    def test_applied_patch_table_title_inherited(self):
+        """After applying, all segments inherit table_title from original."""
+        book = _make_table_book(table_title="Revenue Table")
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].table_title == "Revenue Table"  # type: ignore[union-attr]
+        assert ch.blocks[1].table_title == "Revenue Table"  # type: ignore[union-attr]
+
+    def test_applied_patch_multi_page_false_on_segments(self):
+        """After applying, all segments have multi_page=False."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].multi_page is False  # type: ignore[union-attr]
+        assert ch.blocks[1].multi_page is False  # type: ignore[union-attr]
+
+    def test_applied_patch_provenance_source_inherited(self):
+        """After applying, all segments inherit provenance.source from original."""
+        book = _make_table_book()  # provenance.source = "llm"
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].provenance.source == "llm"  # type: ignore[union-attr]
+        assert ch.blocks[1].provenance.source == "llm"  # type: ignore[union-attr]
+
+    def test_applied_patch_merge_record_none(self):
+        """After applying, all segments have merge_record=None."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].merge_record is None  # type: ignore[union-attr]
+        assert ch.blocks[1].merge_record is None  # type: ignore[union-attr]
+
+    def test_applied_patch_html_per_segment(self):
+        """After applying, each segment has correct html from segment_html."""
+        book = _make_table_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<table>FIRST</table>", "<table>SECOND</table>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert ch.blocks[0].html == "<table>FIRST</table>"   # type: ignore[union-attr]
+        assert ch.blocks[1].html == "<table>SECOND</table>"  # type: ignore[union-attr]
+
+    def test_applied_patch_surrounding_blocks_preserved(self):
+        """Blocks surrounding the table are preserved in correct positions."""
+        book = _make_table_book(extra_blocks_before=True, extra_blocks_after=True)
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_merged_table",
+            agent_id="fixer-1",
+            rationale="split",
+            params={
+                "block_uid": "tbl-1",
+                "segment_html": ["<t>A</t>", "<t>B</t>"],
+                "segment_pages": [5, 6],
+                "new_block_uids": ["seg-1", "seg-2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid=None)
+        new_book = apply_book_patch(book, patch)
+        ch = new_book.chapters[0]
+        assert len(ch.blocks) == 4  # pre-blk, seg-1, seg-2, post-blk
+        assert ch.blocks[0].uid == "pre-blk"
+        assert ch.blocks[1].uid == "seg-1"
+        assert ch.blocks[2].uid == "seg-2"
+        assert ch.blocks[3].uid == "post-blk"
