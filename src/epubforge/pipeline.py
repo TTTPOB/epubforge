@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from epubforge.config import Config
 from epubforge.observability import get_tracker, stage_timer
@@ -119,7 +120,11 @@ def run_all(
     with stage_timer(log, "pipeline"):
         run_parse(pdf_path, cfg, force=_f(1))
         run_classify(pdf_path, cfg, force=_f(2))
-        run_extract(pdf_path, cfg, force=_f(3), pages=pages)
+        if from_stage >= 4:
+            # run --from 4: only validate active artifact exists, never create a new one
+            run_extract(pdf_path, cfg, force=False, pages=pages, reuse_only=True)
+        else:
+            run_extract(pdf_path, cfg, force=_f(3), pages=pages)
         run_assemble(pdf_path, cfg, force=_f(4))
 
     log.info("pipeline total: %s", get_tracker().summary_line())
@@ -155,24 +160,220 @@ def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     log.info("  -> %s", out)
 
 
+def _parse_pages_json(pages_json: Path) -> tuple[list[int], list[int], list[int]]:
+    """Read 02_pages.json and return (selected_pages, toc_pages, complex_pages).
+
+    selected_pages: pages with kind != "toc", sorted.
+    toc_pages: pages with kind == "toc", sorted.
+    complex_pages: pages with kind == "complex", sorted.
+    """
+    data: dict[str, Any] = json.loads(pages_json.read_text(encoding="utf-8"))
+    pages_data: list[dict[str, Any]] = data["pages"]
+    selected_pages = sorted(p["page"] for p in pages_data if p["kind"] != "toc")
+    toc_pages = sorted(p["page"] for p in pages_data if p["kind"] == "toc")
+    complex_pages = sorted(p["page"] for p in pages_data if p["kind"] == "complex")
+    return selected_pages, toc_pages, complex_pages
+
+
+def _settings_for_artifact(cfg: Config) -> dict[str, Any]:
+    """Build the settings snapshot used for artifact_id computation."""
+    if cfg.extract.skip_vlm:
+        return {
+            "skip_vlm": True,
+            "contract_version": 3,
+            "vlm_dpi": None,
+            "max_vlm_batch_pages": None,
+            "enable_book_memory": False,
+            "vlm_model": None,
+            "vlm_base_url": None,
+        }
+    else:
+        resolved_vlm = cfg.resolved_vlm()
+        return {
+            "skip_vlm": False,
+            "contract_version": 3,
+            "vlm_dpi": cfg.extract.vlm_dpi,
+            "max_vlm_batch_pages": cfg.extract.max_vlm_batch_pages,
+            "enable_book_memory": cfg.extract.enable_book_memory,
+            "vlm_model": resolved_vlm.model,
+            "vlm_base_url": resolved_vlm.base_url,
+        }
+
+
 def run_extract(
     pdf_path: Path,
     cfg: Config,
     *,
     force: bool = False,
     pages: set[int] | None = None,
+    reuse_only: bool = False,
 ) -> None:
-    from epubforge.extract import extract
+    from epubforge.stage3_artifacts import (
+        Stage3Manifest,
+        active_manifest_matches_desired,
+        activate_manifest_atomic,
+        build_desired_stage3_manifest,
+        load_active_stage3_manifest,
+        validate_stage3_artifact,
+        write_artifact_manifest_atomic,
+    )
 
     work = cfg.book_work_dir(pdf_path)
+    source_pdf = work / "source" / "source.pdf"
     raw = _stage_path(work, "01_raw.json")
     pages_json = _stage_path(work, "02_pages.json")
-    out_dir = work / "03_extract"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Stage 3: extracting (VLM)…")
-    with stage_timer(log, "3 extract"):
-        extract(pdf_path, raw, pages_json, out_dir, cfg, force=force, page_filter=pages)
-    log.info("  -> %s/", out_dir)
+
+    # Validate prerequisite files exist
+    for label, path in [
+        ("source/source.pdf", source_pdf),
+        ("01_raw.json", raw),
+        ("02_pages.json", pages_json),
+    ]:
+        if not path.is_file():
+            raise RuntimeError(
+                f"Stage 3 requires {label} to exist in {work}. "
+                "Run earlier pipeline stages first."
+            )
+
+    # Read SHAs for artifact_id computation
+    source_pdf_sha256 = _sha256_file(source_pdf)
+    raw_sha256 = _sha256_file(raw)
+    pages_sha256 = _sha256_file(pages_json)
+
+    # Parse pages classification
+    selected_pages, toc_pages, complex_pages = _parse_pages_json(pages_json)
+
+    # Apply pages filter
+    page_filter: list[int] | None = None
+    if pages is not None:
+        page_filter = sorted(pages)
+        selected_pages = sorted(p for p in selected_pages if p in pages)
+        complex_pages = sorted(p for p in complex_pages if p in pages)
+
+    mode = "skip_vlm" if cfg.extract.skip_vlm else "vlm"
+    settings = _settings_for_artifact(cfg)
+
+    desired_artifact_id = build_desired_stage3_manifest(
+        mode=mode,
+        source_pdf_rel="source/source.pdf",
+        source_pdf_sha256=source_pdf_sha256,
+        raw_sha256=raw_sha256,
+        pages_sha256=pages_sha256,
+        selected_pages=selected_pages,
+        toc_pages=toc_pages,
+        complex_pages=complex_pages,
+        page_filter=page_filter,
+        settings=settings,
+    )
+
+    # Check for reusable active artifact (unless force=True)
+    if not force:
+        if active_manifest_matches_desired(work, desired_artifact_id):
+            try:
+                pointer, manifest = load_active_stage3_manifest(work)
+                validate_stage3_artifact(work, manifest)
+                log.info(
+                    "Stage 3: reusing active artifact mode=%s artifact_id=%s manifest_sha256=%s",
+                    manifest.mode,
+                    manifest.artifact_id,
+                    pointer.manifest_sha256,
+                )
+                log.info("Stage 3: provider_required=%s", False)
+                return
+            except Exception as exc:
+                log.warning(
+                    "Stage 3: active artifact validation failed (%s), will re-extract", exc
+                )
+
+    # Handle reuse_only mode: fail if we can't reuse
+    if reuse_only:
+        raise RuntimeError(
+            f"Stage 3: no valid active artifact matching desired configuration "
+            f"(artifact_id={desired_artifact_id}). "
+            "Run `epubforge extract <pdf>` or `epubforge run <pdf> --from 3` first."
+        )
+
+    # Read old active artifact_id for logging
+    old_artifact_id: str | None = None
+    try:
+        old_pointer, _ = load_active_stage3_manifest(work)
+        old_artifact_id = old_pointer.active_artifact_id
+    except Exception:
+        pass
+
+    # Create artifact directory
+    artifact_dir = work / "03_extract" / "artifacts" / desired_artifact_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    result = None
+    if cfg.extract.skip_vlm:
+        from epubforge.extract_skip_vlm import extract_skip_vlm
+
+        log.info("Stage 3: extracting (skip-VLM evidence draft)...")
+        log.info("Stage 3: provider_required=%s", False)
+        with stage_timer(log, "3 extract"):
+            result = extract_skip_vlm(
+                raw,
+                pages_json,
+                artifact_dir,
+                force=force,
+                page_filter=pages,
+            )
+    else:
+        from epubforge.extract import extract
+
+        log.info("Stage 3: extracting (VLM)...")
+        log.info("Stage 3: provider_required=%s", True)
+        cfg.require_llm()
+        cfg.require_vlm()
+        with stage_timer(log, "3 extract"):
+            result = extract(
+                source_pdf,
+                raw,
+                pages_json,
+                artifact_dir,
+                cfg,
+                force=force,
+                page_filter=pages,
+            )
+
+    # Build and write manifest
+    artifact_dir_rel = artifact_dir.relative_to(work).as_posix()
+    unit_files_rel = [f.relative_to(work).as_posix() for f in result.unit_files]
+    sidecars_rel = {
+        "audit_notes": result.audit_notes_path.relative_to(work).as_posix(),
+        "book_memory": result.book_memory_path.relative_to(work).as_posix(),
+        "evidence_index": result.evidence_index_path.relative_to(work).as_posix(),
+    }
+
+    from epubforge.stage3_artifacts import _now_utc_iso  # type: ignore[attr-defined]
+
+    manifest = Stage3Manifest(
+        mode=result.mode,
+        artifact_id=desired_artifact_id,
+        artifact_dir=artifact_dir_rel,
+        created_at=_now_utc_iso(),
+        raw_sha256=raw_sha256,
+        pages_sha256=pages_sha256,
+        source_pdf="source/source.pdf",
+        source_pdf_sha256=source_pdf_sha256,
+        selected_pages=result.selected_pages,
+        toc_pages=result.toc_pages,
+        complex_pages=result.complex_pages,
+        page_filter=page_filter,
+        unit_files=unit_files_rel,
+        sidecars=sidecars_rel,
+        settings=settings,
+    )
+
+    write_artifact_manifest_atomic(work, manifest)
+    activate_manifest_atomic(work, manifest)
+
+    log.info(
+        "Stage 3: activated artifact_id=%s (previous=%s)",
+        desired_artifact_id,
+        old_artifact_id,
+    )
 
 
 def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
