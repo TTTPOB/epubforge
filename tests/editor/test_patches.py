@@ -481,9 +481,8 @@ class TestInsertNodeChange:
         """Insert new chapter (parent_uid=None) — success.
 
         Note: InsertNodeChange model validator requires a 'kind' key in the node dict.
-        When inserting a chapter, 'kind' is included to satisfy the validator but is
-        ignored by Chapter.model_validate (Chapter model has no 'kind' field and uses
-        extra='ignore' defaults from BaseModel).
+        When inserting a chapter, 'kind' is included and is preserved by Chapter.model_validate
+        because Chapter now has a Literal["chapter"] kind field (round-trip safe).
         """
         patch = _make_patch([
             InsertNodeChange(

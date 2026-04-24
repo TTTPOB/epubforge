@@ -166,6 +166,7 @@ Block = Annotated[
 
 
 class Chapter(BaseModel):
+    kind: Literal["chapter"] = "chapter"
     uid: str | None = None
     title: str
     level: int = 1
