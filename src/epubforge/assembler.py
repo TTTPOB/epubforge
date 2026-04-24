@@ -1,11 +1,11 @@
-"""Stage 5 — merge cleaned + VLM outputs into Semantic IR."""
+"""Stage 4 — assemble Semantic IR from an active Stage 3 manifest."""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from epubforge.ir.semantic import (
@@ -30,92 +30,62 @@ from epubforge.text_utils import cjk_join_pair as _cjk_join
 
 log = logging.getLogger(__name__)
 
+# Maps unit kind → Provenance.source
+UNIT_SOURCE: dict[str, str] = {
+    "vlm_batch": "vlm",
+    "docling_page": "docling",
+}
 
-def assemble(work_dir: Path, out_path: Path) -> None:
-    """Read stage 3 extract units from *work_dir* and write Semantic IR JSON to *out_path*."""
-    extract_dir = work_dir / "03_extract"
-    unit_files = sorted(extract_dir.glob("unit_*.json"))
-    log.info("assemble: reading %d unit files from %s", len(unit_files), extract_dir.name)
 
+def assemble_from_manifest(work_dir: Path, manifest: Any) -> Book:
+    """Assemble a Book from an active Stage 3 manifest.
+
+    Reads unit files listed in *manifest.unit_files* (resolved against
+    *work_dir*), maps provenance source by unit kind, and returns a Book with
+    a single "Draft extraction" chapter.  No auto-heuristics are applied:
+    ``_merge_empty_callout_footnotes``, ``_pair_footnotes``,
+    ``_merge_continued_tables``, and H1-heading chapter-splitting are
+    intentionally omitted.
+
+    Raises ``ValueError`` for unknown unit kinds.
+    """
     all_blocks: list[Block] = []
 
-    for uf in unit_files:
-        data = json.loads(uf.read_text(encoding="utf-8"))
-        unit_kind = data["unit"]["kind"]
-        source = "llm" if unit_kind == "llm_group" else "vlm"
-        default_page = data["unit"]["pages"][0]
-        flag = data.get("first_block_continues_prev_tail", False)
-        fn_flag = data.get("first_footnote_continues_prev_footnote", False)
+    for rel_path in manifest.unit_files:
+        unit_path = work_dir / PurePosixPath(rel_path)
+        data = json.loads(unit_path.read_text(encoding="utf-8"))
 
-        raw_blocks = data.get("blocks", [])
-        parsed = [_parse_block(b, default_page, source) for b in raw_blocks]
-        parsed = [b for b in parsed if b is not None]
+        unit_kind: str = data["unit"]["kind"]
+        if unit_kind not in UNIT_SOURCE:
+            raise ValueError(
+                f"Unknown unit kind {unit_kind!r} in {unit_path}. "
+                f"Expected one of: {sorted(UNIT_SOURCE)}"
+            )
+        source: str = UNIT_SOURCE[unit_kind]
+        default_page: int = data["unit"]["pages"][0]
 
-        if fn_flag:
-            first_fn_idx = next((i for i, b in enumerate(parsed) if isinstance(b, Footnote)), None)
-            if first_fn_idx is not None:
-                fn_cont = parsed[first_fn_idx]
-                assert isinstance(fn_cont, Footnote)
-                prev_fn = _find_last_footnote(all_blocks)
-                if _is_continuation_plausible(prev_fn, fn_cont):
-                    _append_to_last_footnote(all_blocks, fn_cont.text)
-                    parsed = [b for i, b in enumerate(parsed) if i != first_fn_idx]
-                else:
-                    log.warning(
-                        "refusing first_footnote_continues_prev_footnote for %s: "
-                        "prev callout=%r cont callout=%r (callout mismatch)",
-                        uf.name,
-                        prev_fn.callout if prev_fn else None,
-                        fn_cont.callout,
-                    )
-            else:
-                log.warning(
-                    "first_footnote_continues_prev_footnote=True but no Footnote in unit %s",
-                    uf.name,
-                )
-
-        if flag and parsed:
-            cont = parsed[0]
-            if isinstance(cont, Paragraph):
-                if not _append_to_last_paragraph(all_blocks, cont.text):
-                    # Tail of previous unit is a non-Paragraph (e.g. Heading) — keep
-                    # the continuation as a new cross-page paragraph rather than drop it.
-                    log.warning(
-                        "first_block_continues_prev_tail=True but tail is not Paragraph "
-                        "(unit=%s) — keeping as new paragraph", uf.name
-                    )
-                    all_blocks.append(cont.model_copy(update={"cross_page": True}))
-                all_blocks.extend(parsed[1:])
-            else:
-                log.warning(
-                    "first_block_continues_prev_tail=True but first block is not Paragraph "
-                    "(kind=%s, unit=%s)", cont.kind, uf.name  # type: ignore[union-attr]
-                )
-                all_blocks.extend(parsed)
+        if unit_kind == "docling_page":
+            # skip-VLM: read draft_blocks
+            raw_blocks = data.get("draft_blocks", [])
         else:
-            all_blocks.extend(parsed)
+            # vlm_batch: read blocks
+            raw_blocks = data.get("blocks", [])
 
-    # Merge empty-callout footnotes (VLM continuation text misplaced or fn_flag not set)
-    all_blocks = _merge_empty_callout_footnotes(all_blocks)
-    # Merge cross-page table continuations then pair footnotes
-    all_blocks = _merge_continued_tables(all_blocks)
-    all_blocks = _pair_footnotes(all_blocks)
+        parsed = [_parse_block(b, default_page, source) for b in raw_blocks]
+        all_blocks.extend(b for b in parsed if b is not None)
 
-    # Group blocks into chapters at heading-level-1 boundaries
-    book = _build_book(all_blocks, work_dir)
-    out_path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
+    # Build a single-chapter Book — no heading-based chapter splitting
+    book = _build_draft_book(all_blocks, work_dir)
 
-    n_chapters = len(book.chapters)
     n_blocks = sum(len(ch.blocks) for ch in book.chapters)
-    n_footnotes = sum(
-        1 for ch in book.chapters for b in ch.blocks
-        if isinstance(b, Footnote) and getattr(b, "paired", False)
-    )
-    n_tables = sum(1 for ch in book.chapters for b in ch.blocks if isinstance(b, Table))
     log.info(
-        "assemble: chapters=%d blocks=%d footnotes_paired=%d tables=%d",
-        n_chapters, n_blocks, n_footnotes, n_tables,
+        "assemble_from_manifest: artifact_id=%s mode=%s chapters=%d blocks=%d",
+        manifest.artifact_id,
+        manifest.mode,
+        len(book.chapters),
+        n_blocks,
     )
+    return book
 
 
 def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block | None:
@@ -591,8 +561,43 @@ class _BookMeta:
         self.source_pdf = source_pdf
 
 
+def _build_draft_book(blocks: list[Block], work_dir: Path) -> Book:
+    """Build a single-chapter Book titled 'Draft extraction'.
+
+    No heading-based chapter splitting is performed.  All blocks go into one
+    chapter regardless of Heading level.  Book title and language are inferred
+    from workdir metadata when available.
+    """
+    raw_path = work_dir / "01_raw.json"
+    title = work_dir.name.replace("_", " ").title()
+    if raw_path.exists():
+        try:
+            from docling_core.types.doc import DoclingDocument
+            doc = DoclingDocument.load_from_json(raw_path)
+            origin = getattr(doc, "origin", None)
+            if origin and getattr(origin, "filename", None):
+                title = Path(origin.filename).stem
+            elif doc.name:
+                title = doc.name
+        except Exception:
+            pass  # fall back to workdir name
+
+    language = _detect_language(blocks)
+    chapter = Chapter(title="Draft extraction", blocks=blocks)
+    return Book(
+        title=title,
+        language=language,
+        chapters=[chapter],
+    )
+
+
 def _build_book_from_stream(blocks: list[Block], meta: _BookMeta) -> Book:
-    """Aggregate blocks into chapters at every level-1 Heading boundary."""
+    """Aggregate blocks into chapters at every level-1 Heading boundary.
+
+    NOTE: This function is preserved for potential editor-op use but is NOT
+    called during the normal assemble path.  Use ``assemble_from_manifest``
+    instead.
+    """
     chapters: list[Chapter] = []
     current_title = "Front Matter"
     current_blocks: list[Block] = []
@@ -623,7 +628,12 @@ def _build_book_from_stream(blocks: list[Block], meta: _BookMeta) -> Book:
 
 
 def _build_book(blocks: list[Block], work_dir: Path) -> Book:
-    """Aggregate blocks into chapters at every level-1 Heading boundary."""
+    """Aggregate blocks into chapters at every level-1 Heading boundary.
+
+    NOTE: This function is preserved for potential editor-op use but is NOT
+    called during the normal assemble path.  Use ``assemble_from_manifest``
+    instead.
+    """
     from docling_core.types.doc import DoclingDocument
 
     raw_path = work_dir / "01_raw.json"

@@ -377,15 +377,57 @@ def run_extract(
 
 
 def run_assemble(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
-    from epubforge.assembler import assemble
+    from epubforge.ir.semantic import Book, ExtractionMetadata
+    from epubforge.stage3_artifacts import load_active_stage3_manifest
 
     work = cfg.book_work_dir(pdf_path)
     out = _stage_path(work, "05_semantic_raw.json")
-    if _skip(out, force, "assemble"):
-        return
-    log.info("Stage 4: assembling Semantic IR…")
+
+    # 1. Load active Stage 3 manifest (fail if missing)
+    pointer, manifest = load_active_stage3_manifest(work)
+
+    # 2. Check freshness
+    if not force and out.exists():
+        try:
+            book = Book.model_validate_json(out.read_text(encoding="utf-8"))
+            if (
+                book.extraction.artifact_id == pointer.active_artifact_id
+                and book.extraction.stage3_manifest_sha256 == pointer.manifest_sha256
+            ):
+                log.info(
+                    "Stage 4: skipping assemble (fresh: artifact_id=%s)",
+                    pointer.active_artifact_id,
+                )
+                return
+        except Exception:
+            pass  # damaged/old format → rerun
+
+    # 3. Assemble from manifest
+    log.info(
+        "Stage 4: assembling from manifest artifact_id=%s mode=%s...",
+        manifest.artifact_id,
+        manifest.mode,
+    )
+    from epubforge.assembler import assemble_from_manifest
+
     with stage_timer(log, "4 assemble"):
-        assemble(work, out)
+        book = assemble_from_manifest(work, manifest)
+
+    # 4. Write Book.extraction metadata
+    from pathlib import PurePosixPath as _PurePosix
+    manifest_path_abs = work / _PurePosix(pointer.manifest_path)
+    book.extraction = ExtractionMetadata(
+        stage3_mode=manifest.mode,
+        stage3_manifest_path=str(manifest_path_abs),
+        stage3_manifest_sha256=pointer.manifest_sha256,
+        artifact_id=manifest.artifact_id,
+        selected_pages=manifest.selected_pages,
+        complex_pages=manifest.complex_pages,
+        source_pdf=manifest.source_pdf,
+        evidence_index_path=manifest.sidecars.get("evidence_index", ""),
+    )
+
+    out.write_text(book.model_dump_json(indent=2), encoding="utf-8")
     log.info("  -> %s", out)
 
 def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
