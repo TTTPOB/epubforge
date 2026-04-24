@@ -12,6 +12,7 @@ from epubforge.ir.semantic import (
     Book,
     Chapter,
     Equation,
+    ExtractionMetadata,
     Figure,
     Footnote,
     Heading,
@@ -28,6 +29,7 @@ from epubforge.ir.semantic import (
     compute_chapter_uid_runtime,
     compute_uid,
 )
+from epubforge.ir.style_registry import ALLOWED_ROLES
 
 
 class TestParagraph:
@@ -220,3 +222,134 @@ class TestAssemblerPagePropagation:
         block = _parse_block({"kind": "paragraph", "text": "x"}, default_page=7, source="llm")
         assert block is not None
         assert block.provenance.page == 7
+
+
+class TestProvenanceExtended:
+    def test_docling_source_is_valid(self) -> None:
+        p = Provenance(page=1, source="docling")
+        assert p.source == "docling"
+
+    def test_new_optional_fields_default_to_none(self) -> None:
+        p = Provenance(page=1)
+        assert p.raw_label is None
+        assert p.artifact_id is None
+        assert p.evidence_ref is None
+
+    def test_new_optional_fields_can_be_set(self) -> None:
+        p = Provenance(
+            page=3,
+            source="docling",
+            raw_label="SectionHeaderItem",
+            artifact_id="artifact-abc123",
+            evidence_ref="evidence/page3.json",
+        )
+        assert p.raw_label == "SectionHeaderItem"
+        assert p.artifact_id == "artifact-abc123"
+        assert p.evidence_ref == "evidence/page3.json"
+
+    def test_invalid_source_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            Provenance(page=1, source="invalid_source")  # type: ignore[arg-type]
+
+    def test_round_trip_with_new_fields(self) -> None:
+        p = Provenance(
+            page=5,
+            source="docling",
+            raw_label="ListItem",
+            artifact_id="art-001",
+            evidence_ref="ev/p5.json",
+        )
+        restored = Provenance.model_validate(p.model_dump())
+        assert restored.source == "docling"
+        assert restored.raw_label == "ListItem"
+        assert restored.artifact_id == "art-001"
+        assert restored.evidence_ref == "ev/p5.json"
+
+
+class TestDoclingCandidateRoles:
+    _CANDIDATE_ROLES = [
+        "docling_title_candidate",
+        "docling_heading_candidate",
+        "docling_footnote_candidate",
+        "docling_list_item_candidate",
+        "docling_caption_candidate",
+        "docling_handwritten_candidate",
+        "docling_field_candidate",
+        "docling_checkbox_candidate",
+        "docling_unknown_candidate",
+    ]
+
+    def test_all_candidate_roles_in_allowed_roles(self) -> None:
+        for role in self._CANDIDATE_ROLES:
+            assert role in ALLOWED_ROLES, f"{role!r} missing from ALLOWED_ROLES"
+
+    def test_paragraph_accepts_candidate_role(self) -> None:
+        p = Paragraph(
+            text="some extracted text",
+            role="docling_heading_candidate",
+            provenance=Provenance(page=2, source="docling"),
+        )
+        assert p.role == "docling_heading_candidate"
+
+
+class TestExtractionMetadata:
+    def test_default_extraction_on_book(self) -> None:
+        b = Book(title="Test")
+        assert b.extraction.stage3_mode == "unknown"
+        assert b.extraction.stage3_manifest_path is None
+        assert b.extraction.stage3_manifest_sha256 is None
+        assert b.extraction.artifact_id is None
+        assert b.extraction.selected_pages == []
+        assert b.extraction.complex_pages == []
+        assert b.extraction.source_pdf is None
+        assert b.extraction.evidence_index_path is None
+
+    def test_extraction_metadata_round_trip(self) -> None:
+        em = ExtractionMetadata(
+            stage3_mode="skip_vlm",
+            stage3_manifest_path="/books/manifest.json",
+            stage3_manifest_sha256="abc123def456",
+            artifact_id="art-999",
+            selected_pages=[1, 2, 3],
+            complex_pages=[2],
+            source_pdf="/books/source.pdf",
+            evidence_index_path="/books/evidence/index.json",
+        )
+        restored = ExtractionMetadata.model_validate_json(em.model_dump_json())
+        assert restored.stage3_mode == "skip_vlm"
+        assert restored.stage3_manifest_path == "/books/manifest.json"
+        assert restored.stage3_manifest_sha256 == "abc123def456"
+        assert restored.artifact_id == "art-999"
+        assert restored.selected_pages == [1, 2, 3]
+        assert restored.complex_pages == [2]
+        assert restored.source_pdf == "/books/source.pdf"
+        assert restored.evidence_index_path == "/books/evidence/index.json"
+
+    def test_book_serialization_includes_extraction(self) -> None:
+        b = Book(
+            title="My Book",
+            extraction=ExtractionMetadata(
+                stage3_mode="vlm",
+                selected_pages=[5, 6, 7],
+            ),
+        )
+        data = b.model_dump()
+        assert "extraction" in data
+        assert data["extraction"]["stage3_mode"] == "vlm"
+        assert data["extraction"]["selected_pages"] == [5, 6, 7]
+
+    def test_invalid_stage3_mode_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            ExtractionMetadata(stage3_mode="bad_mode")  # type: ignore[arg-type]
+
+    def test_book_json_round_trip_with_extraction(self) -> None:
+        b = Book(
+            title="JSON Book",
+            extraction=ExtractionMetadata(
+                stage3_mode="skip_vlm",
+                source_pdf="/tmp/book.pdf",
+            ),
+        )
+        restored = Book.model_validate_json(b.model_dump_json())
+        assert restored.extraction.stage3_mode == "skip_vlm"
+        assert restored.extraction.source_pdf == "/tmp/book.pdf"

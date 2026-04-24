@@ -71,8 +71,11 @@ def compute_chapter_uid_runtime(seed: str, op_id: str, new_title: str) -> str:
 class Provenance(BaseModel):
     page: int
     bbox: list[float] | None = None
-    source: Literal["llm", "vlm", "passthrough"] = "passthrough"
+    source: Literal["llm", "vlm", "docling", "passthrough"] = "passthrough"
     raw_ref: str | None = None
+    raw_label: str | None = None
+    artifact_id: str | None = None
+    evidence_ref: str | None = None
 
 
 class _UidMixin(BaseModel):
@@ -170,6 +173,17 @@ class Chapter(BaseModel):
     blocks: list[Block] = Field(default_factory=list)
 
 
+class ExtractionMetadata(BaseModel):
+    stage3_mode: Literal["vlm", "skip_vlm", "unknown"] = "unknown"
+    stage3_manifest_path: str | None = None
+    stage3_manifest_sha256: str | None = None
+    artifact_id: str | None = None
+    selected_pages: list[int] = Field(default_factory=list)
+    complex_pages: list[int] = Field(default_factory=list)
+    source_pdf: str | None = None
+    evidence_index_path: str | None = None
+
+
 class Book(BaseModel):
     op_log_version: int = 0
     initialized_at: str = ""
@@ -179,6 +193,7 @@ class Book(BaseModel):
     language: str = "en"
     source_pdf: str = ""
     chapters: list[Chapter] = Field(default_factory=list)
+    extraction: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
 
 
 # --- VLM output schema (used as response_format) ---

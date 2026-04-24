@@ -9,7 +9,7 @@ from epubforge.ir.semantic import Provenance
 
 @pytest.fixture
 def prov():
-    def _make(page: int = 1, source: Literal["llm", "vlm", "passthrough"] = "passthrough") -> Provenance:
+    def _make(page: int = 1, source: Literal["llm", "vlm", "docling", "passthrough"] = "passthrough") -> Provenance:
         return Provenance(page=page, bbox=None, source=source)
 
     return _make

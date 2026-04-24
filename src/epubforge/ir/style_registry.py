@@ -16,6 +16,16 @@ ALLOWED_ROLES = {
     "list_item",
     "code",
     "misc_display",
+    # Docling candidate roles — mechanically sourced from Docling, pending review
+    "docling_title_candidate",
+    "docling_heading_candidate",
+    "docling_footnote_candidate",
+    "docling_list_item_candidate",
+    "docling_caption_candidate",
+    "docling_handwritten_candidate",
+    "docling_field_candidate",
+    "docling_checkbox_candidate",
+    "docling_unknown_candidate",
 }
 
 _DEFAULT_STYLES: list[dict] = [
