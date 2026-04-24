@@ -453,5 +453,6 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             out,
             images_dir=work / "images",
             registry_path=registry if registry.exists() else None,
+            work_dir=work,
         )
     log.info("  -> %s", out)

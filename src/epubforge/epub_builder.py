@@ -133,6 +133,7 @@ def build_epub(
     *,
     images_dir: Path | None = None,
     registry_path: Path | None = None,
+    work_dir: Path | None = None,
 ) -> None:
     book_model = Book.model_validate_json(semantic_path.read_text(encoding="utf-8"))
 
@@ -140,7 +141,7 @@ def build_epub(
     # active manifest exists, fail when the shas don't match to prevent building
     # from stale extraction data.
     if book_model.extraction.stage3_manifest_sha256:
-        work_dir = semantic_path.parent
+        work_dir = work_dir or semantic_path.parent
         _check_build_source_freshness(
             work_dir, book_model.extraction.stage3_manifest_sha256
         )
