@@ -70,7 +70,9 @@ def test_init_command_creates_edit_state(prov, tmp_path: Path) -> None:
     assert book.op_log_version == 0
     assert book.uid_seed
     meta = json.loads(paths.meta_path.read_text(encoding="utf-8"))
-    assert meta == {"initialized_at": book.initialized_at, "uid_seed": book.uid_seed}
+    # stage3 may be None (legacy init without active manifest)
+    assert meta["initialized_at"] == book.initialized_at
+    assert meta["uid_seed"] == book.uid_seed
     assert all(chapter.uid for chapter in book.chapters)
     assert all(block.uid for chapter in book.chapters for block in chapter.blocks)
 

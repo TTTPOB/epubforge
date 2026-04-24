@@ -7,7 +7,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
@@ -118,7 +118,57 @@ def ensure_initialized(paths: EditorPaths) -> None:
 
 
 def default_init_source(paths: EditorPaths) -> Path:
-    return paths.work_dir / "05_semantic.json"
+    """Return path to the best available semantic source that matches the active Stage 3 manifest.
+
+    Preference order: 05_semantic.json → 05_semantic_raw.json.
+    Both are validated against the active manifest when a manifest pointer exists.
+    If neither exists (or neither matches), raises FileNotFoundError with actionable guidance.
+    """
+    from epubforge.stage3_artifacts import Stage3ContractError, load_active_stage3_manifest
+
+    candidates = [
+        paths.work_dir / "05_semantic.json",
+        paths.work_dir / "05_semantic_raw.json",
+    ]
+
+    # Try to load active manifest for validation; if none exists fall back to simple file check.
+    try:
+        pointer, manifest = load_active_stage3_manifest(paths.work_dir)
+        active_artifact_id = pointer.active_artifact_id
+        active_sha = pointer.manifest_sha256
+    except Stage3ContractError:
+        # No active manifest — just return first existing candidate.
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            f"No semantic source found in {paths.work_dir}. "
+            "Run `epubforge assemble` or `epubforge run --skip-vlm` first."
+        )
+
+    # Manifest exists: find a candidate whose Book.extraction metadata matches.
+    from epubforge.ir.semantic import Book as _Book
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            raw = candidate.read_text(encoding="utf-8")
+            book = _Book.model_validate_json(raw)
+        except Exception:
+            continue
+        if (
+            book.extraction.artifact_id == active_artifact_id
+            and book.extraction.stage3_manifest_sha256 == active_sha
+        ):
+            return candidate
+
+    # No matching candidate found.
+    raise FileNotFoundError(
+        f"No semantic source in {paths.work_dir} matches the active Stage 3 artifact "
+        f"(artifact_id={active_artifact_id}). "
+        "Run `epubforge assemble` or `epubforge run --skip-vlm` to regenerate it."
+    )
 
 
 def _block_text_head(block: Block) -> str:
@@ -167,15 +217,35 @@ def load_editable_book(paths: EditorPaths) -> Book:
     return load_book(paths.book_path)
 
 
+class Stage3EditorMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["vlm", "skip_vlm", "unknown"]
+    skipped_vlm: bool
+    manifest_path: str
+    manifest_sha256: str
+    artifact_id: str
+    selected_pages: list[int]
+    complex_pages: list[int]
+    source_pdf: str
+    evidence_index_path: str
+    extraction_warnings_path: str
+
+
 class EditorMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     initialized_at: str
     uid_seed: str
+    stage3: Stage3EditorMeta | None = None
 
 
-def build_editor_meta(book: Book) -> EditorMeta:
-    return EditorMeta(initialized_at=book.initialized_at, uid_seed=book.uid_seed)
+def build_editor_meta(book: Book, *, stage3: Stage3EditorMeta | None = None) -> EditorMeta:
+    return EditorMeta(initialized_at=book.initialized_at, uid_seed=book.uid_seed, stage3=stage3)
+
+
+def load_editor_meta(paths: EditorPaths) -> EditorMeta:
+    return EditorMeta.model_validate_json(paths.meta_path.read_text(encoding="utf-8"))
 
 
 def load_editor_memory(paths: EditorPaths) -> EditMemory:
@@ -233,6 +303,7 @@ def write_initial_state(
     book: Book,
     memory: EditMemory,
     leases: LeaseState | None = None,
+    stage3: Stage3EditorMeta | None = None,
 ) -> None:
     """Create directory skeleton and write meta/memory/leases/log/staging.
 
@@ -243,7 +314,7 @@ def write_initial_state(
     paths.audit_dir.mkdir(parents=True, exist_ok=True)
     paths.scratch_dir.mkdir(parents=True, exist_ok=True)
     paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_model(paths.meta_path, build_editor_meta(book))
+    atomic_write_model(paths.meta_path, build_editor_meta(book, stage3=stage3))
     atomic_write_model(paths.memory_path, memory)
     atomic_write_model(paths.leases_path, leases or LeaseState())
     atomic_write_text(paths.current_log_path, "")

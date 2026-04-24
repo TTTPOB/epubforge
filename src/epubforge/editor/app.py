@@ -221,6 +221,44 @@ def _snapshot_cmd(
     raise typer.Exit(_run(run_snapshot, work=work, tag=tag, cfg=cfg))
 
 
+@editor_app.command("render-page")
+def _render_page_cmd(
+    ctx: typer.Context,
+    work: Annotated[Path, typer.Argument(help="Work directory")],
+    page: Annotated[int, typer.Option("--page", help="1-based page number to render")] = 0,
+    dpi: Annotated[int, typer.Option("--dpi", help="Render DPI")] = 200,
+    out: Annotated[Optional[Path], typer.Option("--out", help="Output JPEG path (default: edit_state/audit/page_images/page_NNNN.jpg)")] = None,
+) -> None:
+    """Render a single page of the source PDF to JPEG (no LLM/VLM)."""
+    from epubforge.editor.tool_surface import run_render_page
+
+    if page <= 0:
+        typer.echo('{"error": "--page must be a positive integer"}')
+        raise typer.Exit(2)
+    app_ctx = ctx.find_root().obj
+    cfg = app_ctx.config
+    raise typer.Exit(_run(run_render_page, work=work, page=page, dpi=dpi, out=out, cfg=cfg))
+
+
+@editor_app.command("vlm-page")
+def _vlm_page_cmd(
+    ctx: typer.Context,
+    work: Annotated[Path, typer.Argument(help="Work directory")],
+    page: Annotated[int, typer.Option("--page", help="1-based page number")] = 0,
+    dpi: Annotated[int, typer.Option("--dpi", help="Render DPI")] = 200,
+    out: Annotated[Optional[Path], typer.Option("--out", help="Output JSON path (default: edit_state/audit/vlm_pages/page_NNNN.json)")] = None,
+) -> None:
+    """Render a page, load evidence, call VLM, write result — never mutates book.json."""
+    from epubforge.editor.tool_surface import run_vlm_page
+
+    if page <= 0:
+        typer.echo('{"error": "--page must be a positive integer"}')
+        raise typer.Exit(2)
+    app_ctx = ctx.find_root().obj
+    cfg = app_ctx.config
+    raise typer.Exit(_run(run_vlm_page, work=work, page=page, dpi=dpi, out=out, cfg=cfg))
+
+
 @editor_app.command("render-prompt")
 def _render_prompt_cmd(
     ctx: typer.Context,

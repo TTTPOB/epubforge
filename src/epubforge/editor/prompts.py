@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from epubforge.editor.memory import EditMemory
 from epubforge.ir.semantic import Book, Chapter
+
+if TYPE_CHECKING:
+    from epubforge.editor.state import Stage3EditorMeta
 
 
 SCANNER_PROMPT = """你是 epubforge 编辑系统的 scanner subagent。
@@ -78,6 +82,51 @@ def _issues_block(issues: list[str] | None) -> str:
     return "\n".join(f"- {item}" for item in issues)
 
 
+def _chapter_page_coverage(chapter: Chapter) -> list[int]:
+    """Return sorted list of unique page numbers covered by blocks in *chapter*."""
+    pages: set[int] = set()
+    for block in chapter.blocks:
+        pages.add(block.provenance.page)
+    return sorted(pages)
+
+
+def _extraction_context_block(
+    stage3: "Stage3EditorMeta",
+    chapter: Chapter,
+    work_dir: Path,
+) -> str:
+    """Build a prose extraction-context section for injection into prompts."""
+    chapter_pages = _chapter_page_coverage(chapter)
+    chapter_complex = [p for p in stage3.complex_pages if p in set(chapter_pages)]
+    work_dir_abs = str(work_dir.resolve())
+    # Use first page of chapter for the command examples; fall back to first selected page.
+    example_page = chapter_pages[0] if chapter_pages else (stage3.selected_pages[0] if stage3.selected_pages else 1)
+
+    lines = [
+        "## Extraction context (Stage 3)",
+        f"- mode: {stage3.mode}  skipped_vlm: {stage3.skipped_vlm}",
+        f"- artifact_id: {stage3.artifact_id}",
+        f"- manifest: {stage3.manifest_path}  sha256: {stage3.manifest_sha256[:12]}…",
+        f"- evidence_index: {stage3.evidence_index_path}",
+        f"- selected_pages (all): {stage3.selected_pages}",
+        f"- complex_pages (all): {stage3.complex_pages}",
+        f"- this chapter page coverage: {chapter_pages}",
+        f"- complex pages in this chapter: {chapter_complex}",
+        "",
+        "### Page inspection tools",
+        f"  # render whole page as JPEG (no LLM/VLM):",
+        f"  epubforge editor render-page {work_dir_abs} --page {example_page}",
+        f"  # call VLM on a page (writes to edit_state/audit/vlm_pages/):",
+        f"  epubforge editor vlm-page {work_dir_abs} --page {example_page}",
+        "",
+        "### Candidate roles note",
+        "  Blocks with roles matching `docling_*_candidate` (e.g. `docling_heading_candidate`,",
+        "  `docling_footnote_candidate`) are mechanical Docling drafts — NOT final semantics.",
+        "  They must be reviewed and promoted/corrected by editor ops before publication.",
+    ]
+    return "\n".join(lines)
+
+
 def render_prompt(
     *,
     kind: str,
@@ -87,6 +136,7 @@ def render_prompt(
     book_path: Path,
     chapter_uid: str,
     issues: list[str] | None = None,
+    stage3: "Stage3EditorMeta | None" = None,
 ) -> str:
     chapter = _chapter_for_uid(book, chapter_uid)
     template = {
@@ -97,7 +147,7 @@ def render_prompt(
     if template is None:
         raise ValueError(f"unsupported prompt kind: {kind}")
 
-    return template.format(
+    rendered = template.format(
         book_path=book_path,
         book_version=book.op_log_version,
         chapter_title=chapter.title,
@@ -106,3 +156,9 @@ def render_prompt(
         memory_snapshot=_memory_snapshot(memory),
         work_dir=work_dir,
     )
+
+    if stage3 is not None:
+        extraction_ctx = _extraction_context_block(stage3, chapter, work_dir)
+        rendered = rendered + "\n\n" + extraction_ctx
+
+    return rendered
