@@ -166,12 +166,16 @@ def extract(
         evidence_index.model_dump_json(indent=2), encoding="utf-8"
     )
 
+    warnings_path = out_dir / "warnings.json"
+    warnings_path.write_text("[]", encoding="utf-8")
+
     return Stage3ExtractionResult(
         mode="vlm",
         unit_files=unit_files,
         audit_notes_path=audit_path,
         book_memory_path=book_memory_path,
         evidence_index_path=evidence_index_path,
+        warnings_path=warnings_path,
         selected_pages=sorted(selected_pages),
         toc_pages=sorted(all_toc_pages),
         complex_pages=sorted(all_complex_pages),

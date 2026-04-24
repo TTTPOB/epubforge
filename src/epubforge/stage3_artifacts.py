@@ -98,6 +98,7 @@ class Stage3ExtractionResult(BaseModel):
     audit_notes_path: Path
     book_memory_path: Path
     evidence_index_path: Path
+    warnings_path: Path | None = None
     selected_pages: list[int]
     toc_pages: list[int]
     complex_pages: list[int]

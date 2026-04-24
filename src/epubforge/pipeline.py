@@ -344,6 +344,11 @@ def run_extract(
         "audit_notes": result.audit_notes_path.relative_to(work).as_posix(),
         "book_memory": result.book_memory_path.relative_to(work).as_posix(),
         "evidence_index": result.evidence_index_path.relative_to(work).as_posix(),
+        "warnings": (
+            result.warnings_path.relative_to(work).as_posix()
+            if result.warnings_path is not None
+            else (artifact_dir / "warnings.json").relative_to(work).as_posix()
+        ),
     }
 
     from epubforge.stage3_artifacts import _now_utc_iso  # type: ignore[attr-defined]

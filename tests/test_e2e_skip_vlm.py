@@ -178,12 +178,16 @@ def _fake_extract_skip_vlm(
     evidence_index = out_dir / "evidence_index.json"
     evidence_index.write_text("{}", encoding="utf-8")
 
+    warnings_file = out_dir / "warnings.json"
+    warnings_file.write_text("[]", encoding="utf-8")
+
     return Stage3ExtractionResult(
         mode="skip_vlm",
         unit_files=[unit_file],
         audit_notes_path=audit_file,
         book_memory_path=book_memory,
         evidence_index_path=evidence_index,
+        warnings_path=warnings_file,
         selected_pages=[1, 2],
         toc_pages=[],
         complex_pages=[],
@@ -247,6 +251,7 @@ def test_skip_vlm_e2e_no_api_key(
     pointer, manifest = load_active_stage3_manifest(work)
     assert manifest.mode == "skip_vlm"
     assert len(manifest.artifact_id) == 16
+    assert "warnings" in manifest.sidecars, "manifest must register warnings sidecar"
 
     # -----------------------------------------------------------------------
     # Stage 4: assemble → 05_semantic_raw.json
