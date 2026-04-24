@@ -92,10 +92,27 @@ def _parse_pages(pages_str: str | None) -> set[int] | None:
     for part in pages_str.split(","):
         part = part.strip()
         if "-" in part:
-            lo, hi = part.split("-", 1)
-            result.update(range(int(lo), int(hi) + 1))
+            lo_str, hi_str = part.split("-", 1)
+            lo_str = lo_str.strip()
+            hi_str = hi_str.strip()
+            try:
+                lo = int(lo_str)
+                hi = int(hi_str)
+            except ValueError:
+                raise typer.BadParameter(f"invalid page spec '{part}'", param_hint="--pages")
+            if lo <= 0 or hi <= 0:
+                raise typer.BadParameter(f"page number must be positive in range '{part}'", param_hint="--pages")
+            if lo > hi:
+                raise typer.BadParameter(f"reversed page range '{part}': start ({lo}) must be <= end ({hi})", param_hint="--pages")
+            result.update(range(lo, hi + 1))
         else:
-            result.add(int(part))
+            try:
+                page = int(part)
+            except ValueError:
+                raise typer.BadParameter(f"invalid page spec '{part}'", param_hint="--pages")
+            if page <= 0:
+                raise typer.BadParameter(f"page number must be positive, got {part}", param_hint="--pages")
+            result.add(page)
     return result
 
 
