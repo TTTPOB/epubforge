@@ -302,6 +302,7 @@ class TestReuseActiveArtifact:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             extract_calls.append("called")
             # Return a minimal result
@@ -366,6 +367,7 @@ class TestSkipVlmNoProviderRequired:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -417,6 +419,7 @@ class TestSkipVlmNoProviderRequired:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -482,6 +485,7 @@ class TestVlmPathRequiresProvider:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -540,6 +544,7 @@ class TestVlmPathRequiresProvider:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             call_order.append("extract")
             unit = out_dir / "unit_0000.json"
@@ -597,6 +602,7 @@ class TestVlmPathRequiresProvider:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -660,6 +666,7 @@ class TestFailedExtractionPreservesOldPointer:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> None:
             raise RuntimeError("Simulated extraction failure")
 
@@ -696,6 +703,7 @@ class TestFailedExtractionPreservesOldPointer:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> None:
             raise RuntimeError("Extraction bombed")
 
@@ -822,6 +830,7 @@ class TestManifestActivationAfterExtraction:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -875,6 +884,7 @@ class TestManifestActivationAfterExtraction:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")
@@ -1016,6 +1026,7 @@ class TestPagesFilter:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             artifact_ids_seen.append(out_dir.name)
             unit = out_dir / "unit_0000.json"
@@ -1071,6 +1082,7 @@ class TestPagesFilter:
             *,
             force: bool = False,
             page_filter: Any = None,
+            **kwargs: Any,
         ) -> Stage3ExtractionResult:
             unit = out_dir / "unit_0000.json"
             unit.write_text("{}", encoding="utf-8")

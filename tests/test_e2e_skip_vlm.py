@@ -133,6 +133,7 @@ def _fake_extract_skip_vlm(
     *,
     force: bool = False,
     page_filter: Any = None,
+    **kwargs: Any,
 ) -> Stage3ExtractionResult:
     """Stub extractor that writes minimal but valid Stage 3 artifact files."""
     out_dir.mkdir(parents=True, exist_ok=True)
