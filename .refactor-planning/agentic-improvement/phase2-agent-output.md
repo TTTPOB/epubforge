@@ -22,7 +22,7 @@
 | `src/epubforge/editor/agent_output_cli.py` | Typer CLI 命令组 `agent_output_app`（注意：不叫 `agent_output_commands.py`，以区别于 `patch_commands.py`） |
 | `tests/test_agent_output.py` | 所有 Phase 2 测试 |
 
-> [R1: addressed] **D1**：文件命名统一。PatchCommand 模型放在 `patch_commands.py`（不叫 `commands.py`），CLI 放在 `agent_output_cli.py`（不叫 `agent_output_commands.py`）。两个名字不再产生混淆。
+> **D1**：文件命名统一。PatchCommand 模型放在 `patch_commands.py`（不叫 `commands.py`），CLI 放在 `agent_output_cli.py`（不叫 `agent_output_commands.py`）。两个名字不再产生混淆。
 
 ### 修改文件
 
@@ -101,7 +101,7 @@ class AgentOutput(StrictModel):
 | `notes` | `list[str]` | agent 观察备注，不直接修改状态，仅归档 |
 | `evidence_refs` | `list[str]` | VLM observation id 或其他 evidence 引用（Phase 2 不校验，留 TODO 注释，等 Phase 9 VLM 系统）|
 
-> [R1: addressed] **D5**：`evidence_refs` 有意不校验，计划中明确说明这是 Phase 9 VLM 系统的预留字段，Phase 2 只存储不验证。
+> **D5**：`evidence_refs` 有意不校验，计划中明确说明这是 Phase 9 VLM 系统的预留字段，Phase 2 只存储不验证。
 
 ### 2.4 字段 validator
 
@@ -288,14 +288,14 @@ epubforge editor agent-output begin <work> \
 
 1. `resolve_editor_paths(work)` → `ensure_initialized(paths)`
 2. 如果指定了 `--chapter`，加载 `book.json` 并验证该 chapter UID 存在；否则报 `CommandError`
-3. **[R1: addressed] S 类规则**：如果 `kind` 为 `scanner`，且未指定 `--chapter`，报错 `CommandError("scanner must specify --chapter")`。Scanner 必须绑定到特定 chapter（因为 scanner 需要更新 `chapter_status.read_passes`，全书范围的 scanner 无法满足此要求）。
+3. **S 类规则**：如果 `kind` 为 `scanner`，且未指定 `--chapter`，报错 `CommandError("scanner must specify --chapter")`。Scanner 必须绑定到特定 chapter（因为 scanner 需要更新 `chapter_status.read_passes`，全书范围的 scanner 无法满足此要求）。
 4. 生成 `output_id = str(uuid4())`
 5. 构建 `AgentOutput(output_id=..., kind=..., agent_id=..., chapter_uid=..., created_at=now, updated_at=now)`
 6. `paths.agent_outputs_dir.mkdir(parents=True, exist_ok=True)`
 7. `atomic_write_model(paths.agent_outputs_dir / f"{output_id}.json", output)`
-8. stdout 输出 JSON：`{"output_id": "<uuid>", "path": "<absolute_path>"}` [R2: removed base_version/op_log_version]
+8. stdout 输出 JSON：`{"output_id": "<uuid>", "path": "<absolute_path>"}`
 
-> [R1: addressed, R2: removed] **D6**：`begin` 返回值不再包含 `base_version`；版本控制由 Git worktree 负责（Phase 7），字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获。
+> **D6**：`begin` 返回值不再包含 `base_version`；版本控制由 Git worktree 负责（Phase 7），字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获。
 
 **错误处理**：
 
@@ -488,7 +488,7 @@ epubforge editor agent-output add-memory-patch <work> <output_id> \
 1. 读取文件，`json.loads`
 2. `MemoryPatch.model_validate(parsed)`
 3. 加载 output
-4. **[R1: addressed] S4**：对 MemoryPatch 中的 UID 引用做即时预验证（加载当前 book，检查 `mp.conventions[*].evidence_uids` 和 `mp.patterns[*].affected_uids` 的 UID 存在性）。如果此时 book 加载成本过高，允许推迟到 `validate` 命令再检查，但必须在此处打印 warning。Phase 2 选择**推迟到 validate** 以保持 `add-*` 命令轻量，但文档明确说明 validate 阶段会检查。
+4. **S4**：对 MemoryPatch 中的 UID 引用做即时预验证（加载当前 book，检查 `mp.conventions[*].evidence_uids` 和 `mp.patterns[*].affected_uids` 的 UID 存在性）。如果此时 book 加载成本过高，允许推迟到 `validate` 命令再检查，但必须在此处打印 warning。Phase 2 选择**推迟到 validate** 以保持 `add-*` 命令轻量，但文档明确说明 validate 阶段会检查。
 5. `output.memory_patches.append(mp)`
 6. 更新 `output.updated_at`
 7. 原子写回
@@ -552,7 +552,7 @@ epubforge editor agent-output submit <work> <output_id> \
 | `--apply` | flag | 否 | 实际应用修改。不传则只做 dry-run 验证 |
 | `--stage` | flag | 否 | 写入 staging 文件，不修改 book.json（见下方说明） |
 
-> [R1: addressed] **V2**：`--stage` 模式接口已设计，但 Phase 2 仅作占位实现（打印 `{"staged": false, "message": "stage mode not yet implemented, will be added in Phase 4"}` 并 exit 0）。Phase 4 删除旧 staging 系统时再正式实现此模式。不在 Phase 2 实现的原因：旧 `propose-op` 系统的 staging 文件格式（JSONL `OpEnvelope`）与新 `BookPatch` 格式不兼容，在 Phase 4 统一迁移前不应引入第二种 staging 格式。
+> **V2**：`--stage` 模式接口已设计，但 Phase 2 仅作占位实现（打印 `{"staged": false, "message": "stage mode not yet implemented, will be added in Phase 4"}` 并 exit 0）。Phase 4 删除旧 staging 系统时再正式实现此模式。不在 Phase 2 实现的原因：旧 `propose-op` 系统的 staging 文件格式（JSONL `OpEnvelope`）与新 `BookPatch` 格式不兼容，在 Phase 4 统一迁移前不应引入第二种 staging 格式。
 
 **行为（`--apply` 模式）**：见 §6。
 
@@ -583,7 +583,7 @@ epubforge editor agent-output submit <work> <output_id> \
 
 已由 Pydantic `AgentOutput.model_validate` 完成（load 时触发）。validate 命令只处理语义层。
 
-### 5.2 chapter_uid 存在性校验 [R2: removed base_version/op_log_version]
+### 5.2 chapter_uid 存在性校验
 
 ```python
 if output.chapter_uid is not None:
@@ -594,7 +594,7 @@ if output.chapter_uid is not None:
 
 ### 5.3 BookPatch 校验
 
-> [R1: addressed] **S1**：Phase 1 定义 `validate_book_patch(book: Book, patch: BookPatch) -> None`，失败时抛出 `PatchError`。Phase 2 的 validate 需要收集所有 patch 的错误（不 fail-fast），因此在此处包装 try/except：
+> **S1**：Phase 1 定义 `validate_book_patch(book: Book, patch: BookPatch) -> None`，失败时抛出 `PatchError`。Phase 2 的 validate 需要收集所有 patch 的错误（不 fail-fast），因此在此处包装 try/except：
 
 ```python
 from epubforge.editor.patches import validate_book_patch, PatchError
@@ -625,7 +625,7 @@ for i, cmd in enumerate(output.commands):
 
 ### 5.5 MemoryPatch 校验
 
-> [R1: addressed] **S4**：补充对 `mp.conventions[*].evidence_uids` 和 `mp.patterns[*].affected_uids` 中 UID 引用的存在性校验。
+> **S4**：补充对 `mp.conventions[*].evidence_uids` 和 `mp.patterns[*].affected_uids` 中 UID 引用的存在性校验。
 
 `MemoryPatch` 本身是 Pydantic 模型，结构校验在 load 时完成。
 validate 阶段额外检查所有 UID 引用的存在性：
@@ -649,7 +649,7 @@ for i, mp in enumerate(output.memory_patches):
                     f"context_uid not found: {uid}"
                 )
 
-    # [R1: addressed] S4 — Check convention evidence_uids
+    # Check convention evidence_uids
     for conv in mp.conventions:
         for uid in conv.evidence_uids:
             if not _uid_exists(uid, book):
@@ -658,7 +658,7 @@ for i, mp in enumerate(output.memory_patches):
                     f"evidence_uid not found: {uid}"
                 )
 
-    # [R1: addressed] S4 — Check pattern affected_uids
+    # Check pattern affected_uids
     for pattern in mp.patterns:
         for uid in pattern.affected_uids:
             if not _uid_exists(uid, book):
@@ -670,7 +670,7 @@ for i, mp in enumerate(output.memory_patches):
 
 ### 5.6 scope 一致性校验
 
-> [R1: addressed, R2: simplified] **D2/A3**：`PatchScope` 已简化——`chapter_uid=None` 即 book-wide（Phase 1 §2.3 [R2]）。不再需要辅助函数。
+> **D2/A3**：`PatchScope` 已简化——`chapter_uid=None` 即 book-wide（Phase 1 §2.3 [R2]）。不再需要辅助函数。
 
 如果 `output.chapter_uid` 不为 `None`，所有 patches 的 scope 必须明确指定相同的 `chapter_uid`（不允许 book-wide scope）：
 
@@ -693,7 +693,7 @@ for i, patch in enumerate(output.patches):
 
 #### scanner
 
-> [R1: addressed] **V3/D2**：scanner 不允许 topology 变更（`insert_node`、`delete_node`、`move_node`），不允许 book-wide scope，且 `chapter_uid` 必须非 None（`begin` 时已强制）。
+> **V3/D2**：scanner 不允许 topology 变更（`insert_node`、`delete_node`、`move_node`），不允许 book-wide scope，且 `chapter_uid` 必须非 None（`begin` 时已强制）。
 
 ```python
 if output.kind == "scanner":
@@ -710,7 +710,7 @@ if output.kind == "scanner":
             )
 ```
 
-> [R1: addressed] **V1**：scanner 必须更新对应 chapter 的 `read_passes`。在 validate 阶段检查：
+> **V1**：scanner 必须更新对应 chapter 的 `read_passes`。在 validate 阶段检查：
 
 ```python
     if output.kind == "scanner" and output.chapter_uid is not None:
@@ -728,7 +728,7 @@ if output.kind == "scanner":
 
 #### fixer
 
-> [R1: addressed] **V3**：fixer 不允许直接提交 topology patch（`insert_node`、`delete_node`、`move_node`）；topology 变更必须通过 `PatchCommand` 提交（Phase 3 编译时验证），直接 `BookPatch` 只允许 `set_field` 和 `replace_node`。
+> **V3**：fixer 不允许直接提交 topology patch（`insert_node`、`delete_node`、`move_node`）；topology 变更必须通过 `PatchCommand` 提交（Phase 3 编译时验证），直接 `BookPatch` 只允许 `set_field` 和 `replace_node`。
 
 ```python
 if output.kind == "fixer":
@@ -752,7 +752,7 @@ if output.kind == "fixer":
 
 #### reviewer
 
-> [R1: addressed] **D4**：reviewer 权限更接近 scanner——只允许 `set_field`，不允许 `replace_node` 和所有 topology 操作。
+> **D4**：reviewer 权限更接近 scanner——只允许 `set_field`，不允许 `replace_node` 和所有 topology 操作。
 
 ```python
 if output.kind == "reviewer":
@@ -824,15 +824,15 @@ def _uid_exists(uid: str, book: Book) -> bool:
      （此时 book.json 未被修改，整体回滚保证）
 10. apply_memory_patches_sequentially(output.memory_patches, memory, agent_id, now)
     → (new_memory, all_decisions)
-    [R1: addressed] S5 — 按顺序逐个 merge，第 i+1 个 merge 的输入是第 i 个 merge 的输出
+    # S5 — 按顺序逐个 merge，第 i+1 个 merge 的输入是第 i 个 merge 的输出
     - 若 merge_edit_memory 抛出异常 → emit_json({error: "memory merge failed: ..."}) → exit 1
       （此时 book.json 也未被写入，因为步骤 11 在本步骤之后）
 11. atomic_write_model(paths.book_path, new_book)
-    [R1: addressed] S3 — 使用 atomic_write_model（state.py 中已实现，写临时文件再 os.replace）
+    # S3 — 使用 atomic_write_model（state.py 中已实现，写临时文件再 os.replace）
 12. save_memory(paths, new_memory)
     （save_memory 内部也使用 atomic_write_model）
 13. archive_agent_output(paths, output, submitted_at=now)
-    [R1: addressed] S3/D3 — 见 §6.3，使用 atomic_write_text 写临时文件再 os.replace
+    # S3/D3 — 见 §6.3，使用 atomic_write_text 写临时文件再 os.replace
 14. emit_json({
       "submitted": true,
       "output_id": output.output_id,
@@ -840,7 +840,7 @@ def _uid_exists(uid: str, book: Book) -> bool:
       "memory_patches_applied": len(output.memory_patches),
       "archive_path": str(archive_path),
       "memory_decisions": [d.model_dump(mode="json") for d in all_decisions]
-    })  # [R2: removed new_book_version/op_log_version]
+    })
 15. exit 0
 ```
 
@@ -848,7 +848,7 @@ def _uid_exists(uid: str, book: Book) -> bool:
 
 ### 6.1 apply_patches_sequentially
 
-> [R1: addressed] **S2**：Phase 1 定义 `apply_book_patch(book: Book, patch: BookPatch) -> Book`，失败时抛出 `PatchError`，没有返回 result 对象。正确的包装方式：
+> **S2**：Phase 1 定义 `apply_book_patch(book: Book, patch: BookPatch) -> Book`，失败时抛出 `PatchError`，没有返回 result 对象。正确的包装方式：
 
 ```python
 from epubforge.editor.patches import apply_book_patch, PatchError
@@ -873,7 +873,7 @@ def apply_patches_sequentially(
 
 ### 6.2 apply_memory_patches_sequentially
 
-> [R1: addressed] **S5**：`AgentOutput.memory_patches` 是 `list[MemoryPatch]`（多个）。如果一个 output 包含多个 MemoryPatch，必须连续 merge，第 i+1 次 merge 的输入 memory 是第 i 次 merge 的输出。`merge_edit_memory` 实际签名为 `(memory, patch, *, updated_at, updated_by, question_id_factory=None) -> MemoryMergeResult`，返回 `.memory` 和 `.decisions`。
+> **S5**：`AgentOutput.memory_patches` 是 `list[MemoryPatch]`（多个）。如果一个 output 包含多个 MemoryPatch，必须连续 merge，第 i+1 次 merge 的输入 memory 是第 i 次 merge 的输出。`merge_edit_memory` 实际签名为 `(memory, patch, *, updated_at, updated_by, question_id_factory=None) -> MemoryMergeResult`，返回 `.memory` 和 `.decisions`。
 
 ```python
 from epubforge.editor.memory import merge_edit_memory, MemoryMergeDecision
@@ -903,9 +903,9 @@ def apply_memory_patches_sequentially(
     return current_memory, all_decisions
 ```
 
-### 6.3 archive_agent_output [R2: removed op_log_version]
+### 6.3 archive_agent_output
 
-> [R1: addressed] **D3/S3**：归档使用写临时文件再 `os.replace` 的原子操作，而不是先写再删的非原子模式。这样即使进程在归档过程中崩溃，也只会留下一个完整文件（原文件或归档文件），不会出现两者同时存在的歧义状态。
+> **D3/S3**：归档使用写临时文件再 `os.replace` 的原子操作，而不是先写再删的非原子模式。这样即使进程在归档过程中崩溃，也只会留下一个完整文件（原文件或归档文件），不会出现两者同时存在的歧义状态。
 
 ```python
 def archive_agent_output(paths: EditorPaths, output: AgentOutput, submitted_at: str) -> Path:
@@ -1079,12 +1079,12 @@ def submit_agent_output(
 | 测试名 | 验证内容 |
 |---|---|
 | `test_begin_creates_file` | begin 成功后 agent_outputs/<id>.json 存在 |
-| `test_begin_returns_output_id_and_path` | stdout JSON 包含 output_id、path（不含 base_version）[R2: removed base_version/op_log_version] |
+| `test_begin_returns_output_id_and_path` | stdout JSON 包含 output_id、path（不含 base_version） |
 | `test_begin_invalid_kind` | --kind 非法 → exit 2 |
 | `test_begin_missing_agent` | --agent 未传 → exit 2 |
 | `test_begin_nonexistent_chapter` | --chapter 指定不存在的 UID → exit 1 |
 | `test_begin_not_initialized` | editor 未 init → exit 1 |
-| `test_begin_scanner_requires_chapter` | kind=scanner 且未指定 --chapter → exit 2 [R1: addressed] |
+| `test_begin_scanner_requires_chapter` | kind=scanner 且未指定 --chapter → exit 2 |
 
 ### 8.3 add-note 命令测试
 
@@ -1095,7 +1095,7 @@ def submit_agent_output(
 | `test_add_note_empty_text` | --text 空字符串 → exit 2 |
 | `test_add_note_updates_updated_at` | updated_at 时间戳更新 |
 | `test_add_note_nonexistent_output` | output_id 不存在 → exit 1 |
-| `test_add_note_idempotent_append` | 相同文本添加两次结果为两条记录（append 语义，不去重）[R1: addressed] T2 |
+| `test_add_note_idempotent_append` | 相同文本添加两次结果为两条记录（append 语义，不去重） |
 
 ### 8.4 add-question 命令测试
 
@@ -1106,7 +1106,7 @@ def submit_agent_output(
 | `test_add_question_invalid_context_uid` | context_uid 不存在于 book → exit 1 |
 | `test_add_question_with_options` | options 列表正确存储 |
 | `test_add_question_empty_question` | --question 空 → exit 2 |
-| `test_add_question_asked_by_is_agent_id` | 构造的 OpenQuestion.asked_by 固定为 output.agent_id，不可指定 [R1: addressed] T7 |
+| `test_add_question_asked_by_is_agent_id` | 构造的 OpenQuestion.asked_by 固定为 output.agent_id，不可指定 |
 
 ### 8.5 add-command 命令测试
 
@@ -1143,16 +1143,16 @@ def submit_agent_output(
 | `test_validate_patch_uid_missing` | patch 引用不存在的 block UID → valid: false |
 | `test_validate_scanner_topology_patch` | scanner 提交 insert_node → valid: false |
 | `test_validate_reviewer_topology_patch` | reviewer 提交 delete_node → valid: false |
-| `test_validate_reviewer_replace_node_rejected` | reviewer 提交 replace_node → valid: false [R1: addressed] D4 |
+| `test_validate_reviewer_replace_node_rejected` | reviewer 提交 replace_node → valid: false |
 | `test_validate_supervisor_any_patch` | supervisor 提交 topology patch → valid: true |
 | `test_validate_memory_patch_unknown_chapter` | memory_patch chapter_status uid 不存在 → valid: false |
-| `test_validate_memory_patch_evidence_uid_missing` | memory_patch convention.evidence_uids 含不存在 UID → valid: false [R1: addressed] S4 |
-| `test_validate_memory_patch_affected_uid_missing` | memory_patch pattern.affected_uids 含不存在 UID → valid: false [R1: addressed] S4 |
+| `test_validate_memory_patch_evidence_uid_missing` | memory_patch convention.evidence_uids 含不存在 UID → valid: false |
+| `test_validate_memory_patch_affected_uid_missing` | memory_patch pattern.affected_uids 含不存在 UID → valid: false |
 | `test_validate_multiple_errors` | 多处问题时 errors 列表完整收集，不 fail-fast |
-| `test_validate_scanner_no_read_pass_update` | scanner output 无 read_passes 更新 → valid: false [R1: addressed] V1 |
-| `test_validate_scanner_with_read_pass_update` | scanner output 有 read_passes > 0 的 chapter_status → valid: true [R1: addressed] V1 |
-| `test_validate_fixer_direct_topology_patch_rejected` | fixer 直接提交 insert_node BookPatch → valid: false [R1: addressed] V3 |
-| `test_validate_scope_chapter_none_is_book_wide` | PatchScope(chapter_uid=None) 被视为 book-wide，scanner 提交时报错 [R2: simplified] |
+| `test_validate_scanner_no_read_pass_update` | scanner output 无 read_passes 更新 → valid: false |
+| `test_validate_scanner_with_read_pass_update` | scanner output 有 read_passes > 0 的 chapter_status → valid: true |
+| `test_validate_fixer_direct_topology_patch_rejected` | fixer 直接提交 insert_node BookPatch → valid: false |
+| `test_validate_scope_chapter_none_is_book_wide` | PatchScope(chapter_uid=None) 被视为 book-wide，scanner 提交时报错 |
 
 ### 8.9 submit --apply 测试
 
@@ -1165,19 +1165,19 @@ def submit_agent_output(
 | `test_submit_apply_validation_fail_no_side_effects` | validate 失败时 book.json、memory.json 均不变 |
 | `test_submit_apply_archives_output` | 成功后 agent_outputs/<id>.json 被移至 archives/ |
 | `test_submit_apply_patch_fail_rollback` | 第二个 patch apply 失败 → book.json 保持原状 |
-| `test_submit_apply_multiple_memory_patches` | 两个 MemoryPatch 的连续 merge：第二次 merge 的输入是第一次 merge 的输出 [R1: addressed] S5 |
-| `test_submit_apply_second_submit_fails` | output 已归档后再次 submit → exit 1，"output not found" [R1: addressed] T8 |
-| `test_submit_stage_placeholder` | --stage 模式返回占位响应，不修改任何文件 [R1: addressed] V2 |
+| `test_submit_apply_multiple_memory_patches` | 两个 MemoryPatch 的连续 merge：第二次 merge 的输入是第一次 merge 的输出 |
+| `test_submit_apply_second_submit_fails` | output 已归档后再次 submit → exit 1，"output not found" |
+| `test_submit_stage_placeholder` | --stage 模式返回占位响应，不修改任何文件 |
 
 ### 8.10 并发与边界测试
 
-> [R1: addressed, R2: removed base_version/op_log_version] **T1/D7**：Phase 2 明确只支持串行工作模式。并发隔离由 Phase 7 Git worktree 负责；`test_concurrent_submit_base_version_conflict` 已移除（基于 base_version 的拒绝逻辑已删除）。字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获。
+> **T1/D7**：Phase 2 明确只支持串行工作模式。并发隔离由 Phase 7 Git worktree 负责；`test_concurrent_submit_base_version_conflict` 已移除（基于 base_version 的拒绝逻辑已删除）。字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获。
 
 | 测试名 | 验证内容 |
 |---|---|
-| `test_add_note_duplicate_appended_not_deduplicated` | 相同 note 添加两次，结果为两条记录（append 语义明确）[R1: addressed] T2 |
-| `test_load_output_corrupted_json` | output JSON 被手动损坏 → CommandError with clear message [R1: addressed] T6 |
-| `test_archive_target_already_exists` | 归档目标文件已存在 → 使用 atomic_write_text 覆盖（可接受），不报错 [R1: addressed] T5 |
+| `test_add_note_duplicate_appended_not_deduplicated` | 相同 note 添加两次，结果为两条记录（append 语义明确） |
+| `test_load_output_corrupted_json` | output JSON 被手动损坏 → CommandError with clear message |
+| `test_archive_target_already_exists` | 归档目标文件已存在 → 使用 atomic_write_text 覆盖（可接受），不报错 |
 
 ### 8.11 测试 fixtures 规范
 
@@ -1210,7 +1210,7 @@ def minimal_book_json():
 
 ### 8.12 补充说明（evaluate 测试覆盖率）
 
-> [R1: addressed] **T3**：Phase 2 添加一个 smoke test 验证大型 output 不会导致超时：
+> **T3**：Phase 2 添加一个 smoke test 验证大型 output 不会导致超时：
 > `test_validate_large_output_smoke`：构造包含 50 个 patches 和 50 个 memory_patches 的 output，
 > `validate_agent_output` 必须在 2 秒内完成（`_uid_exists` 是 O(n) 线性扫描，
 > 50 patches × 50 changes × O(chapters × blocks) 的 UID 查找可能在大型 book 上变慢，
@@ -1246,7 +1246,7 @@ Phase 2 刻意留下以下"桩"，等待后续 Phase 填充：
 | book/memory 写入事务一致性 | book 写入后进程崩溃可导致 memory 不一致（已知限制） | Phase 7：Git commit 作为事务边界解决 |
 | `_uid_exists` 性能 | O(chapters × blocks) 线性扫描，大型 book 可能成为瓶颈 | 优化为预建 `set[str]` 查找表（可在 Phase 2 实现时顺手做） |
 
-> [R1: addressed, R2: removed base_version/op_log_version] **D7**：Phase 2 明确只支持单 agent 串行工作模式。多 agent 并发隔离由 Phase 7 Git worktree 负责；字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获，不依赖全局版本号。
+> **D7**：Phase 2 明确只支持单 agent 串行工作模式。多 agent 并发隔离由 Phase 7 Git worktree 负责；字段级冲突由 BookPatch changes 中的 `old` 前置条件捕获，不依赖全局版本号。
 
 ---
 
