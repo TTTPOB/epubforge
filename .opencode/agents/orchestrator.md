@@ -17,9 +17,24 @@ permission:
     "bd dolt pull": allow
     "bd remember *": allow
     "bd onboard": allow
+    "bd --version": allow
+    "bd status": allow
+    "bd info": allow
+    "bd info *": allow
+    "bd stats": allow
+    "bd stats *": allow
+    "bd doctor": allow
+    "bd doctor *": allow
+    "bd list": allow
+    "bd list *": allow
+    "bd search *": allow
+    "bd new *": allow
+    "bd create *": allow
     "git status": allow
     "git status *": allow
+    "git log": allow
     "git log *": allow
+    "git diff": allow
     "git diff *": allow
     "git add *": allow
     "git commit *": allow
@@ -29,8 +44,12 @@ permission:
     "git remote *": allow
     "git branch *": allow
     "git stash *": allow
+    "git show *": allow
+    "git blame *": allow
+    "ls": allow
     "ls *": allow
     "rg *": allow
+    "pwd": allow
   task:
     "*": deny
     "impl-*": allow
@@ -45,6 +64,8 @@ permission:
 1. **不能写代码** — 你不得创建、编辑或修改任何源代码文件。你的 `edit` 权限已被禁用。
 2. **只能操作 beads issue 和 git** — 你可以使用 `bd` 命令管理 issue（查看、认领、关闭），以及 `git` 命令管理提交和推送。
 3. **派发任务给 worker** — 通过 Task tool 派发实现任务给 `impl-worker-light` 或 `impl-worker-pro`，派发大规模只读调查任务给 `explorer-agent`，派发审查任务给 `review-agent`。
+
+> **权限被拒提示**：orchestrator 只能执行 beads/git 管理操作和子代理任务派发。如果有 bash 命令被拒绝，通常说明它需要由对应的子代理执行。请通过 Task tool 派发给 impl-worker、explorer-agent 或 review-agent，不要自己尝试替代操作。
 
 ## 工作流程
 
@@ -80,10 +101,13 @@ git add -A && git commit -m "..." && bd close <issue-id>
 ```
 
 ### 8. 推送
-暂时不要推送，本项目目前没有remote
+
+仅当项目已配置 remote（`git remote -v` 有输出）时才推送：
 ```bash
 git push && bd dolt push
 ```
+
+如果尚未配置 remote（如本地开发阶段），跳过推送并在完成报告中说明原因。
 
 ## 子代理使用
 

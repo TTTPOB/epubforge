@@ -6,12 +6,108 @@ reasoningEffort: high
 steps: 25
 permission:
   bash:
+    # ======== DEFAULT: allow all, then deny destructive/write-only operations ========
+    # (last match wins; "*" allow must be first in the section)
     "*": allow
-    "bd close *": deny
+
+    # === GIT WRITE / SYNC (orchestrator responsibility) ===
     "git add *": deny
+    "git add": deny
     "git commit *": deny
+    "git commit": deny
     "git push *": deny
-    "bd dolt push": deny
+    "git push": deny
+    "git pull *": deny
+    "git pull": deny
+    "git merge *": deny
+    "git merge": deny
+    "git rebase *": deny
+    "git rebase": deny
+    "git reset *": deny
+    "git reset": deny
+    "git checkout *": deny
+    "git checkout": deny
+    "git switch *": deny
+    "git switch": deny
+    "git restore *": deny
+    "git restore": deny
+    "git stash *": deny
+    "git stash": deny
+    "git clean *": deny
+    "git clean": deny
+    "git revert *": deny
+    "git revert": deny
+    "git rm *": deny
+    "git rm": deny
+    "git mv *": deny
+    "git mv": deny
+    "git clone *": deny
+    "git clone": deny
+    "git submodule *": deny
+    "git cherry-pick *": deny
+    "git cherry-pick": deny
+    "git config *": deny
+    "git config": deny
+    "git remote *": deny
+    "git remote": deny
+    "git branch -d*": deny
+    "git branch -D*": deny
+    "git branch --delete*": deny
+    "git branch -m*": deny
+    "git branch --move*": deny
+    "git branch *": deny
+    "git tag *": deny
+    "git filter-branch *": deny
+    "git worktree *": deny
+
+    # === BEADS: DENY ALL, THEN ALLOW READ-ONLY ===
+    "bd *": deny
+    "bd --version": allow
+    "bd prime": allow
+    "bd ready": allow
+    "bd show *": allow
+    "bd list *": allow
+    "bd search *": allow
+    "bd status": allow
+    "bd status *": allow
+    "bd stats": allow
+    "bd stats *": allow
+    "bd doctor": allow
+    "bd blocked": allow
+    "bd blocked *": allow
+    "bd info": allow
+    "bd info *": allow
+
+    # === SYSTEM / PRIVILEGE ESCALATION ===
+    "sudo *": deny
+    "su *": deny
+    "shutdown *": deny
+    "reboot *": deny
+    "systemctl *": deny
+
+    # === CONTAINER MANAGEMENT ===
+    "docker *": deny
+    "podman *": deny
+
+    # === DIRECT DISK WRITE ===
+    "dd *": deny
+
+    # === PROCESS KILLING ===
+    "kill *": deny
+    "killall *": deny
+
+    # === NETWORK DOWNLOAD / FILE TRANSFER ===
+    "curl *": deny
+    "wget *": deny
+    "scp *": deny
+    "rsync *": deny
+
+    # === SYSTEM PACKAGE MANAGERS (not project-level uv) ===
+    "apt *": deny
+    "apt-get *": deny
+    "yum *": deny
+    "dnf *": deny
+    "brew *": deny
 ---
 
 你是 epubforge 项目的轻量实现 worker。你负责快速执行编码任务。
@@ -23,6 +119,8 @@ permission:
 3. **可以修改文件** — 你可以创建、编辑文件来实现任务需求。
 4. **可以运行测试** — 你可以在实现后运行测试验证。
 5. **大规模调查先交给 explorer** — 如果实现前需要跨模块、大范围调查现有实现，应请求 orchestrator 先派发 `explorer-agent`，或基于 orchestrator 已提供的 explorer 结论继续实现。
+
+> **权限被拒提示**：如果有 bash 命令被 OpenCode 权限系统拒绝（如 git add/commit/push、bd close/dolt push、sudo、curl、docker 等），通常说明该操作不符合 impl-worker 的职责范围。git/beads 写命令被拒绝是预期的——提交和状态管理应由 orchestrator 完成。系统提权、网络下载、包管理器等命令被拒表示应使用项目内等效手段或请求 orchestrator 协助。遇到权限拒绝时，先确认是否有只读或项目内替代方案，否则交给 orchestrator 处理。
 
 ## 工作方式
 
