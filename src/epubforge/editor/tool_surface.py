@@ -686,9 +686,422 @@ def run_render_prompt(
     return 0
 
 
+def run_agent_output_begin(
+    work: Path,
+    kind: str,
+    agent: str,
+    chapter: str | None,
+    cfg: Config,
+) -> int:
+    import typing
+    from uuid import uuid4
+
+    from epubforge.editor.agent_output import AgentKind, AgentOutput, save_agent_output
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    # Validate kind
+    valid_kinds = list(typing.get_args(AgentKind))
+    if kind not in valid_kinds:
+        raise CommandError(
+            f"--kind must be one of: {', '.join(valid_kinds)}",
+            exit_code=2,
+            payload={"error": f"--kind must be one of: {', '.join(valid_kinds)}"},
+        )
+
+    # Validate agent non-empty
+    if not agent or not agent.strip():
+        raise CommandError(
+            "--agent must not be empty",
+            exit_code=2,
+            payload={"error": "--agent must not be empty"},
+        )
+
+    # scanner must specify --chapter
+    if kind == "scanner" and chapter is None:
+        raise CommandError(
+            "scanner must specify --chapter",
+            exit_code=2,
+            payload={"error": "scanner must specify --chapter"},
+        )
+
+    # If chapter specified, verify it exists
+    if chapter is not None:
+        book = load_editable_book(paths)
+        chapter_uid_set = {ch.uid for ch in book.chapters}
+        if chapter not in chapter_uid_set:
+            raise CommandError(
+                f"chapter not found: {chapter}",
+                exit_code=1,
+                payload={"error": f"chapter not found: {chapter}"},
+            )
+
+    output_id = str(uuid4())
+    now = _timestamp()
+    output = AgentOutput(
+        output_id=output_id,
+        kind=kind,  # type: ignore[arg-type]
+        agent_id=agent.strip(),
+        chapter_uid=chapter,
+        created_at=now,
+        updated_at=now,
+    )
+    paths.agent_outputs_dir.mkdir(parents=True, exist_ok=True)
+    save_agent_output(paths, output)
+    path = paths.agent_outputs_dir / f"{output_id}.json"
+    emit_json({"output_id": output_id, "path": str(path)})
+    return 0
+
+
+def run_agent_output_add_note(
+    work: Path,
+    output_id: str,
+    text: str,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import load_agent_output, save_agent_output
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    if not text or not text.strip():
+        raise CommandError(
+            "--text must not be empty",
+            exit_code=2,
+            payload={"error": "--text must not be empty"},
+        )
+
+    output = load_agent_output(paths, output_id)
+    output.notes.append(text.strip())
+    output.updated_at = _timestamp()
+    save_agent_output(paths, output)
+    emit_json({"output_id": output_id, "notes_count": len(output.notes)})
+    return 0
+
+
+def run_agent_output_add_question(
+    work: Path,
+    output_id: str,
+    question: str,
+    context_uids: list[str],
+    options: list[str],
+    cfg: Config,
+) -> int:
+    from uuid import uuid4
+
+    from epubforge.editor.agent_output import load_agent_output, save_agent_output
+    from epubforge.editor.memory import OpenQuestion
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    if not question or not question.strip():
+        raise CommandError(
+            "--question must not be empty",
+            exit_code=2,
+            payload={"error": "--question must not be empty"},
+        )
+
+    output = load_agent_output(paths, output_id)
+
+    # Validate context_uids exist in book
+    if context_uids:
+        book = load_editable_book(paths)
+        for uid in context_uids:
+            found = False
+            for chapter in book.chapters:
+                if chapter.uid == uid:
+                    found = True
+                    break
+                for block in chapter.blocks:
+                    if block.uid == uid:
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                raise CommandError(
+                    f"uid not found: {uid}",
+                    exit_code=1,
+                    payload={"error": f"uid not found: {uid}"},
+                )
+
+    q_id = str(uuid4())
+    question_obj = OpenQuestion(
+        q_id=q_id,
+        question=question.strip(),
+        context_uids=context_uids or [],
+        options=options or [],
+        asked_by=output.agent_id,
+    )
+    output.open_questions.append(question_obj)
+    output.updated_at = _timestamp()
+    save_agent_output(paths, output)
+    emit_json({
+        "output_id": output_id,
+        "q_id": q_id,
+        "questions_count": len(output.open_questions),
+    })
+    return 0
+
+
+def run_agent_output_add_command(
+    work: Path,
+    output_id: str,
+    command_file: Path,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import load_agent_output, save_agent_output
+    from epubforge.editor.patch_commands import PatchCommand
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    if not command_file.exists():
+        raise CommandError(
+            f"command file not found: {command_file}",
+            exit_code=2,
+            payload={"error": f"command file not found: {command_file}"},
+        )
+
+    try:
+        parsed = json.loads(command_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CommandError(
+            f"invalid JSON: {exc.msg}",
+            exit_code=1,
+            payload={"error": f"invalid JSON: {exc.msg}"},
+        ) from exc
+
+    try:
+        command = PatchCommand.model_validate(parsed)
+    except Exception as exc:
+        raise CommandError(
+            f"PatchCommand validation failed: {exc}",
+            exit_code=1,
+            payload={"error": f"PatchCommand validation failed: {exc}"},
+        ) from exc
+
+    output = load_agent_output(paths, output_id)
+
+    # Phase 2: warn (not error) if agent_id mismatch
+    if command.agent_id != output.agent_id:
+        import sys as _sys
+        _sys.stderr.write(
+            f"warning: command.agent_id {command.agent_id!r} != output.agent_id {output.agent_id!r}\n"
+        )
+
+    output.commands.append(command)
+    output.updated_at = _timestamp()
+    save_agent_output(paths, output)
+    emit_json({
+        "output_id": output_id,
+        "command_id": command.command_id,
+        "commands_count": len(output.commands),
+    })
+    return 0
+
+
+def run_agent_output_add_patch(
+    work: Path,
+    output_id: str,
+    patch_file: Path,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import load_agent_output, save_agent_output
+    from epubforge.editor.patches import BookPatch
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    if not patch_file.exists():
+        raise CommandError(
+            f"patch file not found: {patch_file}",
+            exit_code=2,
+            payload={"error": f"patch file not found: {patch_file}"},
+        )
+
+    try:
+        parsed = json.loads(patch_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CommandError(
+            f"invalid JSON: {exc.msg}",
+            exit_code=1,
+            payload={"error": f"invalid JSON: {exc.msg}"},
+        ) from exc
+
+    try:
+        patch = BookPatch.model_validate(parsed)
+    except Exception as exc:
+        raise CommandError(
+            f"BookPatch validation failed: {exc}",
+            exit_code=1,
+            payload={"error": f"BookPatch validation failed: {exc}"},
+        ) from exc
+
+    output = load_agent_output(paths, output_id)
+
+    # Check scope consistency
+    if output.chapter_uid is not None and patch.scope.chapter_uid != output.chapter_uid:
+        raise CommandError(
+            f"patch scope mismatch: output.chapter_uid={output.chapter_uid!r}, "
+            f"patch.scope.chapter_uid={patch.scope.chapter_uid!r}",
+            exit_code=1,
+            payload={
+                "error": f"patch scope mismatch: output.chapter_uid={output.chapter_uid!r}, "
+                         f"patch.scope.chapter_uid={patch.scope.chapter_uid!r}"
+            },
+        )
+
+    output.patches.append(patch)
+    output.updated_at = _timestamp()
+    save_agent_output(paths, output)
+    emit_json({
+        "output_id": output_id,
+        "patch_id": patch.patch_id,
+        "patches_count": len(output.patches),
+    })
+    return 0
+
+
+def run_agent_output_add_memory_patch(
+    work: Path,
+    output_id: str,
+    patch_file: Path,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import load_agent_output, save_agent_output
+    from epubforge.editor.memory import MemoryPatch
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    if not patch_file.exists():
+        raise CommandError(
+            f"patch file not found: {patch_file}",
+            exit_code=2,
+            payload={"error": f"patch file not found: {patch_file}"},
+        )
+
+    try:
+        parsed = json.loads(patch_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CommandError(
+            f"invalid JSON: {exc.msg}",
+            exit_code=1,
+            payload={"error": f"invalid JSON: {exc.msg}"},
+        ) from exc
+
+    try:
+        mp = MemoryPatch.model_validate(parsed)
+    except Exception as exc:
+        raise CommandError(
+            f"MemoryPatch validation failed: {exc}",
+            exit_code=1,
+            payload={"error": f"MemoryPatch validation failed: {exc}"},
+        ) from exc
+
+    output = load_agent_output(paths, output_id)
+    output.memory_patches.append(mp)
+    output.updated_at = _timestamp()
+    save_agent_output(paths, output)
+    emit_json({
+        "output_id": output_id,
+        "memory_patches_count": len(output.memory_patches),
+    })
+    return 0
+
+
+def run_agent_output_validate(
+    work: Path,
+    output_id: str,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import load_agent_output, validate_agent_output
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    output = load_agent_output(paths, output_id)
+    book = load_editable_book(paths)
+    errors = validate_agent_output(output, book)
+    emit_json({"valid": not errors, "output_id": output_id, "errors": errors})
+    return 0 if not errors else 1
+
+
+def run_agent_output_submit(
+    work: Path,
+    output_id: str,
+    apply: bool,
+    stage: bool,
+    cfg: Config,
+) -> int:
+    from epubforge.editor.agent_output import (
+        load_agent_output,
+        submit_agent_output,
+        validate_agent_output,
+    )
+
+    # Stage mode: Phase 2 placeholder
+    if stage:
+        emit_json({
+            "staged": False,
+            "message": "stage mode not yet implemented, will be added in Phase 4",
+        })
+        return 0
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    output = load_agent_output(paths, output_id)
+    book = load_editable_book(paths)
+
+    # Dry-run mode (no --apply flag)
+    if not apply:
+        errors = validate_agent_output(output, book)
+        emit_json({"valid": not errors, "output_id": output_id, "errors": errors})
+        return 0 if not errors else 1
+
+    # Apply mode
+    memory = load_editor_memory(paths)
+    now = _timestamp()
+    result = submit_agent_output(output, book, memory, paths, now=now)
+
+    if not result.submitted:
+        emit_json({"submitted": False, "output_id": output_id, "errors": result.errors})
+        return 1
+
+    emit_json({
+        "submitted": True,
+        "output_id": result.output_id,
+        "patches_applied": result.patches_applied,
+        "memory_patches_applied": result.memory_patches_applied,
+        "archive_path": result.archive_path,
+        "memory_decisions": result.memory_decisions,
+    })
+    return 0
+
+
 __all__ = [
     "run_acquire_book_lock",
     "run_acquire_lease",
+    "run_agent_output_add_command",
+    "run_agent_output_add_memory_patch",
+    "run_agent_output_add_note",
+    "run_agent_output_add_patch",
+    "run_agent_output_add_question",
+    "run_agent_output_begin",
+    "run_agent_output_submit",
+    "run_agent_output_validate",
     "run_apply_queue",
     "run_compact",
     "run_doctor",

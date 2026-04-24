@@ -279,3 +279,8 @@ def _render_prompt_cmd(
     app_ctx = ctx.find_root().obj
     cfg = app_ctx.config
     raise typer.Exit(_run(run_render_prompt, work=work, kind=kind, chapter=chapter, issues=issues, cfg=cfg))  # type: ignore[arg-type]
+
+
+from epubforge.editor.agent_output_cli import agent_output_app  # noqa: E402
+
+editor_app.add_typer(agent_output_app, name="agent-output")

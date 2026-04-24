@@ -42,6 +42,8 @@ DOCTOR_REPORT_FILENAME = "doctor_report.json"
 DOCTOR_CONTEXT_FILENAME = "doctor_context.json"
 SCRATCH_DIRNAME = "scratch"
 SNAPSHOTS_DIRNAME = "snapshots"
+AGENT_OUTPUTS_DIRNAME = "agent_outputs"
+AGENT_OUTPUTS_ARCHIVES_DIRNAME = "archives"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,8 @@ class EditorPaths:
     scratch_dir: Path
     snapshots_dir: Path
     current_log_path: Path
+    agent_outputs_dir: Path
+    agent_outputs_archives_dir: Path
 
 
 def resolve_editor_paths(path: str | Path) -> EditorPaths:
@@ -84,6 +88,8 @@ def resolve_editor_paths(path: str | Path) -> EditorPaths:
         scratch_dir=edit_state_dir / SCRATCH_DIRNAME,
         snapshots_dir=edit_state_dir / SNAPSHOTS_DIRNAME,
         current_log_path=edit_state_dir / CURRENT_LOG,
+        agent_outputs_dir=edit_state_dir / AGENT_OUTPUTS_DIRNAME,
+        agent_outputs_archives_dir=edit_state_dir / AGENT_OUTPUTS_DIRNAME / AGENT_OUTPUTS_ARCHIVES_DIRNAME,
     )
 
 
