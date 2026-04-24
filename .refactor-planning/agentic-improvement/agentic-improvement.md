@@ -347,37 +347,32 @@ apply patch
 
 这意味着 `BookPatch` 是低层表达能力，不是绕过规则的逃生口。
 
-### 8. Use snapshot diff to generate BookPatch when possible
+### 8. Use Book diff for integration merge validation
 
-长期可以减少 agent 手写 patch 的需求。更好的模式是：
+当多个 agent 在不同 worktree 工作后，integration 阶段需要验证合并结果的语义正确性：
 
 ```text
-base chapter/book projection
-        ↓ agent edits proposed projection
-system computes diff(base, proposed)
+base Book IR (integration branch 上的版本)
+merged Book IR (Git merge 后的版本)
         ↓
-UID-aware BookPatch
+diff_books(base, merged) → BookPatch
         ↓
-validate / rebase / apply
+semantic validation
 ```
 
 三方关系：
 
 ```text
-base: agent 开始工作时看到的版本
-current: 当前主版本
-proposed: agent 修改后的版本
+base: agent 开始工作时的版本
+current: integration branch 当前版本
+merged: Git merge 后的版本
 ```
 
-提交时可以做乐观并发：
+乐观并发：
 
-- agent 改了 block A，current 没改 block A：可自动 rebase/apply。
-- agent 和 current 都改了 block A.text：产生 conflict，交 reviewer/supervisor。
-
-这样可以减少长时间锁的压力。
-
-- Direct-edit mode: 仍可保留 lease，作为 scanner/fixer 的显式工作边界和高风险拓扑操作保护。
-- Git workspace mode: branch/worktree 已经提供 agent 工作隔离，可以取消长时间 chapter lease，只保留最终 integration 的短事务。
+- agent 改了 block A，current 没改 block A：Git 自动 merge，semantic validation 通过即可。
+- agent 和 current 都改了 block A.text：Git conflict，交 reviewer/supervisor。
+- Git merge 成功但 semantic validation 失败：reject，需要人工/agent 介入。
 
 ### 9. Add Book diff as the bridge from edited state to BookPatch
 
@@ -596,15 +591,28 @@ This is the first paragraph...
 1. Footnote text...
 ```
 
+Projection 是 Book IR 当前状态的**只读渲染**，不是可编辑的中间格式。Agent 不直接修改 projection 文件；所有编辑通过 CLI 命令（`agent-output add-command/add-patch`）提交。
+
+用途：
+- 作为 agent prompt 的阅读上下文，替代让 agent 在巨大 JSON 里定位 block。
+- `projection export` 读取当前 `book.json`，因此 agent 在同一 worktree 内提交 patch 后，再次 export 会反映已应用的修改。
+
 要求：
 
 - 每个 block 明确显示 UID / display handle。
 - provenance/page/role/kind 等关键元数据就近显示。
-- projection 可以 parse 回结构化 form。
-- snapshot diff 可以从 projection 变化生成 `BookPatch`。
+- 不需要 parse 回结构化 form（只读，不做 round-trip）。
 - agent prompt 优先引用 projection，而不是要求 agent 在巨大 JSON 里定位 block。
 
-这会让 agent 更像在审读书稿，同时仍保留机器可验证的 UID-based patch。
+典型 agent 工作循环：
+
+```text
+projection export (读当前 Book IR 状态)
+    ↓ agent 阅读 projection，推理
+CLI 命令提交 patch → book.json 更新
+    ↓
+projection export (读更新后状态，继续下一轮)
+```
 
 ### 14. Concurrency model: Git workspaces (DECIDED)
 
@@ -691,47 +699,61 @@ class DoctorTask(BaseModel):
 
 ### Scanner/Fixer workflow (Git workspace mode)
 
-Agent 在自己的 branch/worktree 里工作，不使用 lease：
+Agent 在自己的 branch/worktree 里工作，通过 CLI 命令提交修改：
 
 ```bash
+# supervisor 创建 worktree
 git worktree add ../epubforge-scan-ch-1 -b agent/scanner-1/ch-1
 cd ../epubforge-scan-ch-1
 
+# agent 读取当前状态（只读 projection）
 epubforge editor projection export work/book \
+  --chapter ch-1
+
+# agent 推理后通过 CLI 命令提交修改
+epubforge editor agent-output begin work/book \
+  --kind scanner \
   --chapter ch-1 \
-  --out edit_state/projections/chapters/ch-1.md
+  --agent scanner-1
 
-# scanner/fixer edits projection files in this worktree
+epubforge editor agent-output add-command work/book <output-id> \
+  --command-file scratch/command.json
 
-git add edit_state/projections/chapters/ch-1.md
+epubforge editor agent-output add-note work/book <output-id> \
+  --text "第 12 页脚注密度异常"
+
+epubforge editor agent-output submit work/book <output-id> --apply
+
+# agent 可以再次 export 查看修改后的状态，继续下一轮
+epubforge editor projection export work/book \
+  --chapter ch-1
+
+# 完成后提交到 Git
+git add edit_state/
 git commit -m "scanner-1 scan chapter ch-1"
 ```
 
 Supervisor/integration side：
 
 ```bash
+# Git merge agent 的工作分支
 git merge agent/scanner-1/ch-1
 
-epubforge editor projection diff work/book \
-  --chapter ch-1 \
-  --base-version 12 \
-  --proposed edit_state/projections/chapters/ch-1.md \
-  --out edit_state/scratch/patches/scanner-1-ch-1.patch.json
+# 验证合并后的 Book IR 语义正确性
+epubforge editor diff-books work/book \
+  --base-ref main \
+  --proposed-ref HEAD
 
-epubforge editor patch validate work/book \
-  edit_state/scratch/patches/scanner-1-ch-1.patch.json
-
-epubforge editor patch apply work/book \
-  edit_state/scratch/patches/scanner-1-ch-1.patch.json
+# 如果有语义冲突，交 reviewer/supervisor 处理
 ```
 
 这个模式下：
 
 - agent 的读写隔离由 Git branch/worktree 提供。
-- 不使用长期 chapter lease。
+- agent 通过 CLI 命令修改 Book IR，不直接编辑 projection 文件。
+- projection export 是只读的，用于给 agent 提供可读上下文。
 - Git merge 成功只说明文本层没有冲突。
-- BookPatch validation 成功才说明 Book IR 语义可接受。
-- patch apply 只需要短事务，不需要 agent 工作期间持锁。
+- `diff-books` + semantic validation 确认 Book IR 语义可接受。
 
 ### VLM evidence
 
@@ -749,36 +771,6 @@ Expected behavior:
 - call VLM with structured output。
 - write `VLMObservation` evidence file。
 - return `observation_id` for scanner/fixer to reference。
-
-### Projection diff to BookPatch
-
-```bash
-epubforge editor projection export work/book \
-  --chapter ch-1 \
-  --out edit_state/projections/chapters/ch-1.md
-
-# agent edits the projection through normal file editing
-
-epubforge editor projection diff work/book \
-  --chapter ch-1 \
-  --base-version 12 \
-  --proposed edit_state/projections/chapters/ch-1.md \
-  --out edit_state/scratch/patches/scanner-1-ch-1.patch.json
-
-epubforge editor patch validate work/book \
-  edit_state/scratch/patches/scanner-1-ch-1.patch.json
-
-epubforge editor patch apply work/book \
-  edit_state/scratch/patches/scanner-1-ch-1.patch.json
-```
-
-Expected behavior:
-
-- projection parser reconstructs the proposed chapter structure。
-- diff engine compares base/proposed by UID。
-- diff engine emits UID-addressed `BookPatch`。
-- validator checks semantic invariants and lease/scope。
-- apply path uses the same transaction/log mechanism as high-level commands。
 
 ## Resolved Decisions
 
@@ -821,7 +813,7 @@ Expected behavior:
 - Should topology patches be restricted to supervisor outputs?
 - Should memory changes be top-level `memory_patches` on `AgentOutput`, or encoded as BookPatch-adjacent records?
 - Should canonical `uid` and agent-facing `display_handle` be separate fields, or should UID itself be human-readable with a nonce suffix?
-- What exact projection format should be canonical: Markdown-ish, JSONL, or both?
+- ~~What exact projection format should be canonical~~ (RESOLVED: projection 是只读渲染，格式选择不影响系统正确性，按需调整即可)
 - Which high-level commands remain first-class macros after `BookPatch` exists?
 - Should Git commits store projections only, or also materialized `book.json` snapshots?
 - What is the first acceptable conflict model: reject on same-field conflicts, or attempt semantic merge for selected fields?
@@ -829,15 +821,7 @@ Expected behavior:
 
 ## Review Notes
 
-### R1. Projection round-trip 需要在实现前给出 formal spec
-
-以下问题需要在 Phase 4 实现前明确回答：
-
-- Markdown-ish 格式的 escaping：block text 里出现 `[[block` 标记怎么办？
-- 元数据行被 agent 误改怎么办？是 parse error 还是静默忽略？
-- 增量 parse 还是全量 parse？
-- UID 在 projection 和 Book IR 之间的双向映射规则。
-- 需要用 3-5 个真实 chapter 做 round-trip 验证后再定稿格式。
+### ~~R1. Projection round-trip spec~~ (RESOLVED: projection 改为只读，不需要 parser 或 round-trip)
 
 ### R2. Orphaned agent-output 需要 GC 机制
 
@@ -883,12 +867,12 @@ Expected behavior:
 - Update `tool_surface.py`: remove old commands, wire new ones.
 - Update `app.py` CLI registration.
 
-### Phase 5: Agent-friendly projections
+### Phase 5: Projection export (read-only)
 
-- Add projection export: chapter-scoped Markdown-ish view with UID/display handles, kind, page, role, text.
-- Add projection parser (parse back to structured form).
-- **前提**：先写 formal spec 解决 R1 中列出的问题。
-- Tests: 用真实 chapter 数据做 export → parse → export round-trip.
+- Add `projection export` CLI command: chapter-scoped Markdown-ish view with UID/display handles, kind, page, role, text.
+- 只读输出，不需要 parser 或 round-trip。
+- 读取当前 `book.json`，因此 agent 提交 patch 后再次 export 会反映修改。
+- Tests: export 输出包含所有 block UID 和关键元数据。
 
 ### Phase 6: Book diff engine
 
@@ -897,22 +881,16 @@ Expected behavior:
 - Round-trip invariant: `apply_book_patch(base, diff_books(base, proposed)) == proposed`.
 - Changes 按 node 空间邻近性排序（见 D3）。
 - 不做 rename inference；UID 变化按 delete + insert 处理。
+- 主要用于 integration merge 验证（见 §8），不用于 agent 提交路径。
 - Tests: field edits, insert/delete/move block, replace block kind, chapter order, duplicate UID rejection.
 
-### Phase 7: Projection diff → BookPatch
-
-- Parse edited projection → proposed Book/Chapter.
-- Compare with base via `diff_books`.
-- Emit `BookPatch`, validate semantically, apply.
-- Tests: edit projection text → verify generated patch correctness.
-
-### Phase 8: Git-backed workspace workflow
+### Phase 7: Git-backed workspace workflow
 
 - Support branch/worktree for agent private workspaces.
-- `projection export` → agent edits in worktree → `projection diff` → `patch validate` → `patch apply`.
-- After Git merge/rebase, parse merged projection → `diff_books` → semantic validation.
+- Agent 通过 CLI 命令修改 Book IR，projection export 作为只读上下文。
+- Integration 阶段：Git merge → `diff_books` → semantic validation。
 - No lease system; only short integration transaction.
-- Orphaned worktree cleanup (见 R2).
+- Orphaned worktree cleanup（丢弃未 merge 的 worktree 即可）。
 
 ### Phase 9: VLM as editor evidence tool
 
