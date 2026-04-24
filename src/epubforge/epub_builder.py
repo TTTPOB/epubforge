@@ -9,13 +9,13 @@ import re
 import tempfile
 import uuid
 import zipfile
-from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote as _url_quote
 
 from ebooklib import epub
 
 from epubforge.io import EDITABLE_BOOK_PATH
+from epubforge.stage3_artifacts import Stage3ContractError, load_active_stage3_manifest
 
 _FN_MARKER_RE = re.compile(r"\x02(fn-\d+-[^\x03]*)\x03")
 _OPF_MODIFIED_RE = re.compile(r"(<meta property=\"dcterms:modified\">)([^<]+)(</meta>)")
@@ -91,13 +91,40 @@ def _load_registry(registry_path: Path) -> StyleRegistry | None:
 
 
 def resolve_build_source(work_dir: Path) -> Path:
-    editable = work_dir / EDITABLE_BOOK_PATH
-    if editable.exists():
-        return editable
+    """Resolve the semantic source file for EPUB build.
 
+    Priority order:
+    1. edit_state/book.json  (editable, curated)
+    2. 05_semantic.json      (post-editor semantic)
+    3. 05_semantic_raw.json  (raw assembler output)
+    """
+    candidates = [
+        work_dir / EDITABLE_BOOK_PATH,
+        work_dir / "05_semantic.json",
+        work_dir / "05_semantic_raw.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
     raise FileNotFoundError(
-        f"build source not found under {work_dir}: expected {editable.relative_to(work_dir)}"
+        f"No build source found under {work_dir}: checked "
+        + ", ".join(str(c.relative_to(work_dir)) for c in candidates)
     )
+
+
+def _check_build_source_freshness(work_dir: Path, source_manifest_sha256: str) -> None:
+    """Raise Stage3ContractError if an active manifest exists but its sha differs."""
+    try:
+        pointer, _ = load_active_stage3_manifest(work_dir)
+    except Stage3ContractError:
+        # No active manifest available — staleness check not possible, allow build.
+        return
+    if pointer.manifest_sha256 != source_manifest_sha256:
+        raise Stage3ContractError(
+            f"Build source is stale: source manifest_sha256={source_manifest_sha256} "
+            f"does not match active manifest_sha256={pointer.manifest_sha256}. "
+            "Re-run assemble (Stage 4) to refresh the build source."
+        )
 
 
 def build_epub(
@@ -108,6 +135,16 @@ def build_epub(
     registry_path: Path | None = None,
 ) -> None:
     book_model = Book.model_validate_json(semantic_path.read_text(encoding="utf-8"))
+
+    # Stale manifest check: if the build source records a manifest sha and an
+    # active manifest exists, fail when the shas don't match to prevent building
+    # from stale extraction data.
+    if book_model.extraction.stage3_manifest_sha256:
+        work_dir = semantic_path.parent
+        _check_build_source_freshness(
+            work_dir, book_model.extraction.stage3_manifest_sha256
+        )
+
     registry = _load_registry(registry_path) if registry_path else None
     css = _generate_css(registry)
 
@@ -153,7 +190,7 @@ def build_epub(
             if isinstance(block, Paragraph):
                 texts_to_scan = [block.text]
             elif isinstance(block, Table):
-                texts_to_scan = [block.html, block.table_title]
+                texts_to_scan = [block.html, block.table_title, block.caption]
             else:
                 continue
             for text in texts_to_scan:
@@ -312,33 +349,44 @@ def _normalize_epub_archive(out_path: Path) -> None:
 def _map_figures_to_images(
     book_model: Book, images_dir: Path | None, ebook: epub.EpubBook
 ) -> dict[int, str]:
-    """Map each Figure block (by id()) to its disk filename, and register images with ebook."""
+    """Map each Figure block (by id()) to its disk filename using Figure.image_ref.
+
+    Only Figure.image_ref is used to locate the image.  Page ordinal fallback
+    is intentionally absent: if image_ref is None or the file is missing on
+    disk, a warning is logged and the figure is not registered.
+    """
     figure_to_filename: dict[int, str] = {}
     if images_dir is None or not images_dir.exists():
         return figure_to_filename
 
-    figures_by_page: dict[int, list[Figure]] = defaultdict(list)
+    registered: set[str] = set()
     for chapter in book_model.chapters:
         for block in chapter.blocks:
-            if isinstance(block, Figure):
-                figures_by_page[block.provenance.page].append(block)
-
-    registered: set[str] = set()
-    for page, figs in figures_by_page.items():
-        disk_files = sorted(images_dir.glob(f"p{page:04d}_*.png"))
-        for ordinal, fig in enumerate(figs):
-            if ordinal >= len(disk_files):
-                log.warning("no image file for figure on page %d (ordinal %d)", page, ordinal)
+            if not isinstance(block, Figure):
                 continue
-            fname = disk_files[ordinal].name
-            figure_to_filename[id(fig)] = fname
+            if not block.image_ref:
+                log.warning(
+                    "figure on page %d has no image_ref — skipping image registration",
+                    block.provenance.page,
+                )
+                continue
+            img_path = images_dir / block.image_ref
+            if not img_path.exists():
+                log.warning(
+                    "figure image_ref=%r not found on disk — skipping (page %d)",
+                    block.image_ref,
+                    block.provenance.page,
+                )
+                continue
+            fname = img_path.name
+            figure_to_filename[id(block)] = fname
             if fname not in registered:
-                stem = Path(fname).stem
+                stem = img_path.stem
                 ebook.add_item(epub.EpubItem(
                     uid=f"img-{stem}",
                     file_name=f"images/{fname}",
                     media_type="image/png",
-                    content=disk_files[ordinal].read_bytes(),
+                    content=img_path.read_bytes(),
                 ))
                 registered.add(fname)
 
@@ -459,7 +507,7 @@ def _render_chapter(
             )
         elif isinstance(block, Table):
             title_html = f'<p class="table-title">{_render_inline(block.table_title, fn_map)}</p>' if block.table_title else ""
-            caption_html = f'<p class="table-caption">{_esc(block.caption)}</p>' if block.caption else ""
+            caption_html = f'<p class="table-caption">{_render_inline(block.caption, fn_map)}</p>' if block.caption else ""
             parts.append(f"{title_html}{_apply_fn_markers(block.html, fn_map)}{caption_html}")
         elif isinstance(block, Equation):
             parts.append(f'<p class="equation">{_esc(block.latex)}</p>')
