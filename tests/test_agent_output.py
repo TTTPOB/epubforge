@@ -221,15 +221,21 @@ class TestAgentOutputModel:
             op="split_block",
             agent_id="fixer-1",
             rationale="Split this block in two",
+            params={
+                "block_uid": "some-uid",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["new-uid-1"],
+            },
         )
         assert cmd.op == "split_block"
-        assert cmd.params == {}
+        assert cmd.params["block_uid"] == "some-uid"
 
     def test_patch_command_empty_op(self):
         with pytest.raises(ValidationError):
             PatchCommand(
                 command_id=str(uuid4()),
-                op="",  # empty
+                op="",  # type: ignore[arg-type]
                 agent_id="fixer-1",
                 rationale="some rationale",
             )
@@ -542,6 +548,12 @@ class TestAddCommand:
             "op": "split_block",
             "agent_id": "fixer-1",
             "rationale": "Split this block",
+            "params": {
+                "block_uid": "some-uid",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["new-uid-1"],
+            },
         }
         cmd_file = self._write_command_file(tmp_path, cmd_data)
 
@@ -811,6 +823,12 @@ class TestValidate:
                     op="split_block",
                     agent_id="supervisor-1",
                     rationale="Split this block",
+                    params={
+                        "block_uid": "some-uid",
+                        "strategy": "at_sentence",
+                        "max_splits": 1,
+                        "new_block_uids": ["new-uid-1"],
+                    },
                 )
             ],
         )
@@ -835,6 +853,12 @@ class TestValidate:
                     op="split_block",
                     agent_id="supervisor-1",
                     rationale="Split this block",
+                    params={
+                        "block_uid": "some-uid",
+                        "strategy": "at_sentence",
+                        "max_splits": 1,
+                        "new_block_uids": ["new-uid-1"],
+                    },
                 )
             ],
         )
@@ -1232,6 +1256,12 @@ class TestSubmit:
                     op="split_block",
                     agent_id="supervisor-1",
                     rationale="Split this block",
+                    params={
+                        "block_uid": "some-uid",
+                        "strategy": "at_sentence",
+                        "max_splits": 1,
+                        "new_block_uids": ["new-uid-1"],
+                    },
                 )
             ],
         )
