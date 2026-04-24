@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from epubforge.editor.patch_commands import (
+    CompiledCommands,
     MarkOrphanParams,
     MergeBlocksParams,
     MergeChapterSection,
@@ -22,8 +23,13 @@ from epubforge.editor.patch_commands import (
     SplitChapterParams,
     SplitMergedTableParams,
     UnpairFootnoteParams,
+    _check_uid_collision,
+    _find_block,
+    _find_chapter,
     command_params,
+    compile_patch_commands,
 )
+from epubforge.ir.semantic import Book, Chapter, Paragraph, Provenance
 
 
 # ---------------------------------------------------------------------------
@@ -902,3 +908,123 @@ class TestEdgeCases:
     def test_merge_chapter_section_empty_new_block_uid_rejected(self):
         with pytest.raises(ValidationError):
             MergeChapterSection(text="Hello", new_block_uid="")
+
+
+# ---------------------------------------------------------------------------
+# §10 WP2 Compiler Infrastructure
+# ---------------------------------------------------------------------------
+
+
+def _make_book() -> Book:
+    """Create a simple test book with known UIDs."""
+    prov = Provenance(page=1, source="passthrough")
+    return Book(
+        title="Test",
+        chapters=[
+            Chapter(
+                uid="ch-1",
+                title="Chapter 1",
+                blocks=[
+                    Paragraph(uid="blk-1", text="Hello", role="body", provenance=prov),
+                    Paragraph(uid="blk-2", text="World", role="body", provenance=prov),
+                ],
+            ),
+        ],
+    )
+
+
+class TestCompilerInfrastructure:
+    def test_compile_empty_commands_returns_empty(self):
+        """Compiling empty command list returns empty patches, same book."""
+        book = _make_book()
+        result = compile_patch_commands(
+            book, [], output_kind="supervisor", output_chapter_uid=None
+        )
+        assert result.patches == []
+        assert result.book_after_commands == book
+
+    def test_compile_unimplemented_op_raises(self):
+        """Compiling a command whose op compiler is not yet registered raises PatchCommandError."""
+        book = _make_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "blk-1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["blk-new"],
+            },
+        )
+        with pytest.raises(PatchCommandError) as exc_info:
+            compile_patch_commands(
+                book, [cmd], output_kind="supervisor", output_chapter_uid=None
+            )
+        assert "not implemented" in str(exc_info.value)
+        assert exc_info.value.command_id == cmd.command_id
+
+    def test_compile_result_is_compiled_commands(self):
+        """compile_patch_commands returns a CompiledCommands instance."""
+        book = _make_book()
+        result = compile_patch_commands(
+            book, [], output_kind="fixer", output_chapter_uid="ch-1"
+        )
+        assert isinstance(result, CompiledCommands)
+
+    def test_find_block_helper(self):
+        """_find_block returns correct chapter, block, index."""
+        book = _make_book()
+        chapter, block, idx = _find_block(book, "blk-1", "cmd-test")
+        assert chapter.uid == "ch-1"
+        assert block.uid == "blk-1"
+        assert idx == 0
+
+        chapter2, block2, idx2 = _find_block(book, "blk-2", "cmd-test")
+        assert block2.uid == "blk-2"
+        assert idx2 == 1
+
+    def test_find_block_not_found_raises(self):
+        """_find_block raises PatchCommandError for unknown uid."""
+        book = _make_book()
+        with pytest.raises(PatchCommandError) as exc_info:
+            _find_block(book, "nonexistent-uid", "cmd-test")
+        assert exc_info.value.command_id == "cmd-test"
+        assert "blk" in str(exc_info.value) or "not found" in str(exc_info.value)
+
+    def test_find_chapter_helper(self):
+        """_find_chapter returns correct chapter and index."""
+        book = _make_book()
+        chapter, idx = _find_chapter(book, "ch-1", "cmd-test")
+        assert chapter.uid == "ch-1"
+        assert idx == 0
+
+    def test_find_chapter_not_found_raises(self):
+        """_find_chapter raises PatchCommandError for unknown uid."""
+        book = _make_book()
+        with pytest.raises(PatchCommandError) as exc_info:
+            _find_chapter(book, "nonexistent-chapter", "cmd-test")
+        assert exc_info.value.command_id == "cmd-test"
+        assert "not found" in str(exc_info.value)
+
+    def test_uid_collision_detected_chapter(self):
+        """_check_uid_collision raises for an existing chapter uid."""
+        book = _make_book()
+        with pytest.raises(PatchCommandError) as exc_info:
+            _check_uid_collision(book, "ch-1", "cmd-test")
+        assert "already exists" in str(exc_info.value)
+        assert exc_info.value.command_id == "cmd-test"
+
+    def test_uid_collision_detected_block(self):
+        """_check_uid_collision raises for an existing block uid."""
+        book = _make_book()
+        with pytest.raises(PatchCommandError) as exc_info:
+            _check_uid_collision(book, "blk-1", "cmd-test")
+        assert "already exists" in str(exc_info.value)
+
+    def test_uid_no_collision(self):
+        """_check_uid_collision does not raise for a fresh uid."""
+        book = _make_book()
+        # Should not raise
+        _check_uid_collision(book, "brand-new-uid-xyz", "cmd-test")

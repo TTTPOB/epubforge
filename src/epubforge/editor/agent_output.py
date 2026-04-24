@@ -16,7 +16,7 @@ from epubforge.editor._validators import (
 )
 from epubforge.editor.cli_support import CommandError
 from epubforge.editor.memory import EditMemory, MemoryMergeDecision, MemoryPatch, OpenQuestion, merge_edit_memory
-from epubforge.editor.patch_commands import PatchCommand
+from epubforge.editor.patch_commands import PatchCommand, PatchCommandError, compile_patch_commands
 from epubforge.editor.patches import BookPatch, PatchError, apply_book_patch
 from epubforge.editor.state import EditorPaths, atomic_write_model, atomic_write_text, save_memory
 from epubforge.ir.semantic import Book
@@ -186,11 +186,20 @@ def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
         except PatchError as e:
             errors.append(f"patches[{i}] ({patch.patch_id}): {e.reason}")
 
-    # §5.4 — PatchCommand compilation is not implemented yet.
+    # §5.4 — PatchCommand compilation (WP2+ framework; individual op compilers added in WP3-WP6).
     for i, cmd in enumerate(output.commands):
-        errors.append(
-            f"commands[{i}] ({cmd.command_id}): PatchCommand compilation is not implemented"
-        )
+        try:
+            compile_patch_commands(
+                current_book,
+                [cmd],
+                output_kind=output.kind,
+                output_chapter_uid=output.chapter_uid,
+            )
+        except PatchCommandError as exc:
+            errors.append(
+                f"commands[{i}] ({cmd.command_id}): PatchCommand compilation is not implemented"
+                f" — {exc.reason}"
+            )
 
     # §5.5 — MemoryPatch UID reference validation
     for i, mp in enumerate(output.memory_patches):
@@ -400,18 +409,36 @@ def archive_agent_output(paths: EditorPaths, output: AgentOutput, submitted_at: 
 # ---------------------------------------------------------------------------
 
 
-def _compile_commands(commands: list[PatchCommand], book: Book) -> list[BookPatch]:
+def _compile_commands(
+    commands: list[PatchCommand],
+    book: Book,
+    *,
+    output_kind: AgentKind,
+    output_chapter_uid: str | None,
+) -> list[BookPatch]:
     """Compile high-level commands into BookPatch instances.
 
-    TODO(Phase 3): implement PatchCommand → BookPatch compilation for each op.
+    Uses the WP2 compiler framework. Individual op compilers are registered
+    in WP3-WP6 via _COMPILERS dict in patch_commands.py.
+    Raises CommandError if compilation fails (e.g., op not yet implemented).
     """
-    if commands:
-        raise CommandError(
-            "PatchCommand compilation is not implemented",
-            exit_code=1,
-            payload={"error": "PatchCommand compilation is not implemented"},
+    if not commands:
+        return []
+    try:
+        result = compile_patch_commands(
+            book,
+            commands,
+            output_kind=output_kind,
+            output_chapter_uid=output_chapter_uid,
         )
-    return []
+        return list(result.patches)
+    except PatchCommandError as exc:
+        msg = f"PatchCommand compilation is not implemented — {exc.reason}"
+        raise CommandError(
+            msg,
+            exit_code=1,
+            payload={"error": msg},
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +471,13 @@ def submit_agent_output(
             errors=errors,
         )
 
-    # Step 2: compile commands (Phase 2 no-op)
-    compiled_patches = _compile_commands(output.commands, book)
+    # Step 2: compile commands via WP2 framework
+    compiled_patches = _compile_commands(
+        output.commands,
+        book,
+        output_kind=output.kind,
+        output_chapter_uid=output.chapter_uid,
+    )
 
     # Step 3: combine compiled + direct patches
     all_patches = compiled_patches + output.patches

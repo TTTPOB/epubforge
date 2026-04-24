@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -301,6 +302,163 @@ def command_params(command: PatchCommand) -> StrictModel:
 
 
 # ---------------------------------------------------------------------------
+# WP2: Compiler Infrastructure
+# ---------------------------------------------------------------------------
+
+from epubforge.editor.patches import (  # noqa: E402
+    BookPatch,
+    PatchScope,
+    _serialize_field_value as _serialize_field_value,
+    apply_book_patch,
+)
+from epubforge.ir.semantic import Block, Book, Chapter  # noqa: E402
+
+
+# PatchCommandAgentKind — local copy to avoid circular import from agent_output.py
+PatchCommandAgentKind = Literal["scanner", "fixer", "reviewer", "supervisor"]
+
+
+# ---------------------------------------------------------------------------
+# CompiledCommands
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CompiledCommands:
+    """Result of compiling a list of PatchCommands."""
+
+    patches: list[BookPatch]
+    book_after_commands: Book
+
+
+# ---------------------------------------------------------------------------
+# Op-specific compiler registry
+# ---------------------------------------------------------------------------
+
+# Type alias for op compiler functions.
+# Each compiler: (book: Book, command: PatchCommand, params: StrictModel)
+#                -> tuple[list[IRChange], PatchScope]
+# WP3-WP6 will populate this dict.
+CompilerFn = Callable[[Book, PatchCommand, StrictModel], tuple[list, PatchScope]]
+
+_COMPILERS: dict[str, CompilerFn] = {}
+
+
+# ---------------------------------------------------------------------------
+# Lookup helpers (used by WP3-WP6 compilers)
+# ---------------------------------------------------------------------------
+
+
+def _find_block(book: Book, block_uid: str, command_id: str) -> tuple[Chapter, Block, int]:
+    """Find a block by UID across all chapters.
+
+    Returns (chapter, block, block_index_in_chapter).
+    Raises PatchCommandError if not found.
+    """
+    for chapter in book.chapters:
+        for i, block in enumerate(chapter.blocks):
+            if block.uid == block_uid:
+                return chapter, block, i
+    raise PatchCommandError(f"block_uid {block_uid!r} not found", command_id)
+
+
+def _find_chapter(book: Book, chapter_uid: str, command_id: str) -> tuple[Chapter, int]:
+    """Find a chapter by UID.
+
+    Returns (chapter, chapter_index_in_book).
+    Raises PatchCommandError if not found.
+    """
+    for i, chapter in enumerate(book.chapters):
+        if chapter.uid == chapter_uid:
+            return chapter, i
+    raise PatchCommandError(f"chapter_uid {chapter_uid!r} not found", command_id)
+
+
+def _check_uid_collision(book: Book, uid: str, command_id: str) -> None:
+    """Ensure uid doesn't already exist in book."""
+    for chapter in book.chapters:
+        if chapter.uid == uid:
+            raise PatchCommandError(f"uid {uid!r} already exists (chapter)", command_id)
+        for block in chapter.blocks:
+            if block.uid == uid:
+                raise PatchCommandError(f"uid {uid!r} already exists (block)", command_id)
+
+
+# ---------------------------------------------------------------------------
+# compile_patch_command
+# ---------------------------------------------------------------------------
+
+
+def compile_patch_command(
+    book: Book,
+    command: PatchCommand,
+    *,
+    output_kind: PatchCommandAgentKind,
+    output_chapter_uid: str | None,
+) -> BookPatch:
+    """Compile a single PatchCommand into a BookPatch.
+
+    Raises PatchCommandError on compilation failure.
+    Does NOT apply the patch (caller must call apply_book_patch).
+    """
+    params = command_params(command)
+
+    compiler_fn = _COMPILERS.get(command.op)
+    if compiler_fn is None:
+        raise PatchCommandError(
+            f"compiler for op {command.op!r} is not implemented",
+            command.command_id,
+        )
+
+    changes, scope = compiler_fn(book, command, params)
+
+    return BookPatch(
+        patch_id=command.command_id,
+        agent_id=command.agent_id,
+        scope=scope,
+        changes=changes,
+        rationale=command.rationale,
+    )
+
+
+# ---------------------------------------------------------------------------
+# compile_patch_commands
+# ---------------------------------------------------------------------------
+
+
+def compile_patch_commands(
+    book: Book,
+    commands: list[PatchCommand],
+    *,
+    output_kind: PatchCommandAgentKind,
+    output_chapter_uid: str | None,
+) -> CompiledCommands:
+    """Compile a list of PatchCommands into BookPatches with an evolving book.
+
+    Maintains state: each command is compiled against the book resulting from
+    applying all previous commands' patches. This enables command chains where
+    later commands reference UIDs or text created by earlier commands.
+
+    On first failure: raises PatchCommandError. Caller (validate_agent_output)
+    should catch and decide how to handle remaining commands.
+    """
+    patches: list[BookPatch] = []
+    current_book = book
+
+    for command in commands:
+        patch = compile_patch_command(
+            current_book,
+            command,
+            output_kind=output_kind,
+            output_chapter_uid=output_chapter_uid,
+        )
+        current_book = apply_book_patch(current_book, patch)
+        patches.append(patch)
+
+    return CompiledCommands(patches=patches, book_after_commands=current_book)
+
+
+# ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
 
@@ -308,7 +466,11 @@ __all__ = [
     "PatchCommand",
     "PatchCommandOp",
     "PatchCommandError",
+    "PatchCommandAgentKind",
+    "CompiledCommands",
     "command_params",
+    "compile_patch_command",
+    "compile_patch_commands",
     "SplitBlockParams",
     "MergeBlocksParams",
     "RelocateBlockParams",
