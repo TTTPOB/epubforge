@@ -160,15 +160,108 @@ def _uid_exists(uid: str, book: Book) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Semantic validation
+# AgentOutputValidationResult
 # ---------------------------------------------------------------------------
 
 
-def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
-    """Full semantic validation of an AgentOutput against the current Book.
+@dataclasses.dataclass(frozen=True)
+class AgentOutputValidationResult:
+    """Internal validation result shared by validate and submit paths."""
 
-    Returns a list of error strings. Empty list means the output is valid.
-    Does not fail-fast — collects all errors before returning.
+    errors: list[str]
+    compiled_patches: list[BookPatch]
+    book_after_commands: Book | None
+
+
+# ---------------------------------------------------------------------------
+# Internal: scope and kind permission check helper
+# ---------------------------------------------------------------------------
+
+
+def _check_patches_permissions(
+    patches: list[BookPatch],
+    output: AgentOutput,
+    prefix: str,
+) -> list[str]:
+    """Check scope consistency and kind-specific permissions for a list of patches.
+
+    prefix is used in error messages (e.g. "patches" or "compiled_patches").
+    """
+    errors: list[str] = []
+
+    # §5.6 — scope consistency (chapter-scoped output cannot have book-wide patches)
+    for i, patch in enumerate(patches):
+        if output.chapter_uid is not None:
+            if patch.scope.chapter_uid is None:
+                errors.append(
+                    f"{prefix}[{i}]: chapter-scoped output (chapter_uid={output.chapter_uid!r}) "
+                    f"may not contain book-wide patches (scope.chapter_uid=None)"
+                )
+            elif patch.scope.chapter_uid != output.chapter_uid:
+                errors.append(
+                    f"{prefix}[{i}]: scope.chapter_uid {patch.scope.chapter_uid!r} "
+                    f"does not match output.chapter_uid {output.chapter_uid!r}"
+                )
+
+    # §5.7 — kind-specific permissions
+
+    # scanner: set_field only, no book-wide scope
+    if output.kind == "scanner":
+        for i, patch in enumerate(patches):
+            for j, change in enumerate(patch.changes):
+                if change.op != "set_field":
+                    errors.append(
+                        f"scanner output {prefix}[{i}].changes[{j}]: "
+                        f"scanner may only submit set_field changes, got {change.op!r}"
+                    )
+            if patch.scope.chapter_uid is None:
+                errors.append(
+                    f"scanner output {prefix}[{i}]: book-wide scope requires supervisor"
+                )
+
+    # fixer: no topology ops in BookPatch; use PatchCommand instead
+    if output.kind == "fixer":
+        topology_ops = {"insert_node", "delete_node", "move_node"}
+        for i, patch in enumerate(patches):
+            for j, change in enumerate(patch.changes):
+                if change.op in topology_ops:
+                    errors.append(
+                        f"fixer output {prefix}[{i}].changes[{j}]: "
+                        f"fixer may not submit topology changes directly via BookPatch "
+                        f"({change.op!r}); use PatchCommand instead (enforced by Phase 3 compiler)"
+                    )
+            if output.chapter_uid is not None and patch.scope.chapter_uid is None:
+                errors.append(
+                    f"fixer output {prefix}[{i}]: chapter-scoped fixer "
+                    f"may not use book-wide scope"
+                )
+
+    # reviewer: set_field only
+    if output.kind == "reviewer":
+        allowed_ops = {"set_field"}
+        for i, patch in enumerate(patches):
+            for j, change in enumerate(patch.changes):
+                if change.op not in allowed_ops:
+                    errors.append(
+                        f"reviewer output {prefix}[{i}].changes[{j}]: "
+                        f"reviewer may only submit set_field changes, got {change.op!r}"
+                    )
+
+    # supervisor: unrestricted (no additional checks beyond BookPatch validate)
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Internal: shared validation implementation
+# ---------------------------------------------------------------------------
+
+
+def _validate_agent_output_impl(output: AgentOutput, book: Book) -> AgentOutputValidationResult:
+    """Single shared validation helper used by both validate_agent_output and submit_agent_output.
+
+    Performs all semantic validation and returns an AgentOutputValidationResult containing
+    errors, compiled_patches, and book_after_commands.
     """
     errors: list[str] = []
 
@@ -178,28 +271,73 @@ def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
         if output.chapter_uid not in chapter_uids:
             errors.append(f"chapter_uid not found: {output.chapter_uid}")
 
-    # §5.3 — BookPatch validation with preconditions against an evolving temp book.
-    current_book = book
-    for i, patch in enumerate(output.patches):
-        try:
-            current_book = apply_book_patch(current_book, patch)
-        except PatchError as e:
-            errors.append(f"patches[{i}] ({patch.patch_id}): {e.reason}")
-
-    # §5.4 — PatchCommand compilation (WP2+ framework; individual op compilers added in WP3-WP6).
+    # §5.2b — agent_id consistency checks (NEW)
     for i, cmd in enumerate(output.commands):
-        try:
-            compile_patch_commands(
-                current_book,
-                [cmd],
-                output_kind=output.kind,
-                output_chapter_uid=output.chapter_uid,
-            )
-        except PatchCommandError as exc:
+        if cmd.agent_id != output.agent_id:
             errors.append(
-                f"commands[{i}] ({cmd.command_id}): PatchCommand compilation is not implemented"
-                f" — {exc.reason}"
+                f"commands[{i}] ({cmd.command_id}): agent_id mismatch: "
+                f"command.agent_id={cmd.agent_id!r} != output.agent_id={output.agent_id!r}"
             )
+    for i, patch in enumerate(output.patches):
+        if patch.agent_id != output.agent_id:
+            errors.append(
+                f"patches[{i}] ({patch.patch_id}): agent_id mismatch: "
+                f"patch.agent_id={patch.agent_id!r} != output.agent_id={output.agent_id!r}"
+            )
+
+    # §5.3 — scanner/reviewer may not submit commands (NEW)
+    if output.kind in ("scanner", "reviewer") and output.commands:
+        errors.append(f"{output.kind} may not submit PatchCommands")
+
+    # §5.4 — Compile commands with evolving book
+    compiled_patches: list[BookPatch] = []
+    book_after_commands: Book | None = None
+    compilation_failed = False
+
+    if output.commands:
+        current_book = book
+        for i, cmd in enumerate(output.commands):
+            try:
+                result = compile_patch_commands(
+                    current_book,
+                    [cmd],
+                    output_kind=output.kind,
+                    output_chapter_uid=output.chapter_uid,
+                )
+                compiled_patches.extend(result.patches)
+                current_book = result.book_after_commands
+            except PatchCommandError as exc:
+                errors.append(
+                    f"commands[{i}] ({cmd.command_id}): {exc.reason}"
+                )
+                # Record skipped for subsequent commands
+                for j in range(i + 1, len(output.commands)):
+                    skipped_cmd = output.commands[j]
+                    errors.append(
+                        f"commands[{j}] ({skipped_cmd.command_id}): skipped because previous command failed"
+                    )
+                compilation_failed = True
+                break
+        if not compilation_failed:
+            book_after_commands = current_book
+    else:
+        book_after_commands = book
+
+    # §5.5 — validate output.patches (skip if compilation failed)
+    if compilation_failed:
+        errors.append("skipped output.patches validation because command compilation failed")
+    else:
+        assert book_after_commands is not None
+        current_book = book_after_commands
+        for i, patch in enumerate(output.patches):
+            try:
+                current_book = apply_book_patch(current_book, patch)
+            except PatchError as e:
+                errors.append(f"patches[{i}] ({patch.patch_id}): {e.reason}")
+
+    # §5.6 + §5.7 — scope and kind permission checks on ALL patches
+    all_patches_for_check = compiled_patches + list(output.patches)
+    errors.extend(_check_patches_permissions(all_patches_for_check, output, "patches"))
 
     # §5.5 — MemoryPatch UID reference validation
     for i, mp in enumerate(output.memory_patches):
@@ -238,78 +376,18 @@ def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
                         f"affected_uid not found: {uid}"
                     )
 
-    # §5.6 — scope consistency (chapter-scoped output cannot have book-wide patches)
-    for i, patch in enumerate(output.patches):
-        if output.chapter_uid is not None:
-            if patch.scope.chapter_uid is None:
-                errors.append(
-                    f"patches[{i}]: chapter-scoped output (chapter_uid={output.chapter_uid!r}) "
-                    f"may not contain book-wide patches (scope.chapter_uid=None)"
-                )
-            elif patch.scope.chapter_uid != output.chapter_uid:
-                errors.append(
-                    f"patches[{i}]: scope.chapter_uid {patch.scope.chapter_uid!r} "
-                    f"does not match output.chapter_uid {output.chapter_uid!r}"
-                )
-
-    # §5.7 — kind-specific permissions
-
-    # scanner: set_field only, no book-wide scope
-    if output.kind == "scanner":
-        for i, patch in enumerate(output.patches):
-            for j, change in enumerate(patch.changes):
-                if change.op != "set_field":
-                    errors.append(
-                        f"scanner output patches[{i}].changes[{j}]: "
-                        f"scanner may only submit set_field changes, got {change.op!r}"
-                    )
-            if patch.scope.chapter_uid is None:
-                errors.append(
-                    f"scanner output patches[{i}]: book-wide scope requires supervisor"
-                )
-
-        # §5.7 — scanner must include read_passes update for its chapter
-        if output.chapter_uid is not None:
-            has_read_pass_update = any(
-                cs.chapter_uid == output.chapter_uid and cs.read_passes > 0
-                for mp in output.memory_patches
-                for cs in mp.chapter_status
+    # §5.7 — scanner must include read_passes update for its chapter
+    if output.kind == "scanner" and output.chapter_uid is not None:
+        has_read_pass_update = any(
+            cs.chapter_uid == output.chapter_uid and cs.read_passes > 0
+            for mp in output.memory_patches
+            for cs in mp.chapter_status
+        )
+        if not has_read_pass_update:
+            errors.append(
+                f"scanner output must include a chapter_status entry for "
+                f"chapter_uid={output.chapter_uid!r} with read_passes > 0"
             )
-            if not has_read_pass_update:
-                errors.append(
-                    f"scanner output must include a chapter_status entry for "
-                    f"chapter_uid={output.chapter_uid!r} with read_passes > 0"
-                )
-
-    # fixer: no topology ops in BookPatch; use PatchCommand instead
-    if output.kind == "fixer":
-        topology_ops = {"insert_node", "delete_node", "move_node"}
-        for i, patch in enumerate(output.patches):
-            for j, change in enumerate(patch.changes):
-                if change.op in topology_ops:
-                    errors.append(
-                        f"fixer output patches[{i}].changes[{j}]: "
-                        f"fixer may not submit topology changes directly via BookPatch "
-                        f"({change.op!r}); use PatchCommand instead (enforced by Phase 3 compiler)"
-                    )
-            if output.chapter_uid is not None and patch.scope.chapter_uid is None:
-                errors.append(
-                    f"fixer output patches[{i}]: chapter-scoped fixer "
-                    f"may not use book-wide scope"
-                )
-
-    # reviewer: set_field only
-    if output.kind == "reviewer":
-        allowed_ops = {"set_field"}
-        for i, patch in enumerate(output.patches):
-            for j, change in enumerate(patch.changes):
-                if change.op not in allowed_ops:
-                    errors.append(
-                        f"reviewer output patches[{i}].changes[{j}]: "
-                        f"reviewer may only submit set_field changes, got {change.op!r}"
-                    )
-
-    # supervisor: unrestricted (no additional checks beyond BookPatch validate)
 
     # §5.8 — OpenQuestion context_uid existence (output.open_questions)
     for i, q in enumerate(output.open_questions):
@@ -319,7 +397,26 @@ def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
                     f"open_questions[{i}] (q_id={q.q_id}): context_uid not found: {uid}"
                 )
 
-    return errors
+    return AgentOutputValidationResult(
+        errors=errors,
+        compiled_patches=compiled_patches,
+        book_after_commands=book_after_commands,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Semantic validation (public API)
+# ---------------------------------------------------------------------------
+
+
+def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
+    """Full semantic validation of an AgentOutput against the current Book.
+
+    Returns a list of error strings. Empty list means the output is valid.
+    Does not fail-fast — collects all errors before returning.
+    """
+    result = _validate_agent_output_impl(output, book)
+    return result.errors
 
 
 # ---------------------------------------------------------------------------
@@ -405,43 +502,6 @@ def archive_agent_output(paths: EditorPaths, output: AgentOutput, submitted_at: 
 
 
 # ---------------------------------------------------------------------------
-# compile_commands (Phase 2 no-op stub)
-# ---------------------------------------------------------------------------
-
-
-def _compile_commands(
-    commands: list[PatchCommand],
-    book: Book,
-    *,
-    output_kind: AgentKind,
-    output_chapter_uid: str | None,
-) -> list[BookPatch]:
-    """Compile high-level commands into BookPatch instances.
-
-    Uses the WP2 compiler framework. Individual op compilers are registered
-    in WP3-WP6 via _COMPILERS dict in patch_commands.py.
-    Raises CommandError if compilation fails (e.g., op not yet implemented).
-    """
-    if not commands:
-        return []
-    try:
-        result = compile_patch_commands(
-            book,
-            commands,
-            output_kind=output_kind,
-            output_chapter_uid=output_chapter_uid,
-        )
-        return list(result.patches)
-    except PatchCommandError as exc:
-        msg = f"PatchCommand compilation is not implemented — {exc.reason}"
-        raise CommandError(
-            msg,
-            exit_code=1,
-            payload={"error": msg},
-        ) from exc
-
-
-# ---------------------------------------------------------------------------
 # submit_agent_output
 # ---------------------------------------------------------------------------
 
@@ -458,9 +518,9 @@ def submit_agent_output(
 
     Returns a SubmitResult. Raises CommandError on validation or apply failure.
     """
-    # Step 1: validate
-    errors = validate_agent_output(output, book)
-    if errors:
+    # Step 1: validate (uses shared impl — includes command compilation)
+    validation = _validate_agent_output_impl(output, book)
+    if validation.errors:
         return SubmitResult(
             submitted=False,
             output_id=output.output_id,
@@ -468,21 +528,13 @@ def submit_agent_output(
             memory_patches_applied=0,
             archive_path="",
             memory_decisions=[],
-            errors=errors,
+            errors=validation.errors,
         )
 
-    # Step 2: compile commands via WP2 framework
-    compiled_patches = _compile_commands(
-        output.commands,
-        book,
-        output_kind=output.kind,
-        output_chapter_uid=output.chapter_uid,
-    )
+    # Step 2: combine compiled + direct patches (already validated)
+    all_patches = list(validation.compiled_patches) + list(output.patches)
 
-    # Step 3: combine compiled + direct patches
-    all_patches = compiled_patches + output.patches
-
-    # Step 4: apply patches sequentially
+    # Step 3: apply patches sequentially
     new_book, patch_error = apply_patches_sequentially(all_patches, book)
     if patch_error is not None:
         raise CommandError(
@@ -491,7 +543,7 @@ def submit_agent_output(
             payload={"error": patch_error},
         )
 
-    # Step 5: apply memory patches sequentially
+    # Step 4: apply memory patches sequentially
     try:
         new_memory, all_decisions = apply_memory_patches_sequentially(
             output.memory_patches,
@@ -506,13 +558,13 @@ def submit_agent_output(
             payload={"error": f"memory merge failed: {exc}"},
         ) from exc
 
-    # Step 6: save book
+    # Step 5: save book
     atomic_write_model(paths.book_path, new_book)
 
-    # Step 7: save memory
+    # Step 6: save memory
     save_memory(paths, new_memory)
 
-    # Step 8: archive output
+    # Step 7: archive output
     archive_path = archive_agent_output(paths, output, submitted_at=now)
 
     return SubmitResult(
