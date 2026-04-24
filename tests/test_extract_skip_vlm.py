@@ -947,6 +947,43 @@ def test_unit_files_overwritten_when_force_true(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_table_export_failure_produces_warning_and_audit_note(tmp_path: Path) -> None:
+    """When table.export_to_html raises, a Stage3Warning and audit_note must be emitted."""
+    from unittest.mock import patch
+    from epubforge.extract_skip_vlm import extract_skip_vlm
+
+    doc_data = _make_doc(
+        tables=[_table_item("#/tables/0", page_no=1)],
+        pages=[1],
+    )
+    raw_path, pages_path, out_dir = _write_inputs(
+        tmp_path,
+        doc_data,
+        [{"page": 1, "kind": "complex"}],
+    )
+
+    with patch("docling_core.types.doc.TableItem.export_to_html", side_effect=RuntimeError("mock failure")):
+        result = extract_skip_vlm(raw_path, pages_path, out_dir)
+
+    # Must produce exactly one warning
+    assert len(result.warnings) == 1
+    assert "table" in result.warnings[0].message.lower()
+    assert result.warnings[0].page == 1
+    assert result.warnings[0].item_ref == "#/tables/0"
+
+    # The unit file must contain the table block with the placeholder HTML
+    unit_data = json.loads(result.unit_files[0].read_text(encoding="utf-8"))
+    table_blocks = [b for b in unit_data["draft_blocks"] if b["kind"] == "table"]
+    assert len(table_blocks) == 1
+    assert table_blocks[0]["html"] == "<!-- table export failed -->"
+
+    # audit_notes must contain the failure note
+    audit_notes = unit_data["audit_notes"]
+    failure_notes = [n for n in audit_notes if n.get("hint") == "table_export_failed"]
+    assert len(failure_notes) == 1
+    assert failure_notes[0]["page"] == 1
+
+
 def test_evidence_refs_include_all_page_items(tmp_path: Path) -> None:
     """evidence_refs in each unit must include refs for all items on that page."""
     from epubforge.extract_skip_vlm import extract_skip_vlm

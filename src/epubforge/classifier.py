@@ -64,6 +64,12 @@ def classify_pages(raw_path: Path, out_path: Path) -> None:
             if item.label == DocItemLabel.TEXT:
                 info["text_bboxes"].append((prov.bbox.l, prov.bbox.r))
 
+    # Ensure all document pages appear in output, even if they have zero items
+    for page_key in doc.pages:
+        pno = int(page_key) if isinstance(page_key, str) else page_key
+        if pno not in page_info:
+            page_info[pno] = {"kind": "simple", "element_refs": [], "text_bboxes": []}
+
     for pno, info in page_info.items():
         if info["kind"] in ("complex", "toc"):
             continue

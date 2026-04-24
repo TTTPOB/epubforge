@@ -390,8 +390,11 @@ def _label_to_block(
         try:
             html = item.export_to_html(doc=doc, add_caption=False)
         except Exception as exc:
-            log.warning("table export_to_html failed for %s: %s", item.self_ref, exc)
-            html = ""
+            msg = f"Table HTML export failed on page {pno} (ref={item.self_ref}): {exc}"
+            log.warning(msg)
+            warnings.append(Stage3Warning(message=msg, page=pno, item_ref=item.self_ref))
+            audit_notes.append({"kind": "other", "page": pno, "hint": "table_export_failed", "block_index": None})
+            html = "<!-- table export failed -->"
         return Table(
             html=html,
             table_title="",

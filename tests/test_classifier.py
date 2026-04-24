@@ -146,6 +146,40 @@ class TestMultiPage:
         assert "#/texts/1" in p1["element_refs"]
 
 
+class TestBlankPages:
+    def test_blank_page_appears_in_output(self, tmp_path: Path) -> None:
+        """A page with zero items must still appear in 02_pages.json with kind='simple'."""
+        # page 1 has a text item; page 2 is completely blank (no items)
+        doc = _doc(
+            texts=[_text(DocItemLabel.TEXT, 1, "#/texts/0")],
+            pages={
+                1: PageItem(page_no=1, size=Size(width=595.0, height=842.0)),
+                2: PageItem(page_no=2, size=Size(width=595.0, height=842.0)),
+            },
+        )
+        pages = _run(tmp_path, doc)
+        page_nos = [p["page"] for p in pages]
+        assert 2 in page_nos, "Blank page 2 must appear in output"
+        blank = next(p for p in pages if p["page"] == 2)
+        assert blank["kind"] == "simple"
+        assert blank["element_refs"] == []
+
+    def test_all_blank_doc_has_all_pages(self, tmp_path: Path) -> None:
+        """A document with no items but 3 pages must emit 3 simple pages."""
+        doc = _doc(
+            pages={
+                1: PageItem(page_no=1, size=Size(width=595.0, height=842.0)),
+                2: PageItem(page_no=2, size=Size(width=595.0, height=842.0)),
+                3: PageItem(page_no=3, size=Size(width=595.0, height=842.0)),
+            },
+        )
+        pages = _run(tmp_path, doc)
+        assert len(pages) == 3
+        for p in pages:
+            assert p["kind"] == "simple"
+            assert p["element_refs"] == []
+
+
 class TestMultiColumn:
     def test_single_column_not_flagged(self) -> None:
         bboxes = [(50.0, 300.0)] * 6
