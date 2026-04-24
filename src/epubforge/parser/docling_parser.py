@@ -50,6 +50,7 @@ def _save_figure_crops(doc, images_dir: Path) -> None:
             continue
         pil_img = element.get_image(doc)
         if pil_img is None:
+            log.warning("get_image() returned None for %s, skipping crop", element.self_ref)
             continue
         ref_id = element.self_ref.replace("/", "_").replace("#", "_").lstrip("_")
         page = element.prov[0].page_no if element.prov else 0

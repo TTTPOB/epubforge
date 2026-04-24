@@ -319,6 +319,7 @@ def run_extract(
                 artifact_dir,
                 force=force,
                 page_filter=pages,
+                images_dir=work / "images",
             )
     else:
         from epubforge.extract import extract

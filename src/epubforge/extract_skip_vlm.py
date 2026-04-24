@@ -83,6 +83,7 @@ def extract_skip_vlm(
     *,
     force: bool = False,
     page_filter: set[int] | None = None,
+    images_dir: Path | None = None,
 ) -> Stage3ExtractionResult:
     """Stage 3 skip-VLM: produce one unit per selected non-TOC page.
 
@@ -152,7 +153,7 @@ def extract_skip_vlm(
         )
 
         draft_blocks, evidence_refs, page_warnings, page_audit_notes, candidate_edges = (
-            _process_page(doc, pno, page_kind, selected_set, artifact_id)
+            _process_page(doc, pno, page_kind, selected_set, artifact_id, images_dir=images_dir)
         )
 
         all_warnings.extend(page_warnings)
@@ -185,6 +186,7 @@ def extract_skip_vlm(
         doc=doc,
         pages_data=selected_pages_data,
         artifact_id=artifact_id,
+        images_dir=images_dir,
     )
     evidence_index_path.write_text(
         evidence_index.model_dump_json(indent=2), encoding="utf-8"
@@ -221,6 +223,7 @@ def _process_page(
     page_kind: str,
     selected_set: set[int],
     artifact_id: str,
+    images_dir: Path | None = None,
 ) -> tuple[
     list[dict[str, Any]],  # draft_blocks (serialised)
     list[str],             # evidence_refs
@@ -272,6 +275,7 @@ def _process_page(
             provenance=provenance,
             warnings=warnings,
             audit_notes=audit_notes,
+            images_dir=images_dir,
         )
 
         if block is not None:
@@ -309,6 +313,7 @@ def _label_to_block(
     provenance: Provenance,
     warnings: list[Stage3Warning],
     audit_notes: list[dict[str, Any]],
+    images_dir: Path | None = None,
 ) -> Paragraph | Equation | Figure | Table | None:
     """Map a Docling item to a draft block or return None (evidence only)."""
 
@@ -411,6 +416,12 @@ def _label_to_block(
         ref_id = item.self_ref.replace("/", "_").replace("#", "_").lstrip("_")
         page_for_ref = pno
         image_ref = f"p{page_for_ref:04d}_{ref_id}.png"
+        if images_dir is not None and not (images_dir / image_ref).is_file():
+            warnings.append(Stage3Warning(
+                page=pno, item_ref=item.self_ref,
+                message=f"Figure crop not found: {image_ref}",
+            ))
+            image_ref = None
         return Figure(image_ref=image_ref, caption="", bbox=provenance.bbox, provenance=provenance)
 
     # --- Marker: evidence only unless non-empty text ---
@@ -477,6 +488,7 @@ def _build_evidence_index(
     doc: DoclingDocument,
     pages_data: list[dict[str, Any]],
     artifact_id: str,
+    images_dir: Path | None = None,
 ) -> EvidenceIndex:
     """Build evidence index for all selected non-TOC pages."""
     selected_page_nos = {p["page"] for p in pages_data}
@@ -516,6 +528,8 @@ def _build_evidence_index(
             if label in _PICTURE_LABELS:
                 ref_id = (ref or "").replace("/", "_").replace("#", "_").lstrip("_")
                 image_ref = f"p{pno:04d}_{ref_id}.png"
+                if images_dir is not None and not (images_dir / image_ref).is_file():
+                    image_ref = None
 
             # table html
             html: str | None = None
