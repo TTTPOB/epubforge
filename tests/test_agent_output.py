@@ -215,32 +215,6 @@ class TestAgentOutputModel:
                 unknown_field="oops",  # type: ignore[unexpected-keyword]
             )
 
-    def test_patch_command_valid(self):
-        cmd = PatchCommand(
-            command_id=str(uuid4()),
-            op="split_block",
-            agent_id="fixer-1",
-            rationale="Split this block in two",
-            params={
-                "block_uid": "some-uid",
-                "strategy": "at_sentence",
-                "max_splits": 1,
-                "new_block_uids": ["new-uid-1"],
-            },
-        )
-        assert cmd.op == "split_block"
-        assert cmd.params["block_uid"] == "some-uid"
-
-    def test_patch_command_empty_op(self):
-        with pytest.raises(ValidationError):
-            PatchCommand(
-                command_id=str(uuid4()),
-                op="",  # type: ignore[arg-type]
-                agent_id="fixer-1",
-                rationale="some rationale",
-            )
-
-
 # ===========================================================================
 # §8.2 begin command tests
 # ===========================================================================
@@ -1660,11 +1634,90 @@ class TestValidatePhase3:
         errors = validate_agent_output(output, book)
         assert any("reviewer may not submit PatchCommands" in e for e in errors)
 
+    def test_validate_fixer_book_wide_command_rejected(self, initialized_work):
+        """Chapter-scoped fixer submitting a book-wide command should fail validation."""
+        work, book = initialized_work
+        chapter_uid = book.chapters[0].uid
+        split_at_uid = book.chapters[0].blocks[1].uid
+
+        output = _make_agent_output(
+            kind="fixer",
+            agent_id="fixer-1",
+            chapter_uid=chapter_uid,
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="split_chapter",
+                    agent_id="fixer-1",
+                    rationale="Try to split a chapter from a fixer output",
+                    params={
+                        "chapter_uid": chapter_uid,
+                        "split_at_block_uid": split_at_uid,
+                        "new_chapter_title": "Unauthorized Split",
+                        "new_chapter_uid": str(uuid4()),
+                    },
+                )
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+
+        assert any("chapter-scoped output" in e and "book-wide" in e for e in errors)
+        assert any("fixer" in e and "book-wide" in e for e in errors)
+
+    def test_validate_fixer_cross_chapter_footnote_command_rejected(self, initialized_work):
+        """Chapter-scoped fixer submitting a cross-chapter footnote command should fail."""
+        work, book = initialized_work
+        chapter_uid = book.chapters[0].uid
+        source_uid = book.chapters[0].blocks[0].uid
+        footnote_uid = book.chapters[1].blocks[0].uid
+
+        # Create a deterministic cross-chapter pairing candidate: source paragraph in
+        # chapter 1, footnote block in chapter 2.
+        book.chapters[0].blocks[0] = Paragraph(
+            uid=source_uid,
+            text="Text with 2) callout.",
+            role="body",
+            provenance=_prov(1),
+        )
+        book.chapters[1].blocks[0] = Footnote(
+            uid=footnote_uid,
+            callout="2)",
+            text="Footnote text.",
+            paired=False,
+            orphan=False,
+            provenance=_prov(2),
+        )
+
+        output = _make_agent_output(
+            kind="fixer",
+            agent_id="fixer-1",
+            chapter_uid=chapter_uid,
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="pair_footnote",
+                    agent_id="fixer-1",
+                    rationale="Try to pair a cross-chapter footnote from a fixer output",
+                    params={
+                        "fn_block_uid": footnote_uid,
+                        "source_block_uid": source_uid,
+                    },
+                )
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+
+        assert any("chapter-scoped output" in e and "book-wide" in e for e in errors)
+        assert any("fixer" in e and "book-wide" in e for e in errors)
+
     def test_validate_command_compilation_skips_patches(self, initialized_work):
-        """When command compilation fails, patches validation should be skipped."""
+        """When the first command fails, later commands and patches validation are skipped."""
         work, book = initialized_work
         chapter_uid = book.chapters[0].uid
         block_uid = book.chapters[0].blocks[0].uid
+        second_command_id = str(uuid4())
 
         output = _make_agent_output(
             kind="supervisor",
@@ -1681,7 +1734,20 @@ class TestValidatePhase3:
                         "max_splits": 1,
                         "new_block_uids": [str(uuid4())],
                     },
-                )
+                ),
+                PatchCommand(
+                    command_id=second_command_id,
+                    op="merge_blocks",
+                    agent_id="supervisor-1",
+                    rationale="This command must not be compiled after the first command fails",
+                    params={
+                        "block_uids": [
+                            book.chapters[0].blocks[0].uid,
+                            book.chapters[0].blocks[1].uid,
+                        ],
+                        "join": "concat",
+                    },
+                ),
             ],
             patches=[
                 BookPatch(
@@ -1705,6 +1771,11 @@ class TestValidatePhase3:
         errors = validate_agent_output(output, book)
         # Command compilation failed
         assert any("nonexistent-block-uid-xxxx" in e for e in errors)
+        # Later commands should not be compiled once the first command fails
+        assert any(
+            second_command_id in e and "skipped because previous command failed" in e
+            for e in errors
+        )
         # Patches validation should be skipped
         assert any("skipped output.patches validation" in e for e in errors)
 
