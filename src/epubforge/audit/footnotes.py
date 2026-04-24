@@ -108,6 +108,19 @@ def detect_footnote_issues(book: Book) -> AuditBundle:
     for ref in footnotes:
         block = ref.block
         assert isinstance(block, Footnote)
+        # Empty callout string means no marker symbol was extracted
+        if not block.callout:
+            issues.append(
+                AuditIssue(
+                    code="footnote.empty_callout_body",
+                    page=block.provenance.page,
+                    block_index=ref.block_idx,
+                    chapter_uid=ref.chapter.uid,
+                    block_uid=block.uid,
+                    message="footnote body has an empty callout string — marker cannot be resolved",
+                    note_kind="unknown_callout",
+                )
+            )
         key = (block.provenance.page, block.callout)
         has_marker = key in marker_map
         if block.paired and block.orphan:

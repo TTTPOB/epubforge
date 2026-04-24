@@ -51,13 +51,64 @@ def _modal_width(tbody_html: str) -> int | None:
 
 
 def detect_table_merge_issues(book: Book) -> AuditBundle:
-    """Detect cross-page merge structural anomalies across all Table blocks."""
+    """Detect cross-page merge structural anomalies across all Table blocks.
+
+    Checks only *already-set* metadata fields for consistency — does NOT auto-identify
+    potential continuation candidates from structural inference.
+    """
     issues: list[AuditIssue] = []
 
     for ref in find_blocks(book, kinds={"table"}):
         block = ref.block
         assert isinstance(block, Table)
 
+        # --- merge_record / multi_page consistency (explicit metadata only) ---
+        if block.multi_page and block.merge_record is None:
+            issues.append(
+                AuditIssue(
+                    code="table.merge_record_missing",
+                    page=block.provenance.page,
+                    block_index=ref.block_idx,
+                    chapter_uid=ref.chapter.uid,
+                    block_uid=block.uid,
+                    message=(
+                        f"multi_page=True but merge_record is None "
+                        f"(block_uid={block.uid!r}); merge provenance was not recorded"
+                    ),
+                )
+            )
+        if block.merge_record is not None and not block.multi_page:
+            issues.append(
+                AuditIssue(
+                    code="table.merge_record_without_multi_page",
+                    page=block.provenance.page,
+                    block_index=ref.block_idx,
+                    chapter_uid=ref.chapter.uid,
+                    block_uid=block.uid,
+                    message=(
+                        f"merge_record is set but multi_page=False "
+                        f"(block_uid={block.uid!r}); inconsistent merge metadata"
+                    ),
+                )
+            )
+        if block.multi_page and block.continuation:
+            issues.append(
+                AuditIssue(
+                    code="table.merge_multi_page_and_continuation",
+                    page=block.provenance.page,
+                    block_index=ref.block_idx,
+                    chapter_uid=ref.chapter.uid,
+                    block_uid=block.uid,
+                    message=(
+                        f"table has both multi_page=True and continuation=True "
+                        f"(block_uid={block.uid!r}); a merged table must not also be a continuation"
+                    ),
+                )
+            )
+        if block.merge_record is not None:
+            _check_merge_record_alignment(block, ref.block_idx, ref.chapter.uid, issues)
+
+        # --- HTML structure checks ---
         if block.multi_page:
             _check_multi_page(block, ref.block_idx, ref.chapter.uid, issues)
         elif block.continuation:
@@ -77,6 +128,56 @@ def detect_table_merge_issues(book: Book) -> AuditBundle:
             )
 
     return AuditBundle(issues=tuple(issues))
+
+
+def _check_merge_record_alignment(
+    block: Table,
+    block_idx: int,
+    chapter_uid: str | None,
+    issues: list[AuditIssue],
+) -> None:
+    """Check that merge_record arrays are aligned and represent a valid merge."""
+    record = block.merge_record
+    assert record is not None
+
+    lengths = {
+        "segment_html": len(record.segment_html),
+        "segment_pages": len(record.segment_pages),
+        "segment_order": len(record.segment_order),
+        "column_widths": len(record.column_widths),
+    }
+    if len(set(lengths.values())) > 1:
+        mismatches = ", ".join(f"{k}={v}" for k, v in lengths.items())
+        issues.append(
+            AuditIssue(
+                code="table.merge_record_arrays_misaligned",
+                page=block.provenance.page,
+                block_index=block_idx,
+                chapter_uid=chapter_uid,
+                block_uid=block.uid,
+                message=(
+                    f"merge_record arrays have inconsistent lengths: {mismatches} "
+                    f"(block_uid={block.uid!r})"
+                ),
+            )
+        )
+        return  # skip length check when arrays are already misaligned
+
+    segment_count = lengths["segment_html"]
+    if segment_count < 2:
+        issues.append(
+            AuditIssue(
+                code="table.merge_record_too_few_segments",
+                page=block.provenance.page,
+                block_index=block_idx,
+                chapter_uid=chapter_uid,
+                block_uid=block.uid,
+                message=(
+                    f"merge_record has {segment_count} segment(s); "
+                    f"a valid merge requires at least 2 (block_uid={block.uid!r})"
+                ),
+            )
+        )
 
 
 def _check_multi_page(

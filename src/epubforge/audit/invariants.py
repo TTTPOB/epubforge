@@ -9,6 +9,18 @@ from epubforge.query import iter_blocks
 from epubforge.ir.semantic import Book
 
 
+_DRAFT_EXTRACTION_TITLE = "Draft extraction"
+
+
+def _is_single_draft_chapter(book: Book) -> bool:
+    """Return True when the book contains a single chapter titled 'Draft extraction'.
+
+    A skip-VLM evidence draft may legitimately have a single unsplit chapter.
+    This is valid — the invariant detector must not treat it as an error.
+    """
+    return len(book.chapters) == 1 and book.chapters[0].title == _DRAFT_EXTRACTION_TITLE
+
+
 def detect_invariant_issues(book: Book) -> AuditBundle:
     issues: list[AuditIssue] = []
     chapter_uids = [chapter.uid for chapter in book.chapters if chapter.uid]
@@ -73,4 +85,4 @@ def detect_invariant_issues(book: Book) -> AuditBundle:
     return AuditBundle(issues=tuple(issues))
 
 
-__all__ = ["detect_invariant_issues"]
+__all__ = ["detect_invariant_issues", "_is_single_draft_chapter"]

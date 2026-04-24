@@ -11,7 +11,8 @@ from pydantic import Field, field_validator, model_validator
 from epubforge.audit import DASH_CHAR_LABELS, AuditBundle, DashInventoryChapter, run_all_detectors
 from epubforge.editor._validators import StrictModel, require_non_empty
 from epubforge.editor.memory import EditMemory, OpenQuestion
-from epubforge.ir.semantic import AuditNote, Book
+from epubforge.ir.semantic import AuditNote, Book, Paragraph, Table
+from epubforge.query import iter_blocks
 
 
 def canonical_issue_key(issue: AuditNote) -> str:
@@ -60,7 +61,15 @@ def _resolve_chapter_uids(*, book: Book | None, chapter_uids: list[str] | None) 
 
 
 class Hint(StrictModel):
-    kind: Literal["needs_scan", "style_inconsistency", "unusual_density", "open_question", "convergence"]
+    kind: Literal[
+        "needs_scan",
+        "style_inconsistency",
+        "unusual_density",
+        "open_question",
+        "convergence",
+        "candidate_review",
+        "table_merge_pending",
+    ]
     severity: Literal["info", "warn"] = "info"
     message: str
     scope: Literal["book", "chapter", "block"]
@@ -199,6 +208,93 @@ def _unusual_density_hints(bundle: AuditBundle) -> list[Hint]:
 
 def _detector_hints(bundle: AuditBundle) -> list[Hint]:
     return [*_style_inconsistency_hints(bundle), *_unusual_density_hints(bundle)]
+
+
+def _skip_vlm_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
+    """Emit info-level hints when the book was produced by the skip-VLM path.
+
+    These are never errors — they guide scanner/fixer agents toward work that
+    remains after mechanical evidence-draft extraction.
+    """
+    hints: list[Hint] = []
+
+    # Map each block to its chapter uid so we can associate pages with chapters.
+    page_to_chapter_uid: dict[int, str | None] = {}
+    for ref in iter_blocks(book):
+        page = ref.block.provenance.page
+        page_to_chapter_uid.setdefault(page, ref.chapter.uid)
+
+    # needs_scan for chapters that cover complex pages
+    complex_page_set = set(complex_pages)
+    seen_chapter_uids: set[str] = set()
+    for page in sorted(complex_page_set):
+        chapter_uid = page_to_chapter_uid.get(page)
+        if chapter_uid is None or chapter_uid in seen_chapter_uids:
+            continue
+        seen_chapter_uids.add(chapter_uid)
+        hints.append(
+            Hint(
+                kind="needs_scan",
+                severity="info",
+                message=(
+                    f"{chapter_uid} 包含复杂页面（如第 {page} 页），"
+                    "skip-VLM 未做 VLM 语义提取，建议开 scanner subagent 仔细核查。"
+                ),
+                scope="chapter",
+                chapter_uid=chapter_uid,
+                suggested_subagent_type="scanner",
+            )
+        )
+
+    # candidate_review hints for docling_*_candidate paragraph blocks
+    for ref in iter_blocks(book):
+        block = ref.block
+        if not isinstance(block, Paragraph):
+            continue
+        if not block.role.startswith("docling_") or not block.role.endswith("_candidate"):
+            continue
+        if ref.chapter.uid is None or block.uid is None:
+            continue
+        hints.append(
+            Hint(
+                kind="candidate_review",
+                severity="info",
+                message=(
+                    f"block {block.uid!r} has candidate role {block.role!r} — "
+                    "needs scanner/fixer review before semantic promotion"
+                ),
+                scope="block",
+                chapter_uid=ref.chapter.uid,
+                block_uid=block.uid,
+                suggested_subagent_type="fixer",
+            )
+        )
+
+    # table_merge_pending: VLM-sourced Table with continuation=True but multi_page=False
+    for ref in iter_blocks(book):
+        block = ref.block
+        if not isinstance(block, Table):
+            continue
+        if not block.continuation or block.multi_page:
+            continue
+        if ref.chapter.uid is None or block.uid is None:
+            continue
+        hints.append(
+            Hint(
+                kind="table_merge_pending",
+                severity="info",
+                message=(
+                    f"table {block.uid!r} has continuation=True but multi_page=False — "
+                    "assembler did not find a predecessor; manual merge may be needed"
+                ),
+                scope="block",
+                chapter_uid=ref.chapter.uid,
+                block_uid=block.uid,
+                suggested_subagent_type="fixer",
+            )
+        )
+
+    return hints
 
 
 def _convention_signature(memory: EditMemory) -> dict[str, tuple[str, float]]:
@@ -369,14 +465,18 @@ def build_doctor_report(
 ) -> DoctorReport:
     resolved_chapter_uids = _resolve_chapter_uids(book=book, chapter_uids=chapter_uids)
     auto_detector_hints: list[Hint] = []
+    skip_vlm_hint_list: list[Hint] = []
     if book is not None:
         bundle = run_all_detectors(book)
         auto_detector_hints = _detector_hints(bundle)
         if issues is None:
             issues = bundle.to_audit_notes()
+        # Emit skip-VLM guidance hints when extraction was done without VLM
+        if book.extraction.stage3_mode == "skip_vlm":
+            skip_vlm_hint_list = _skip_vlm_hints(book, book.extraction.complex_pages)
     if issues is None:
         raise ValueError("issues or book must be provided")
-    hints = [*(detector_hints or []), *auto_detector_hints, *_core_hints(memory, resolved_chapter_uids)]
+    hints = [*(detector_hints or []), *auto_detector_hints, *skip_vlm_hint_list, *_core_hints(memory, resolved_chapter_uids)]
     delta = compute_doctor_delta(
         memory=memory,
         hints=hints,
