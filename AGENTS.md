@@ -282,6 +282,7 @@ EPUBFORGE_EXTRACT_VLM_DPI                   extract.vlm_dpi
 EPUBFORGE_EXTRACT_SKIP_VLM                  extract.skip_vlm  (1/true/yes/on = True)
 EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES       extract.max_vlm_batch_pages
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
+EPUBFORGE_EXTRACT_OCR_ENABLED              extract.ocr.enabled  (1/true/yes/on = True)
 ```
 
 ### Test-only / scratch subprocess injection
