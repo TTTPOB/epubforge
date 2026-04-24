@@ -56,7 +56,6 @@ prompt 里只是文字要求 agent 输出：
 
 - JSON 语法不合法。
 - 字段名漂移。
-- `base_version` 过期。
 - uid 不存在。
 - 修改范围越过 chapter lease。
 - scanner/fixer/reviewer 输出形状不一致。
@@ -113,7 +112,6 @@ class AgentOutput(BaseModel):
     kind: Literal["scanner", "fixer", "reviewer", "supervisor"]
     agent_id: str
     chapter_uid: str | None = None
-    base_version: int
     created_at: str
     updated_at: str
     patches: list[BookPatch] = []
@@ -178,7 +176,6 @@ epubforge editor agent-output submit work/book <output-id>
 - output 文件是合法 JSON。
 - 顶层 schema 合法。
 - `kind`、`agent_id`、`chapter_uid` 合法。
-- `base_version == current book.op_log_version`，或提供明确的 stale 处理。
 - `commands` 全部是合法 `PatchCommand`，并能编译成 `BookPatch`。
 - `patches` 全部是合法 `BookPatch`。
 - `memory_patches` 全部是合法 `MemoryPatch`。
@@ -228,7 +225,6 @@ epubforge editor agent-output submit work/book <output-id> --apply
 class BookPatch(BaseModel):
     patch_id: str
     agent_id: str
-    base_version: int
     scope: PatchScope
     changes: list[IRChange]
     rationale: str
@@ -334,9 +330,8 @@ apply patch
 至少需要检查：
 
 - patch schema 合法。
-- `base_version` 与当前版本兼容。
 - UID 存在且唯一。
-- `old` / `old_node` 与当前 Book 匹配，充当 precondition。
+- `old` / `old_node` 与当前 Book 匹配，充当 precondition（字段级冲突检测由此实现）。
 - 修改范围匹配 lease / patch scope。
 - field 是否允许被该 agent 修改。
 - 新 node 带有合法 provenance。
@@ -813,6 +808,16 @@ Expected behavior:
 
 不需要考虑工期、release cadence、backward compatibility。可以大刀阔斧重写。
 
+### D6. 移除 op_log_version / base_version
+
+Git worktree 提供版本控制，BookPatch 的 `old` 值 precondition 提供字段级冲突检测，不需要额外的版本号。
+
+后果：
+- `AgentOutput` 和 `BookPatch` 均不携带 `base_version` 字段。
+- Book 模型不再维护 `op_log_version` 字段。
+- validate 流程不做 `base_version == op_log_version` 检查；冲突检测依赖 apply 时的 `old` / `old_node` precondition。
+- 版本隔离由 Git branch/worktree（D1）承担。
+
 ## Open Questions (Remaining)
 
 - Should scanner be allowed to submit any low-level patch, or only low-risk intra-chapter PatchCommands?
@@ -850,9 +855,9 @@ Expected behavior:
 
 - Add `editor/agent_output.py`: define `AgentOutput` model.
 - Add CLI commands: `agent-output begin`, `add-note`, `add-question`, `add-command`, `add-patch`, `add-memory-patch`, `validate`, `submit`.
-- `validate` checks: schema, base_version, UID existence, scope.
+- `validate` checks: schema, UID existence, old-value preconditions, scope.
 - `submit --apply`: validate → compile commands → apply patches → archive output.
-- Tests: malformed JSON, stale base_version, invalid uid, full submit round-trip.
+- Tests: malformed JSON, precondition mismatch, invalid uid, full submit round-trip.
 
 ### Phase 3: PatchCommand → BookPatch compilation
 
