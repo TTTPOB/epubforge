@@ -1,4 +1,4 @@
-"""Stage 3 — unified VLM extraction with cross-unit pending_tail and BookMemory."""
+"""Stage 3 — unified VLM extraction with mechanical batching and evidence index."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from epubforge.ir.book_memory import BookMemory
 from epubforge.ir.semantic import VLMGroupOutput
 from epubforge.llm.client import LLMClient, Message
 from epubforge.llm.prompts import VLM_SYSTEM
+from epubforge.stage3_artifacts import EvidenceIndex, Stage3ExtractionResult
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +29,6 @@ _SKIP_LABELS = frozenset({
     DocItemLabel.PAGE_HEADER,
     DocItemLabel.PAGE_FOOTER,
 })
-_TABLE_LIKE_LABELS = frozenset({DocItemLabel.TABLE, DocItemLabel.PICTURE})
-_BOTTOM_NOISE_LABELS = frozenset({DocItemLabel.FOOTNOTE, DocItemLabel.LIST_ITEM})
 
 
 class _AnchorItem(TypedDict):
@@ -40,7 +39,8 @@ class _AnchorItem(TypedDict):
 
 @dataclass
 class VLMGroupUnit:
-    kind: str = "vlm_group"
+    kind: str = "vlm_batch"
+    contract_version: int = 3
     pages: list[int] = field(default_factory=list)
     page_kinds: list[str] = field(default_factory=list)  # "simple" or "complex" per page
 
@@ -57,29 +57,33 @@ def extract(
     *,
     force: bool = False,
     page_filter: set[int] | None = None,
-) -> None:
-    """Stage 3: all pages go through VLM with rolling BookMemory."""
+) -> Stage3ExtractionResult:
+    """Stage 3: all selected non-TOC pages go through VLM with rolling BookMemory."""
     doc = DoclingDocument.load_from_json(raw_path)
     pages_data: list[dict[str, Any]] = json.loads(
         pages_path.read_text(encoding="utf-8")
     )["pages"]
+
+    # Collect page metadata before filtering for result
+    all_toc_pages = [p["page"] for p in pages_data if p["kind"] == "toc"]
+    all_complex_pages = [p["page"] for p in pages_data if p["kind"] == "complex"]
+
     if page_filter is not None:
         pages_data = [p for p in pages_data if p["page"] in page_filter]
 
-    pages_data = [p for p in pages_data if p["kind"] != "toc"]
+    selected_pages_data = [p for p in pages_data if p["kind"] != "toc"]
+    selected_pages = [p["page"] for p in selected_pages_data]
+
     anchors = _build_anchors(doc)
 
     units = _build_units(
-        pages_data,
+        selected_pages_data,
         anchors,
         max_vlm_batch=cfg.extract.max_vlm_batch_pages,
     )
 
     vlm_client = LLMClient(cfg, use_vlm=True)
     fitz_doc = fitz.open(str(pdf_path))
-
-    pending_tail: dict[str, Any] | None = None
-    pending_footnote: dict[str, Any] | None = None
 
     book_memory = BookMemory()
     book_memory_path = out_dir / "book_memory.json"
@@ -92,6 +96,7 @@ def extract(
             log.warning("extract: failed to load book_memory.json — starting fresh")
 
     all_audit_notes: list[dict[str, Any]] = []
+    unit_files: list[Path] = []
 
     all_pages = sorted({p for u in units for p in u.pages})
     log.info(
@@ -103,11 +108,10 @@ def extract(
     try:
         for idx, unit in enumerate(units):
             out_path = out_dir / f"unit_{idx:04d}.json"
+            unit_files.append(out_path)
 
             if out_path.exists() and not force:
                 data = json.loads(out_path.read_text(encoding="utf-8"))
-                blocks = data.get("blocks", [])
-                pending_tail, pending_footnote = _extract_pending_context(blocks, unit)
                 if "audit_notes" in data:
                     all_audit_notes.extend(data["audit_notes"])
                 log.info(
@@ -122,8 +126,8 @@ def extract(
             )
 
             memory_arg = book_memory if cfg.extract.enable_book_memory else None
-            blocks, flag, fn_flag, unit_audit_notes, new_memory = _process_vlm_unit(
-                unit, fitz_doc, anchors, pending_tail, pending_footnote,
+            blocks, unit_audit_notes, new_memory = _process_vlm_unit(
+                unit, fitz_doc, anchors,
                 vlm_client, memory_arg, cfg.extract.vlm_dpi,
             )
 
@@ -134,14 +138,43 @@ def extract(
                 )
 
             all_audit_notes.extend(unit_audit_notes)
-            _write_unit(out_path, unit, blocks, flag, fn_flag, unit_audit_notes)
-            pending_tail, pending_footnote = _extract_pending_context(blocks, unit)
+            _write_unit(out_path, unit, blocks, unit_audit_notes)
     finally:
         fitz_doc.close()
 
+    # Always write sidecars
     audit_path = out_dir / "audit_notes.json"
     audit_path.write_text(
         json.dumps(all_audit_notes, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    # Write book_memory.json (ensure it always exists even if memory disabled)
+    if not book_memory_path.exists():
+        book_memory_path.write_text(
+            book_memory.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+    # Build and write evidence index from Docling data
+    evidence_index_path = out_dir / "evidence_index.json"
+    evidence_index = _build_evidence_index(
+        doc=doc,
+        pages_data=selected_pages_data,
+        raw_path=raw_path,
+        artifact_id=out_dir.name,
+    )
+    evidence_index_path.write_text(
+        evidence_index.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+    return Stage3ExtractionResult(
+        mode="vlm",
+        unit_files=unit_files,
+        audit_notes_path=audit_path,
+        book_memory_path=book_memory_path,
+        evidence_index_path=evidence_index_path,
+        selected_pages=sorted(selected_pages),
+        toc_pages=sorted(all_toc_pages),
+        complex_pages=sorted(all_complex_pages),
     )
 
 
@@ -150,7 +183,13 @@ def _build_units(
     anchors: dict[int, list[_AnchorItem]],
     max_vlm_batch: int = 4,
 ) -> list[VLMGroupUnit]:
-    """Build VLM processing units by batching consecutive pages up to max_vlm_batch."""
+    """Build VLM processing units by batching consecutive pages up to max_vlm_batch.
+
+    Pages are split into new chunks when:
+    - The batch reaches max_vlm_batch size.
+    - There is a gap (non-adjacent pages) in the --pages filter.
+    No heuristics about labels or page content affect batching.
+    """
     units: list[VLMGroupUnit] = []
 
     for page_info in pages_data:
@@ -174,48 +213,14 @@ def _build_units(
     return units
 
 
-def _page_trailing_element_label(
-    items: list[_AnchorItem],
-) -> DocItemLabel | None:
-    """Return the label of the last meaningful element on the page.
-
-    'Bottom 25%' footnote/list_items are treated as noise and excluded
-    so that a paragraph above them (the real trailing content) is visible.
-    """
-    valid = [a for a in items if a["label"] not in _SKIP_LABELS and a["bbox"] is not None]
-    if not valid:
-        return None
-
-    # In docling PDF-native coords: t = top y (larger = higher on page)
-    t_vals = [a["bbox"].t for a in valid]  # type: ignore[union-attr]
-    min_t, max_t = min(t_vals), max(t_vals)
-    span = max_t - min_t
-
-    # Bottom of page = small t. Bottom 25% threshold from the minimum.
-    bottom_thresh = min_t + 0.25 * span if span > 0 else min_t
-
-    filtered = [
-        a for a in valid
-        if not (a["label"] in _BOTTOM_NOISE_LABELS and a["bbox"].t <= bottom_thresh)  # type: ignore[union-attr]
-    ]
-    if not filtered:
-        return None
-
-    # Last in reading order = smallest t (lowest on page in PDF y-up coords)
-    last = min(filtered, key=lambda a: a["bbox"].t)  # type: ignore[union-attr]
-    return last["label"]
-
-
 def _process_vlm_unit(
     unit: VLMGroupUnit,
     fitz_doc: fitz.Document,
     anchors: dict[int, list[_AnchorItem]],
-    pending_tail: dict[str, Any] | None,
-    pending_footnote: dict[str, Any] | None,
     client: LLMClient,
     book_memory: BookMemory | None,
     dpi: int,
-) -> tuple[list[dict[str, Any]], bool, bool, list[dict[str, Any]], BookMemory | None]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], BookMemory | None]:
     content: list[dict[str, Any]] = []
 
     if book_memory is not None:
@@ -226,27 +231,30 @@ def _process_vlm_unit(
         )
         content.append({"type": "text", "text": memory_text})
 
-    for i, pno in enumerate(unit.pages):
+    for pno in unit.pages:
         anchor_text = _format_anchors(anchors.get(pno, []))
         page_text = f"=== Page {pno} ===\nDetected text anchors:\n{anchor_text}"
-        if i == 0:
-            page_text = _prepend_pending(page_text, pending_tail, pending_footnote)
         content.append({"type": "text", "text": page_text})
         img_b64, mime = _render_page(fitz_doc, pno, dpi)
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}})
 
     if len(unit.pages) > 1:
-        pages_str = " and ".join(str(p) for p in unit.pages)
+        pages_str = ", ".join(str(p) for p in unit.pages)
         final_instruction = (
-            f"Analyse pages {pages_str}. These pages may share a continuing table — "
-            f"if a table on page {unit.pages[1]} (or later) continues from the previous page, "
-            f"set continuation=true and omit the column header row. "
+            f"These are selected adjacent pages: {pages_str}. "
+            f"Analyse each page from the images and Docling evidence anchors provided. "
+            f"Do not assume any content continues from a previous page — judge continuations "
+            f"(such as tables, paragraphs, or footnotes) solely from the visual content and "
+            f"evidence on these pages. "
             f"Return one VLMPageOutput per input page in order. "
             f"Update updated_book_memory with any new facts observed across these pages."
         )
     else:
         final_instruction = (
-            f"Analyse page {unit.pages[0]} and return the structured JSON. "
+            f"Analyse page {unit.pages[0]} from the image and Docling evidence anchors provided. "
+            f"Do not assume any content continues from a previous page — judge from the visual "
+            f"content and evidence on this page only. "
+            f"Return the structured JSON. "
             f"Update updated_book_memory with any new facts observed on this page."
         )
     content.append({"type": "text", "text": final_instruction})
@@ -260,20 +268,16 @@ def _process_vlm_unit(
         result = client.chat_parsed(messages, response_format=VLMGroupOutput)
     except Exception as exc:
         log.warning("VLM call failed for pages %s: %s", unit.pages, exc)
-        return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], False, False, [], None
+        return [{"kind": "paragraph", "text": f"[VLM error: {exc}]"}], [], None
 
     if not result.pages:
-        return [], False, False, [], result.updated_book_memory
+        return [], [], result.updated_book_memory
 
     if len(result.pages) < len(unit.pages):
         log.warning(
             "VLM returned %d pages for %d-page unit %s",
             len(result.pages), len(unit.pages), unit.pages,
         )
-
-    first_page_result = result.pages[0]
-    flag = first_page_result.first_block_continues_prev_tail
-    fn_flag = first_page_result.first_footnote_continues_prev_footnote
 
     blocks: list[dict[str, Any]] = []
     unit_audit_notes: list[dict[str, Any]] = []
@@ -286,74 +290,25 @@ def _process_vlm_unit(
         for note in page_result.audit_notes:
             unit_audit_notes.append({**note.model_dump(), "page": pno})
 
-    new_memory = result.updated_book_memory if result.updated_book_memory.model_fields_set else None
-    # Always accept the VLM's updated memory (even if it's the default empty object)
     new_memory = result.updated_book_memory
 
-    return blocks, flag, fn_flag, unit_audit_notes, new_memory
-
-
-def _extract_pending_context(
-    blocks: list[dict[str, Any]],
-    unit: VLMGroupUnit,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Return (pending_tail, pending_footnote) for the next unit."""
-    last_page = unit.pages[-1]
-    pending_tail: dict[str, Any] | None = None
-    pending_footnote: dict[str, Any] | None = None
-
-    for i in range(len(blocks) - 1, -1, -1):
-        b = blocks[i]
-        kind = b.get("kind", "")
-        if kind == "footnote":
-            if pending_footnote is None:
-                pending_footnote = {
-                    "callout": b.get("callout", ""),
-                    "text": b.get("text", ""),
-                    "source_page": last_page,
-                }
-            continue
-        if kind == "paragraph":
-            pending_tail = {"text": b.get("text", ""), "source_page": last_page}
-        break
-
-    return pending_tail, pending_footnote
-
-
-def _prepend_pending(
-    user_text: str,
-    pending_tail: dict[str, Any] | None,
-    pending_footnote: dict[str, Any] | None,
-) -> str:
-    prefix = ""
-    if pending_footnote:
-        callout = pending_footnote["callout"]
-        prefix += (
-            f"[PENDING_FOOTNOTE callout={callout} page={pending_footnote['source_page']}]\n"
-            f"{pending_footnote['text']}\n"
-            f"[/PENDING_FOOTNOTE]\n\n"
-        )
-    if pending_tail:
-        prefix += (
-            f"[PENDING_TAIL page={pending_tail['source_page']}]\n"
-            f"{pending_tail['text']}\n"
-            f"[/PENDING_TAIL]\n\n"
-        )
-    return prefix + user_text if prefix else user_text
+    return blocks, unit_audit_notes, new_memory
 
 
 def _write_unit(
     out_path: Path,
     unit: VLMGroupUnit,
     blocks: list[dict[str, Any]],
-    flag: bool,
-    fn_flag: bool = False,
     audit_notes: list[dict[str, Any]] | None = None,
 ) -> None:
     data = {
-        "unit": {"kind": unit.kind, "pages": unit.pages},
-        "first_block_continues_prev_tail": flag,
-        "first_footnote_continues_prev_footnote": fn_flag,
+        "unit": {
+            "kind": unit.kind,
+            "pages": unit.pages,
+            "page_kinds": unit.page_kinds,
+            "extractor": "vlm",
+            "contract_version": unit.contract_version,
+        },
         "blocks": blocks,
         "audit_notes": audit_notes or [],
     }
@@ -399,3 +354,81 @@ def _render_page(doc: fitz.Document, page_no: int, dpi: int) -> tuple[str, str]:
     pix = page.get_pixmap(matrix=mat)
     buf = io.BytesIO(pix.tobytes("jpg", jpg_quality=75))
     return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+
+
+def _build_evidence_index(
+    doc: DoclingDocument,
+    pages_data: list[dict[str, Any]],
+    raw_path: Path,
+    artifact_id: str,
+) -> EvidenceIndex:
+    """Build a unified evidence index from Docling data for selected non-TOC pages."""
+    import itertools
+
+    selected_page_nos = {p["page"] for p in pages_data}
+    page_kind_map = {p["page"]: p["kind"] for p in pages_data}
+
+    # Collect all items indexed by page
+    page_items: dict[int, list[dict[str, Any]]] = {pno: [] for pno in selected_page_nos}
+    refs: dict[str, dict[str, Any]] = {}
+
+    for item in itertools.chain(
+        doc.texts, doc.tables, doc.pictures, doc.key_value_items, doc.form_items
+    ):
+        ref = getattr(item, "self_ref", None) or getattr(item, "_ref", None)
+
+        text = getattr(item, "text", "")
+        label = item.label
+        label_str = label.value if isinstance(label, DocItemLabel) else str(label)
+
+        for prov in item.prov:
+            pno = prov.page_no
+            if pno not in selected_page_nos:
+                continue
+
+            bbox = prov.bbox
+            bbox_list: list[float] | None = None
+            if bbox is not None:
+                bbox_list = [bbox.l, bbox.t, bbox.r, bbox.b]
+
+            item_index = len(page_items[pno])
+            entry: dict[str, Any] = {
+                "ref": ref,
+                "page": pno,
+                "source": "docling",
+                "label": label_str,
+                "text": text,
+                "html": None,
+                "bbox": bbox_list,
+                "image_ref": None,
+                "marker": None,
+                "caption_refs": [],
+                "footnote_refs": [],
+                "reference_refs": [],
+                "resolved_refs": [],
+            }
+            page_items[pno].append(entry)
+
+            if ref is not None:
+                refs[ref] = {"page": pno, "item_index": item_index}
+
+    pages_dict: dict[str, Any] = {}
+    for pno in sorted(selected_page_nos):
+        pages_dict[str(pno)] = {
+            "page": pno,
+            "page_kind": page_kind_map.get(pno, "unknown"),
+            "items": page_items[pno],
+            "vlm_blocks": [],
+        }
+
+    # Use artifact_id as-is; source_pdf is relative to work dir
+    source_pdf_rel = "source/source.pdf"
+
+    return EvidenceIndex(
+        schema_version=3,
+        artifact_id=artifact_id,
+        mode="vlm",
+        source_pdf=source_pdf_rel,
+        pages=pages_dict,
+        refs=refs,
+    )

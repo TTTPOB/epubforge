@@ -94,65 +94,6 @@ _FOOTNOTE_CORE_RULES = """\
 - It is better to emit a footnote block with an empty body than to silently drop a callout.\
 """
 
-_PENDING_FOOTNOTE_RULES = """\
-## Pending footnote tail from previous page
-The user message MAY begin with a [PENDING_FOOTNOTE callout=X page=N] block. That is the
-last footnote of the previous page whose body text did NOT end with sentence-closing
-punctuation — meaning it continues on this page.
-
-Look at this page's very first footnote-like content (text with no leading callout marker
-that starts mid-sentence):
-
-- CONTINUE — ALL of:
-  - It has NO leading callout marker (no ①②③, [1], superscript digit, etc.).
-  - Its text reads as a natural mid-sentence continuation of the pending tail.
-  In that case:
-  - Set `first_footnote_continues_prev_footnote=true`.
-  - Emit that content as a `footnote` block with `"callout": ""` and `"text"` = ONLY the
-    continuation portion. The caller will append it to the pending footnote. Do NOT repeat
-    the pending tail text.
-
-- SEPARATE — set first_footnote_continues_prev_footnote=false when ANY of:
-  - This page's first footnote has its OWN callout marker (①, ②, [1], *, etc.)
-    AND that callout differs from the pending tail's callout. A new callout cannot
-    continue a previous footnote.
-  - The [PENDING_FOOTNOTE] text already reads as a complete, self-contained sentence
-    (ends with terminal punctuation and no dangling clause). A complete note cannot
-    continue. Judge this by reading the tail, not by punctuation alone — some real
-    continuations can start mid-clause after an abbreviation period (e.g. "Dr.", "U.S.").
-  - The content on this page clearly starts a new topic unrelated to the pending tail.
-  In that case, process every footnote on this page normally (with their actual callout markers).
-
-Never emit any [PENDING_FOOTNOTE ...] marker in your output text.\
-"""
-
-_PENDING_TAIL_RULES = """\
-## Pending tail from previous page
-The user message MAY begin with a [PENDING_TAIL page=N] block. That is the last paragraph of
-the previous page, passed here so you can decide whether this page continues it.
-The tail MAY or MAY NOT end with sentence-ending punctuation — do NOT rely on punctuation alone.
-
-Decide based on structural and visual cues of THIS page's first content block:
-
-- CONTINUE — ALL of:
-  - First block is body prose with NO new-paragraph indent.
-  - First block is NOT a heading / list item / figure caption / table / equation.
-  - Appending its text to the tail reads as one continuous paragraph.
-  In that case:
-  - Set `first_block_continues_prev_tail=true`.
-  - Your FIRST output block is a Paragraph whose `text` is ONLY the continuation portion
-    (everything that completes the tail paragraph) — do NOT repeat the tail text. The caller
-    will concatenate them.
-  - After the continuation block, emit the rest of the page normally.
-
-- SEPARATE — any of the above fails:
-  - Set `first_block_continues_prev_tail=false`.
-  - Process this page entirely normally. The tail stays with the previous page in its own
-    output — you do not need to re-emit it.
-
-Never emit any [PENDING_TAIL ...] marker in your output text.\
-"""
-
 # ---------------------------------------------------------------------------
 # Composed prompts
 # ---------------------------------------------------------------------------
@@ -216,6 +157,8 @@ You are a document layout analyst. Given a PDF page image and a list of detected
 
 {_FOOTNOTE_CORE_RULES}
 
+Judge paragraph and footnote continuations solely from visual content and Docling evidence.
+
 ## Table title and attribution
 - The text line immediately ABOVE a table (e.g. "表2-7 xxx统计") is the table title — put it \
   in `table_title`, not as a paragraph block.
@@ -259,10 +202,6 @@ When a table on this page is the continuation of a table that STARTED on a previ
 A table that starts fresh on this page (even if it also ends on the next \
 page) must have `"continuation": false` or omit the field, and MUST include the full header.
 
-{_PENDING_FOOTNOTE_RULES}
-
-{_PENDING_TAIL_RULES}
-
 {_BOOK_MEMORY_VLM_RULES}
 
 ## Strict prohibitions
@@ -285,8 +224,6 @@ page) must have `"continuation": false` or omit the field, and MUST include the 
   "pages": [
     {{
       "page": <int>,
-      "first_block_continues_prev_tail": false,
-      "first_footnote_continues_prev_footnote": false,
       "blocks": [
         {{"kind": "paragraph",  "text": "...", "bbox": [x0, y0, x1, y1]}},
         {{"kind": "heading",    "text": "...", "level": 1, "bbox": [...]}},

@@ -257,8 +257,6 @@ class AuditNote(BaseModel):
 class VLMPageOutput(BaseModel):
     page: int
     blocks: list[VLMBlock]
-    first_block_continues_prev_tail: bool = False
-    first_footnote_continues_prev_footnote: bool = False
     audit_notes: list[AuditNote] = Field(default_factory=list)
 
 
