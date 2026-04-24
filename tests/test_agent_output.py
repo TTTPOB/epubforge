@@ -1816,3 +1816,165 @@ class TestValidatePhase3:
         # After merge, blocks[1] (Heading "Section A") is deleted; blocks[0] text updated
         block_uids_after = [b.uid for b in chapter_blocks]
         assert block_uid_2 not in block_uids_after
+
+    # -------------------------------------------------------------------
+    # WP8: Permission error paths (§11.2)
+    # -------------------------------------------------------------------
+
+    def test_fixer_submits_book_wide_split_chapter_rejected(self, initialized_work):
+        """Fixer with chapter_uid submitting a split_chapter (book-wide) is rejected."""
+        work, book = initialized_work
+        chapter_uid = book.chapters[0].uid
+
+        output = _make_agent_output(
+            kind="fixer",
+            agent_id="fixer-1",
+            chapter_uid=chapter_uid,
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="split_chapter",
+                    agent_id="fixer-1",
+                    rationale="Fixer trying to split chapter",
+                    params={
+                        "chapter_uid": book.chapters[0].uid,
+                        "split_at_block_uid": book.chapters[0].blocks[1].uid,
+                        "new_chapter_title": "New Chapter",
+                        "new_chapter_uid": str(uuid4()),
+                    },
+                )
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+        # fixer chapter-scoped output cannot contain book-wide patches
+        assert any(
+            "book-wide" in e or "scope.chapter_uid=None" in e
+            for e in errors
+        ), f"Expected book-wide scope rejection, got: {errors}"
+
+    def test_fixer_submits_cross_chapter_footnote_rejected(self, initialized_work):
+        """Fixer with chapter_uid submitting cross-chapter pair_footnote is rejected."""
+        work, book = initialized_work
+        chapter_uid = book.chapters[0].uid
+
+        # Build a book with fn in chapter 1 and source in chapter 2
+        prov = Provenance(page=1, source="passthrough")
+        cross_book = Book(
+            title="Cross Chapter",
+            chapters=[
+                Chapter(
+                    uid="ch-x1",
+                    title="Source Chapter",
+                    blocks=[
+                        Footnote(
+                            uid="fn-x",
+                            callout="1)",
+                            text="Cross footnote.",
+                            paired=False,
+                            orphan=False,
+                            provenance=prov,
+                        ),
+                    ],
+                ),
+                Chapter(
+                    uid="ch-x2",
+                    title="Target Chapter",
+                    blocks=[
+                        Paragraph(
+                            uid="p-x",
+                            text="See 1) for reference.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        output = _make_agent_output(
+            kind="fixer",
+            agent_id="fixer-1",
+            chapter_uid="ch-x1",  # fixer scoped to ch-1
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="pair_footnote",
+                    agent_id="fixer-1",
+                    rationale="Cross-chapter pair",
+                    params={
+                        "fn_block_uid": "fn-x",  # in ch-x1
+                        "source_block_uid": "p-x",  # in ch-x2 — cross-chapter!
+                    },
+                )
+            ],
+        )
+
+        errors = validate_agent_output(output, cross_book)
+        # Cross-chapter pair produces book-wide scope → fixer chapter-scoped rejects it
+        assert any(
+            "book-wide" in e or "scope.chapter_uid=None" in e
+            for e in errors
+        ), f"Expected book-wide scope rejection for cross-chapter footnote, got: {errors}"
+
+    # -------------------------------------------------------------------
+    # WP8: Command chain error path (§11.3)
+    # -------------------------------------------------------------------
+
+    def test_two_commands_first_fails_second_skipped(self, initialized_work):
+        """Two commands: first fails (nonexistent uid), second is skipped with message."""
+        work, book = initialized_work
+
+        cmd1_id = str(uuid4())
+        cmd2_id = str(uuid4())
+
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            commands=[
+                PatchCommand(
+                    command_id=cmd1_id,
+                    op="split_block",
+                    agent_id="supervisor-1",
+                    rationale="Will fail — nonexistent block",
+                    params={
+                        "block_uid": "nonexistent-block-uid-zzzz",
+                        "strategy": "at_sentence",
+                        "max_splits": 1,
+                        "new_block_uids": [str(uuid4())],
+                    },
+                ),
+                PatchCommand(
+                    command_id=cmd2_id,
+                    op="split_block",
+                    agent_id="supervisor-1",
+                    rationale="Should be skipped",
+                    params={
+                        "block_uid": "another-nonexistent-uid",
+                        "strategy": "at_sentence",
+                        "max_splits": 1,
+                        "new_block_uids": [str(uuid4())],
+                    },
+                ),
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+
+        # First command should have a "not found" error
+        assert any(
+            "nonexistent-block-uid-zzzz" in e
+            for e in errors
+        ), f"Expected first command error about nonexistent uid, got: {errors}"
+
+        # Second command should be skipped
+        assert any(
+            "skipped because previous command failed" in e
+            for e in errors
+        ), f"Expected second command skip message, got: {errors}"
+
+        # Patches validation should be skipped
+        assert any(
+            "skipped output.patches validation" in e
+            for e in errors
+        ), f"Expected patches skipped message, got: {errors}"

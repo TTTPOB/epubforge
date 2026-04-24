@@ -2989,3 +2989,244 @@ class TestSplitMergedTableCompiler:
         assert ch.blocks[1].uid == "seg-1"
         assert ch.blocks[2].uid == "seg-2"
         assert ch.blocks[3].uid == "post-blk"
+
+
+# ---------------------------------------------------------------------------
+# §21 WP8: SetFieldChange.old serialization consistency (§11.4)
+# ---------------------------------------------------------------------------
+
+
+class TestSetFieldOldSerialization:
+    """Verify SetFieldChange.old serialization matches Phase 1 apply comparison."""
+
+    def test_simple_text_old_serialization(self):
+        """Simple string text: old is the raw string value (no extra serialization)."""
+        book = _make_test_book()
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "p1",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": ["p-split"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-1")
+        set_field = patch.changes[0]
+        assert set_field.op == "set_field"
+        # old should be the exact original text
+        assert set_field.old == "Hello world. This is a test."
+
+    def test_cjk_text_old_serialization(self):
+        """CJK text: old serialization is the raw string (no transformation)."""
+        prov = _prov()
+        book = Book(
+            title="CJK Test",
+            chapters=[
+                Chapter(
+                    uid="ch-cjk",
+                    title="CJK",
+                    blocks=[
+                        Paragraph(
+                            uid="cj1",
+                            text="你好世界。这是测试。",
+                            role="body",
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "cj1",
+                "strategy": "at_text_match",
+                "text_match": "这是",
+                "max_splits": 1,
+                "new_block_uids": ["cj2"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-cjk")
+        set_field = patch.changes[0]
+        assert set_field.op == "set_field"
+        assert set_field.old == "你好世界。这是测试。"
+
+    def test_old_serialization_matches_apply_precondition(self):
+        """Compiler's SetFieldChange.old must match what apply_book_patch reads."""
+        from epubforge.editor.patches import _serialize_field_value as ser
+
+        prov = _prov()
+        book = Book(
+            title="Serialization Test",
+            chapters=[
+                Chapter(
+                    uid="ch-ser",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="ps",
+                            text="Original text.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "ps",
+                "strategy": "at_text_match",
+                "text_match": "text",
+                "max_splits": 1,
+                "new_block_uids": ["ps-new"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-ser")
+        set_field = patch.changes[0]
+
+        # Reconstruct what apply_book_patch would see as the "current" value
+        current_obj_value = book.chapters[0].blocks[0].text
+        expected_serialized = ser(current_obj_value)
+
+        assert set_field.old == expected_serialized
+        # The apply will then compare ser(current_value) == change.old → this must match
+        assert ser(current_obj_value) == set_field.old
+
+    def test_old_serialization_round_trips_through_apply(self):
+        """SetFieldChange.old from compiler makes apply_book_patch succeed."""
+        prov = _prov()
+        book = Book(
+            title="Roundtrip Test",
+            chapters=[
+                Chapter(
+                    uid="ch-rt",
+                    title="Ch",
+                    blocks=[
+                        Paragraph(
+                            uid="prt",
+                            text="First paragraph. Second sentence.",
+                            role="body",
+                            provenance=prov,
+                        ),
+                    ],
+                )
+            ],
+        )
+        cmd = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="test",
+            params={
+                "block_uid": "prt",
+                "strategy": "at_text_match",
+                "text_match": "Second",
+                "max_splits": 1,
+                "new_block_uids": ["prt-new"],
+            },
+        )
+        patch = compile_patch_command(book, cmd, output_kind="fixer", output_chapter_uid="ch-rt")
+        # Applying should succeed — the old precondition matches
+        new_book = apply_book_patch(book, patch)
+        assert len(new_book.chapters[0].blocks) == 2
+        assert new_book.chapters[0].blocks[0].text == "First paragraph. "  # type: ignore[union-attr]
+        assert new_book.chapters[0].blocks[1].text == "Second sentence."  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# §22 WP8: Performance baseline with 5000+ block fixture (§11.6)
+# ---------------------------------------------------------------------------
+
+
+class TestPerformanceBaseline:
+    """Performance baseline: evolving book deep-copy with 5000+ blocks."""
+
+    def test_evolving_book_compile_commands_under_2s(self):
+        """compile_patch_commands with 5000-block book and 2 commands should take < 2s."""
+        import time
+
+        from epubforge.editor.patches import apply_book_patch
+
+        prov = Provenance(page=1, source="passthrough")
+
+        # Build a book with 5000 blocks across 10 chapters
+        blocks_per_chapter = 500
+        chapter_count = 10
+        chapters = []
+        for ch_i in range(chapter_count):
+            blocks = [
+                Paragraph(
+                    uid=f"b-{ch_i}-{b_i}",
+                    text=f"Block {ch_i}-{b_i}: This is paragraph text for block {b_i} in chapter {ch_i}. "
+                    f"It has multiple sentences. For testing purposes.",
+                    role="body",
+                    provenance=prov,
+                )
+                for b_i in range(blocks_per_chapter)
+            ]
+            chapters.append(
+                Chapter(
+                    uid=f"ch-{ch_i}",
+                    title=f"Chapter {ch_i}",
+                    blocks=blocks,
+                )
+            )
+
+        book = Book(title="Large Book", chapters=chapters)
+
+        # Verify block count
+        total_blocks = sum(len(ch.blocks) for ch in book.chapters)
+        assert total_blocks == chapter_count * blocks_per_chapter
+
+        new_uid = str(uuid4())
+        cmd1 = PatchCommand(
+            command_id=str(uuid4()),
+            op="split_block",
+            agent_id="fixer-1",
+            rationale="Split first block",
+            params={
+                "block_uid": "b-0-0",
+                "strategy": "at_sentence",
+                "max_splits": 1,
+                "new_block_uids": [new_uid],
+            },
+        )
+        cmd2 = PatchCommand(
+            command_id=str(uuid4()),
+            op="merge_blocks",
+            agent_id="fixer-1",
+            rationale="Merge after split",
+            params={
+                "block_uids": ["b-0-0", new_uid],
+                "join": "concat",
+            },
+        )
+
+        start = time.perf_counter()
+        result = compile_patch_commands(
+            book, [cmd1, cmd2], output_kind="supervisor", output_chapter_uid=None
+        )
+        elapsed = time.perf_counter() - start
+
+        assert result.patches is not None
+        assert len(result.patches) == 2
+        # The evolving book should have 5000 blocks after split+merge (net unchanged)
+        final_block_count = sum(len(ch.blocks) for ch in result.book_after_commands.chapters)
+        assert final_block_count == total_blocks
+
+        # Performance baseline: must be under 2 seconds
+        assert elapsed < 2.0, (
+            f"Compile with 5000-block book took {elapsed:.3f}s, expected < 2.0s"
+        )
