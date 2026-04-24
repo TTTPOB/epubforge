@@ -27,6 +27,7 @@ PRECONDITION_FIELDS = (
     "id",
     "paired",
     "orphan",
+    "cross_page",
 )
 BLOCK_KINDS = ("paragraph", "heading", "footnote", "figure", "table", "equation")
 
@@ -238,6 +239,7 @@ class Precondition(StrictModel):
         "id",
         "paired",
         "orphan",
+        "cross_page",
     ] | None = None
     expected: Any = None
     min_version: int | None = Field(default=None, ge=0)
@@ -737,6 +739,104 @@ class SplitMergedTable(StrictModel):
         return self
 
 
+class ReplaceBlock(StrictModel):
+    """Replace a block in-place with a new block of a potentially different kind.
+
+    original_block is required for optimistic locking — apply rejects if the current
+    block does not match this snapshot exactly.  block_data is validated as the target
+    block_kind at schema time.  uid is injected by apply (original or new_block_uid).
+    """
+
+    op: Literal["replace_block"]
+    block_uid: str
+    block_kind: Literal["paragraph", "heading", "footnote", "figure", "table", "equation"]
+    block_data: dict[str, Any]
+    new_block_uid: str | None = None
+    original_block: dict[str, Any]
+
+    @field_validator("block_uid")
+    @classmethod
+    def _validate_block_uid(cls, value: str) -> str:
+        return require_non_empty(value, field_name="block_uid")
+
+    @field_validator("new_block_uid")
+    @classmethod
+    def _validate_new_block_uid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return require_non_empty(value, field_name="new_block_uid")
+
+    @model_validator(mode="after")
+    def _validate_block_data(self) -> ReplaceBlock:
+        payload_model = BLOCK_PAYLOAD_MODELS[self.block_kind]
+        payload = payload_model.model_validate(self.block_data)
+        self.block_data = payload.model_dump()
+        return self
+
+
+class SetParagraphCrossPage(StrictModel):
+    """Set the cross_page flag on a Paragraph block."""
+
+    op: Literal["set_paragraph_cross_page"]
+    block_uid: str
+    value: bool
+
+    @field_validator("block_uid")
+    @classmethod
+    def _validate_block_uid(cls, value: str) -> str:
+        return require_non_empty(value, field_name="block_uid")
+
+
+class SetTableMetadata(StrictModel):
+    """Update table metadata fields (title, caption, continuation, multi_page, merge_record).
+
+    original_metadata is required for optimistic locking.  Consistency rules:
+    - multi_page=True <=> merge_record is not None (with aligned arrays of length >= 2)
+    - multi_page=True => continuation must be False
+    - continuation=True => multi_page=False and merge_record=None
+    - multi_page=False and continuation=False => merge_record=None
+    This op does NOT modify table HTML.
+    """
+
+    op: Literal["set_table_metadata"]
+    block_uid: str
+    table_title: str
+    caption: str
+    continuation: bool
+    multi_page: bool
+    merge_record: dict[str, Any] | None = None
+    original_metadata: dict[str, Any]
+
+    @field_validator("block_uid")
+    @classmethod
+    def _validate_block_uid(cls, value: str) -> str:
+        return require_non_empty(value, field_name="block_uid")
+
+    @model_validator(mode="after")
+    def _validate_consistency(self) -> SetTableMetadata:
+        if self.merge_record is not None and not self.multi_page:
+            raise ValueError("merge_record requires multi_page=True")
+        if self.multi_page and self.merge_record is None:
+            raise ValueError("multi_page=True requires merge_record")
+        if self.multi_page and self.continuation:
+            raise ValueError("multi_page=True and continuation=True are mutually exclusive")
+        if self.continuation and self.merge_record is not None:
+            raise ValueError("continuation=True is incompatible with merge_record")
+        if not self.multi_page and not self.continuation and self.merge_record is not None:
+            raise ValueError("merge_record must be None when multi_page=False and continuation=False")
+        if self.merge_record is not None:
+            seg_html = self.merge_record.get("segment_html")
+            seg_pages = self.merge_record.get("segment_pages")
+            seg_order = self.merge_record.get("segment_order")
+            if not isinstance(seg_html, list) or not isinstance(seg_pages, list) or not isinstance(seg_order, list):
+                raise ValueError("merge_record must have segment_html, segment_pages, segment_order as lists")
+            if len(seg_html) < 2:
+                raise ValueError("merge_record segment arrays must have length >= 2")
+            if len(seg_html) != len(seg_pages) or len(seg_html) != len(seg_order):
+                raise ValueError("merge_record segment arrays must be aligned (same length)")
+        return self
+
+
 EditOp = Annotated[
     SetRole
     | SetStyleClass
@@ -753,6 +853,9 @@ EditOp = Annotated[
     | SplitChapter
     | RelocateBlock
     | SplitMergedTable
+    | ReplaceBlock
+    | SetParagraphCrossPage
+    | SetTableMetadata
     | NoopOp
     | CompactMarker
     | RevertOp,
@@ -821,12 +924,15 @@ __all__ = [
     "OpEnvelope",
     "Precondition",
     "RelocateBlock",
+    "ReplaceBlock",
     "RevertOp",
     "SetFootnoteFlag",
     "SetHeadingId",
     "SetHeadingLevel",
+    "SetParagraphCrossPage",
     "SetRole",
     "SetStyleClass",
+    "SetTableMetadata",
     "SetText",
     "SplitBlock",
     "SplitChapter",

@@ -21,12 +21,15 @@ from epubforge.editor.ops import (
     OpEnvelope,
     Precondition,
     RelocateBlock,
+    ReplaceBlock,
     RevertOp,
     SetFootnoteFlag,
     SetHeadingId,
     SetHeadingLevel,
+    SetParagraphCrossPage,
     SetRole,
     SetStyleClass,
+    SetTableMetadata,
     SetText,
     SplitBlock,
     SplitChapter,
@@ -44,6 +47,7 @@ from epubforge.ir.semantic import (
     Heading,
     Paragraph,
     Table,
+    TableMergeRecord,
 )
 from epubforge.markers import FN_MARKER_FULL_RE, has_raw_callout, make_fn_marker, replace_first_raw, replace_nth_raw
 from epubforge.text_utils import cjk_join
@@ -478,6 +482,11 @@ def _check_new_uid_collisions(book: Book, op: EditOp, *, op_id: str) -> None:
         return
     if isinstance(op, SplitChapter):
         ensure_chapter_uid(op.new_chapter_uid)
+        return
+    if isinstance(op, ReplaceBlock):
+        # Only check for collision if a new uid is explicitly requested
+        if op.new_block_uid is not None:
+            ensure_block_uid(op.new_block_uid)
 
 
 def _apply_set_role(book: Book, op: EditOp, op_id: str) -> Book:
@@ -716,6 +725,70 @@ def _apply_split_merged_table(book: Book, op: EditOp, op_id: str) -> Book:
     return book
 
 
+def _apply_replace_block(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, ReplaceBlock)
+    ref, current_block = _get_block(book, op.block_uid)
+
+    # Optimistic locking: compare serialized current block against snapshot
+    current_snapshot = current_block.model_dump(mode="json")
+    if current_snapshot != op.original_block:
+        raise ApplyError(
+            f"replace_block rejected: current block {op.block_uid} does not match original_block snapshot",
+            op_id,
+        )
+
+    # Determine the uid for the replacement block
+    target_uid = op.new_block_uid if op.new_block_uid is not None else op.block_uid
+    new_block = _make_block(op.block_kind, target_uid, op.block_data)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = new_block
+    return book
+
+
+def _apply_set_paragraph_cross_page(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetParagraphCrossPage)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Paragraph):
+        raise ApplyError("set_paragraph_cross_page requires a Paragraph block", op_id)
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(update={"cross_page": op.value})
+    return book
+
+
+def _apply_set_table_metadata(book: Book, op: EditOp, op_id: str) -> Book:
+    assert isinstance(op, SetTableMetadata)
+    ref, block = _get_block(book, op.block_uid)
+    if not isinstance(block, Table):
+        raise ApplyError("set_table_metadata requires a Table block", op_id)
+
+    # Optimistic locking: compare current metadata against snapshot
+    current_metadata = {
+        "table_title": block.table_title,
+        "caption": block.caption,
+        "continuation": block.continuation,
+        "multi_page": block.multi_page,
+        "merge_record": block.merge_record.model_dump(mode="json") if block.merge_record is not None else None,
+    }
+    if current_metadata != op.original_metadata:
+        raise ApplyError(
+            f"set_table_metadata rejected: current metadata for {op.block_uid} does not match original_metadata snapshot",
+            op_id,
+        )
+
+    new_merge_record: TableMergeRecord | None = None
+    if op.merge_record is not None:
+        new_merge_record = TableMergeRecord.model_validate(op.merge_record)
+
+    book.chapters[ref.chapter_idx].blocks[ref.block_idx] = block.model_copy(
+        update={
+            "table_title": op.table_title,
+            "caption": op.caption,
+            "continuation": op.continuation,
+            "multi_page": op.multi_page,
+            "merge_record": new_merge_record,
+        }
+    )
+    return book
+
+
 _APPLY_DISPATCH: dict[type[EditOp], Callable[[Book, EditOp, str], Book]] = {
     SetRole: _apply_set_role,
     SetStyleClass: _apply_set_style_class,
@@ -732,6 +805,9 @@ _APPLY_DISPATCH: dict[type[EditOp], Callable[[Book, EditOp, str], Book]] = {
     SplitChapter: _apply_split_chapter,
     RelocateBlock: _apply_relocate_block,
     SplitMergedTable: _apply_split_merged_table,
+    ReplaceBlock: _apply_replace_block,
+    SetParagraphCrossPage: _apply_set_paragraph_cross_page,
+    SetTableMetadata: _apply_set_table_metadata,
 }
 
 
@@ -781,6 +857,9 @@ def _resolve_intra_chapter_uid(book: Book, op: EditOp, *, op_id: str) -> str | N
             SplitBlock,
             DeleteBlock,
             SplitMergedTable,
+            ReplaceBlock,
+            SetParagraphCrossPage,
+            SetTableMetadata,
         ),
     ):
         ref, _ = _get_block(book, op.block_uid)
@@ -904,6 +983,14 @@ def _target_effect_preconditions(target: OpEnvelope) -> list[Precondition]:
         else:
             conditions.append(Precondition(kind="field_equals", block_uid=op.fn_block_uid, field="paired", expected=True))
         return conditions
+    if isinstance(op, ReplaceBlock):
+        # After apply, the block exists under the new uid (or original uid if no new_block_uid)
+        effective_uid = op.new_block_uid if op.new_block_uid is not None else op.block_uid
+        return [Precondition(kind="block_exists", block_uid=effective_uid)]
+    if isinstance(op, SetParagraphCrossPage):
+        return [Precondition(kind="field_equals", block_uid=op.block_uid, field="cross_page", expected=op.value)]
+    if isinstance(op, SetTableMetadata):
+        return [Precondition(kind="block_exists", block_uid=op.block_uid)]
     if isinstance(op, NoopOp):
         return []
     raise ApplyError("target op is not safely reversible from logged payload alone", target.op_id)
@@ -1049,6 +1136,47 @@ def _build_inverse_op(book: Book, target: OpEnvelope) -> EditOp:
             fn_block_uid=op.fn_block_uid,
             source_block_uid=source_block_uid,
             occurrence_index=op.occurrence_index,
+        )
+    if isinstance(op, ReplaceBlock):
+        # The inverse is a ReplaceBlock that restores the original block.
+        # After apply, the block lives under the effective uid (new_block_uid or block_uid).
+        # The current state of that block is the replacement; original_block was the pre-op state.
+        effective_uid = op.new_block_uid if op.new_block_uid is not None else op.block_uid
+        ref = _block_index(book).get(effective_uid)
+        if ref is None:
+            raise ApplyError(f"replace_block revert: block {effective_uid} not found", target.op_id)
+        current_snapshot = book.chapters[ref.chapter_idx].blocks[ref.block_idx].model_dump(mode="json")
+        return ReplaceBlock(
+            op="replace_block",
+            block_uid=effective_uid,
+            block_kind=op.original_block["kind"],
+            block_data={k: v for k, v in op.original_block.items() if k not in ("uid", "kind")},
+            new_block_uid=op.block_uid if op.new_block_uid is not None else None,
+            original_block=current_snapshot,
+        )
+    if isinstance(op, SetParagraphCrossPage):
+        previous_value = _find_precondition_expected_value(target, block_uid=op.block_uid, field="cross_page")
+        if not isinstance(previous_value, bool):
+            raise ApplyError("cannot revert set_paragraph_cross_page without prior boolean value", target.op_id)
+        return SetParagraphCrossPage(op="set_paragraph_cross_page", block_uid=op.block_uid, value=previous_value)
+    if isinstance(op, SetTableMetadata):
+        # Reverse op restores the original metadata snapshot
+        orig = op.original_metadata
+        return SetTableMetadata(
+            op="set_table_metadata",
+            block_uid=op.block_uid,
+            table_title=orig.get("table_title", ""),
+            caption=orig.get("caption", ""),
+            continuation=orig.get("continuation", False),
+            multi_page=orig.get("multi_page", False),
+            merge_record=orig.get("merge_record"),
+            original_metadata={
+                "table_title": op.table_title,
+                "caption": op.caption,
+                "continuation": op.continuation,
+                "multi_page": op.multi_page,
+                "merge_record": op.merge_record,
+            },
         )
     if isinstance(op, NoopOp):
         return NoopOp(op="noop", purpose="milestone")
