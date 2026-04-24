@@ -17,7 +17,7 @@ from epubforge.editor._validators import (
 from epubforge.editor.cli_support import CommandError
 from epubforge.editor.memory import EditMemory, MemoryMergeDecision, MemoryPatch, OpenQuestion, merge_edit_memory
 from epubforge.editor.patch_commands import PatchCommand
-from epubforge.editor.patches import BookPatch, PatchError, apply_book_patch, validate_book_patch
+from epubforge.editor.patches import BookPatch, PatchError, apply_book_patch
 from epubforge.editor.state import EditorPaths, atomic_write_model, atomic_write_text, save_memory
 from epubforge.ir.semantic import Book
 
@@ -178,20 +178,19 @@ def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
         if output.chapter_uid not in chapter_uids:
             errors.append(f"chapter_uid not found: {output.chapter_uid}")
 
-    # §5.3 — BookPatch validation (wrap PatchError, collect all)
+    # §5.3 — BookPatch validation with preconditions against an evolving temp book.
+    current_book = book
     for i, patch in enumerate(output.patches):
         try:
-            validate_book_patch(book, patch)
+            current_book = apply_book_patch(current_book, patch)
         except PatchError as e:
             errors.append(f"patches[{i}] ({patch.patch_id}): {e.reason}")
 
-    # §5.4 — PatchCommand structural validation (Phase 2: op/rationale non-empty)
+    # §5.4 — PatchCommand compilation is not implemented yet.
     for i, cmd in enumerate(output.commands):
-        # Phase 2: structural validation only
-        if not cmd.op.strip():
-            errors.append(f"commands[{i}]: op must not be empty")
-        if not cmd.rationale.strip():
-            errors.append(f"commands[{i}]: rationale must not be empty")
+        errors.append(
+            f"commands[{i}] ({cmd.command_id}): PatchCommand compilation is not implemented"
+        )
 
     # §5.5 — MemoryPatch UID reference validation
     for i, mp in enumerate(output.memory_patches):
@@ -402,10 +401,16 @@ def archive_agent_output(paths: EditorPaths, output: AgentOutput, submitted_at: 
 
 
 def _compile_commands(commands: list[PatchCommand], book: Book) -> list[BookPatch]:
-    """Phase 2: no-op stub. Phase 3 will implement per-macro compilation.
+    """Compile high-level commands into BookPatch instances.
 
     TODO(Phase 3): implement PatchCommand → BookPatch compilation for each op.
     """
+    if commands:
+        raise CommandError(
+            "PatchCommand compilation is not implemented",
+            exit_code=1,
+            payload={"error": "PatchCommand compilation is not implemented"},
+        )
     return []
 
 

@@ -331,6 +331,38 @@ def _make_block(kind: str, uid: str, data: dict[str, Any]) -> Block:
     return cls.model_validate(node_data)  # type: ignore[return-value]
 
 
+def _validated_set_field_node(
+    node: Block | Chapter,
+    node_kind: str,
+    field: str,
+    new_value: Any,
+    patch_id: str,
+) -> Block | Chapter:
+    """Return a validated node copy with one field changed."""
+    data = node.model_dump(mode="python")
+    data[field] = new_value
+
+    try:
+        if node_kind == "chapter":
+            return Chapter.model_validate(data)
+
+        assert node_kind in BLOCK_KINDS
+        payload_cls = BLOCK_PAYLOAD_MODELS[node_kind]
+        payload_data = {
+            key: value
+            for key, value in data.items()
+            if key not in ("uid", "kind", "merge_record")
+        }
+        payload_cls.model_validate(payload_data)
+        cls = _KIND_TO_CLASS[node_kind]
+        return cls.model_validate(data)  # type: ignore[return-value]
+    except Exception as exc:
+        raise PatchError(
+            f"set_field value validation failed for {node_kind}.{field}: {exc}",
+            patch_id,
+        ) from exc
+
+
 def _require_all_uids_non_none(book: Book, patch_id: str) -> None:
     """Verify every chapter and block in the book has a non-None uid.
 
@@ -422,9 +454,11 @@ def _check_set_field_preconditions(
             patch_id,
         )
 
+    _validated_set_field_node(node, node_kind, change.field, change.new, patch_id)
+
     # Semantic checks on new value
     if change.field == "role":
-        if change.new not in ALLOWED_ROLES:
+        if not isinstance(change.new, str) or change.new not in ALLOWED_ROLES:
             raise PatchError(
                 f"set_field role {change.new!r} is not a valid role "
                 f"(allowed: {sorted(ALLOWED_ROLES)})",
@@ -661,39 +695,49 @@ def _check_move_node_preconditions(
                 patch_id,
             )
 
+        if change.from_parent_uid is None:
+            raise PatchError(
+                "move_node from_parent_uid is required for block moves",
+                patch_id,
+            )
+
+        if change.to_parent_uid is None:
+            raise PatchError(
+                "move_node to_parent_uid is required for block moves",
+                patch_id,
+            )
+
         # Verify from_parent_uid matches actual current parent
-        if change.from_parent_uid is not None:
-            actual_ch_idx, _ = index.block_index[change.target_uid]
-            actual_ch_uid = working.chapters[actual_ch_idx].uid
-            if actual_ch_uid != change.from_parent_uid:
-                raise PatchError(
-                    f"move_node from_parent_uid {change.from_parent_uid!r} does not match "
-                    f"actual parent {actual_ch_uid!r} for block {change.target_uid!r}",
-                    patch_id,
-                )
+        actual_ch_idx, _ = index.block_index[change.target_uid]
+        actual_ch_uid = working.chapters[actual_ch_idx].uid
+        if actual_ch_uid != change.from_parent_uid:
+            raise PatchError(
+                f"move_node from_parent_uid {change.from_parent_uid!r} does not match "
+                f"actual parent {actual_ch_uid!r} for block {change.target_uid!r}",
+                patch_id,
+            )
 
         # Verify to_parent_uid exists
-        if change.to_parent_uid is not None:
-            if change.to_parent_uid not in index.chapter_index:
+        if change.to_parent_uid not in index.chapter_index:
+            raise PatchError(
+                f"move_node to_parent_uid {change.to_parent_uid!r} not found",
+                patch_id,
+            )
+        # after_uid must be in the target chapter (if specified)
+        # Note: after removal from source the target chapter may be the same;
+        # we check after_uid against the current blocks (before removal).
+        if change.after_uid is not None:
+            to_ch_idx = index.chapter_index[change.to_parent_uid]
+            to_chapter = working.chapters[to_ch_idx]
+            # after_uid may be the block being moved itself only if it's in the
+            # target chapter — but that's already blocked by MoveNodeChange validator.
+            found = any(b.uid == change.after_uid for b in to_chapter.blocks)
+            if not found:
                 raise PatchError(
-                    f"move_node to_parent_uid {change.to_parent_uid!r} not found",
+                    f"move_node after_uid {change.after_uid!r} not found in "
+                    f"target chapter {change.to_parent_uid!r}",
                     patch_id,
                 )
-            # after_uid must be in the target chapter (if specified)
-            # Note: after removal from source the target chapter may be the same;
-            # we check after_uid against the current blocks (before removal).
-            if change.after_uid is not None:
-                to_ch_idx = index.chapter_index[change.to_parent_uid]
-                to_chapter = working.chapters[to_ch_idx]
-                # after_uid may be the block being moved itself only if it's in the
-                # target chapter — but that's already blocked by MoveNodeChange validator.
-                found = any(b.uid == change.after_uid for b in to_chapter.blocks)
-                if not found:
-                    raise PatchError(
-                        f"move_node after_uid {change.after_uid!r} not found in "
-                        f"target chapter {change.to_parent_uid!r}",
-                        patch_id,
-                    )
 
 
 # ---------------------------------------------------------------------------
@@ -712,15 +756,29 @@ def _apply_set_field(
     if change.target_uid in index.block_index:
         ch_idx, b_idx = index.block_index[change.target_uid]
         block = working.chapters[ch_idx].blocks[b_idx]
-        working.chapters[ch_idx].blocks[b_idx] = block.model_copy(  # type: ignore[index]
-            update={change.field: change.new}
+        working.chapters[ch_idx].blocks[b_idx] = _validated_set_field_node(  # type: ignore[index]
+            block,
+            block.kind,
+            change.field,
+            change.new,
+            patch_id,
         )
     elif change.target_uid in index.chapter_index:
         ch_idx = index.chapter_index[change.target_uid]
         chapter = working.chapters[ch_idx]
-        working.chapters[ch_idx] = chapter.model_copy(
-            update={change.field: change.new}
+        updated_chapter = _validated_set_field_node(
+            chapter,
+            "chapter",
+            change.field,
+            change.new,
+            patch_id,
         )
+        if not isinstance(updated_chapter, Chapter):
+            raise PatchError(
+                f"set_field validation returned non-chapter for {change.target_uid!r}",
+                patch_id,
+            )
+        working.chapters[ch_idx] = updated_chapter
     else:
         raise PatchError(
             f"set_field target_uid {change.target_uid!r} not found at apply time",
@@ -1100,6 +1158,16 @@ def _validate_static_move_node(
         if change.to_parent_uid is not None and change.to_parent_uid not in chapter_index:
             raise PatchError(
                 f"move_node to_parent_uid {change.to_parent_uid!r} not found",
+                pid,
+            )
+        if change.from_parent_uid is None:
+            raise PatchError(
+                "move_node from_parent_uid is required for block moves",
+                pid,
+            )
+        if change.to_parent_uid is None:
+            raise PatchError(
+                "move_node to_parent_uid is required for block moves",
                 pid,
             )
 

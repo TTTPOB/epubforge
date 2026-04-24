@@ -233,6 +233,43 @@ class TestSetFieldChange:
         block = result.chapters[1].blocks[1]
         assert block.bbox == [1.0, 2.0, 3.0, 4.0]  # type: ignore[union-attr]
 
+    def test_set_paragraph_text_rejects_int(self, sample_book):
+        """Setting paragraph.text to int is rejected before it can corrupt the Book."""
+        patch = _make_patch([
+            SetFieldChange(op="set_field", target_uid="blk-1", field="text",
+                           old="Hello world", new=123),
+        ])
+
+        with pytest.raises(PatchError):
+            apply_book_patch(sample_book, patch)
+
+        assert sample_book.chapters[0].blocks[0].text == "Hello world"  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize("bad_bbox", ["not-a-list", ["not-a-float"]])
+    def test_set_table_bbox_rejects_invalid_types(self, sample_book, bad_bbox):
+        """Setting table.bbox to non-list/non-float values is rejected."""
+        patch = _make_patch([
+            SetFieldChange(op="set_field", target_uid="blk-5", field="bbox",
+                           old=None, new=bad_bbox),
+        ])
+
+        with pytest.raises(PatchError):
+            apply_book_patch(sample_book, patch)
+
+        assert sample_book.chapters[1].blocks[1].bbox is None  # type: ignore[union-attr]
+
+    def test_set_style_class_rejects_invalid_value(self, sample_book):
+        """style_class uses the same validator as editor ops."""
+        patch = _make_patch([
+            SetFieldChange(op="set_field", target_uid="blk-1", field="style_class",
+                           old=None, new="bad class"),
+        ])
+
+        with pytest.raises(PatchError):
+            apply_book_patch(sample_book, patch)
+
+        assert sample_book.chapters[0].blocks[0].style_class is None  # type: ignore[union-attr]
+
     def test_empty_target_uid(self):
         """Empty target_uid — Pydantic ValidationError."""
         with pytest.raises(ValidationError):
@@ -680,6 +717,20 @@ class TestMoveNodeChange:
                 op="move_node",
                 target_uid="blk-1",
                 from_parent_uid="ch-2",  # wrong parent
+                to_parent_uid="ch-2",
+                after_uid=None,
+            ),
+        ])
+        with pytest.raises(PatchError):
+            apply_book_patch(sample_book, patch)
+
+    def test_block_move_requires_from_parent_uid(self, sample_book):
+        """Block moves must include the current source chapter uid."""
+        patch = _make_patch([
+            MoveNodeChange(
+                op="move_node",
+                target_uid="blk-1",
+                from_parent_uid=None,
                 to_parent_uid="ch-2",
                 after_uid=None,
             ),

@@ -32,7 +32,7 @@ from epubforge.editor.memory import (
 )
 from epubforge.editor.patch_commands import PatchCommand
 from epubforge.editor.patches import BookPatch, PatchScope, SetFieldChange
-from epubforge.editor.state import resolve_editor_paths
+from epubforge.editor.state import load_editor_memory, resolve_editor_paths
 from epubforge.editor.tool_surface import (
     run_agent_output_add_command,
     run_agent_output_add_memory_patch,
@@ -799,6 +799,61 @@ class TestValidate:
         assert out["valid"] is True
         assert out["errors"] == []
 
+    def test_validate_rejects_uncompiled_commands(self, initialized_work, capsys):
+        work, book = initialized_work
+        paths = resolve_editor_paths(work)
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="split_block",
+                    agent_id="supervisor-1",
+                    rationale="Split this block",
+                )
+            ],
+        )
+        save_agent_output(paths, output)
+
+        result = run_agent_output_validate(work=work, output_id=output.output_id, cfg=_cfg())
+        out = json.loads(capsys.readouterr().out)
+
+        assert result == 1
+        assert out["valid"] is False
+        assert any("compilation is not implemented" in e for e in out["errors"])
+
+    def test_submit_dry_run_rejects_uncompiled_commands(self, initialized_work, capsys):
+        work, book = initialized_work
+        paths = resolve_editor_paths(work)
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="split_block",
+                    agent_id="supervisor-1",
+                    rationale="Split this block",
+                )
+            ],
+        )
+        save_agent_output(paths, output)
+
+        result = run_agent_output_submit(
+            work=work,
+            output_id=output.output_id,
+            apply=False,
+            stage=False,
+            cfg=_cfg(),
+        )
+        out = json.loads(capsys.readouterr().out)
+
+        assert result == 1
+        assert out["valid"] is False
+        assert any("compilation is not implemented" in e for e in out["errors"])
+        assert (paths.agent_outputs_dir / f"{output.output_id}.json").exists()
+
     def test_validate_invalid_chapter_uid(self, initialized_work):
         work, book = initialized_work
         paths = resolve_editor_paths(work)
@@ -896,6 +951,84 @@ class TestValidate:
         # No kind-specific errors for supervisor
         kind_errors = [e for e in errors if "supervisor" in e.lower() and "may not" in e.lower()]
         assert len(kind_errors) == 0
+
+    def test_validate_catches_stale_patch_precondition_without_side_effects(self, initialized_work):
+        work, book = initialized_work
+        block_uid = book.chapters[0].blocks[0].uid
+        before = book.model_dump(mode="python")
+
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            patches=[
+                BookPatch(
+                    patch_id=str(uuid4()),
+                    agent_id="supervisor-1",
+                    scope=PatchScope(chapter_uid=book.chapters[0].uid),
+                    changes=[
+                        {
+                            "op": "set_field",
+                            "target_uid": block_uid,
+                            "field": "text",
+                            "old": "stale text",
+                            "new": "Hello world updated",
+                        }
+                    ],
+                    rationale="stale patch",
+                )
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+
+        assert any("precondition mismatch" in e for e in errors)
+        assert book.model_dump(mode="python") == before
+
+    def test_validate_checks_multiple_patches_in_submission_order(self, initialized_work):
+        work, book = initialized_work
+        block_uid = book.chapters[0].blocks[0].uid
+
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            patches=[
+                BookPatch(
+                    patch_id=str(uuid4()),
+                    agent_id="supervisor-1",
+                    scope=PatchScope(chapter_uid=book.chapters[0].uid),
+                    changes=[
+                        {
+                            "op": "set_field",
+                            "target_uid": block_uid,
+                            "field": "text",
+                            "old": "Hello world",
+                            "new": "Intermediate text",
+                        }
+                    ],
+                    rationale="first patch",
+                ),
+                BookPatch(
+                    patch_id=str(uuid4()),
+                    agent_id="supervisor-1",
+                    scope=PatchScope(chapter_uid=book.chapters[0].uid),
+                    changes=[
+                        {
+                            "op": "set_field",
+                            "target_uid": block_uid,
+                            "field": "text",
+                            "old": "Intermediate text",
+                            "new": "Final text",
+                        }
+                    ],
+                    rationale="second patch",
+                ),
+            ],
+        )
+
+        errors = validate_agent_output(output, book)
+
+        assert errors == []
+        assert book.chapters[0].blocks[0].text == "Hello world"  # type: ignore[union-attr]
 
     def test_validate_scanner_no_read_pass_update(self, initialized_work):
         """Scanner without read_passes update should fail validation."""
@@ -1081,6 +1214,47 @@ class TestSubmit:
         assert out["submitted"] is False
         assert len(out["errors"]) > 0
         assert paths.book_path.stat().st_mtime == book_mtime_before
+
+    def test_submit_apply_with_command_fails_without_archiving_or_saving(
+        self,
+        initialized_work,
+        capsys,
+    ):
+        """Uncompiled commands must not be silently dropped during submit --apply."""
+        work, book = initialized_work
+        paths = resolve_editor_paths(work)
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            commands=[
+                PatchCommand(
+                    command_id=str(uuid4()),
+                    op="split_block",
+                    agent_id="supervisor-1",
+                    rationale="Split this block",
+                )
+            ],
+        )
+        save_agent_output(paths, output)
+        book_before = load_book(paths.book_path).model_dump(mode="python")
+        memory_before = load_editor_memory(paths).model_dump(mode="python")
+
+        result = run_agent_output_submit(
+            work=work,
+            output_id=output.output_id,
+            apply=True,
+            stage=False,
+            cfg=_cfg(),
+        )
+        out = json.loads(capsys.readouterr().out)
+
+        assert result == 1
+        assert out["submitted"] is False
+        assert any("compilation is not implemented" in e for e in out["errors"])
+        assert (paths.agent_outputs_dir / f"{output.output_id}.json").exists()
+        assert list(paths.agent_outputs_archives_dir.glob(f"{output.output_id}_*.json")) == []
+        assert load_book(paths.book_path).model_dump(mode="python") == book_before
+        assert load_editor_memory(paths).model_dump(mode="python") == memory_before
 
     def test_submit_apply_archives_output(self, initialized_work, capsys):
         """After successful submit, in-progress output file moves to archives/."""
