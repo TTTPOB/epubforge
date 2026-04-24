@@ -1,0 +1,1036 @@
+# Agentic Editing Improvement Plan
+
+## Background
+
+epubforge 的目标不是一次性把 PDF 转成 EPUB，而是产出能给人类阅读的 EPUB。多数真实书籍都需要 LLM/agent 参与后期修订，所以 editor 子系统不是附属能力，而是核心产品路径。
+
+当前讨论收敛出的核心判断：
+
+- editor 必须保留，并应围绕“修书工作流”而不是“底层操作系统接口”组织。
+- VLM 不应再作为 ingestion pipeline 的 Stage 3 分支，而应降级为 editor 阶段可按需调用的 evidence 工具。
+- Codex/Claude Code 这类订阅式 agent 无法保证 structured output，因此不能依赖它们手写最终 JSON。
+- lease/lock 机制仍然有价值，但应该减少易漏步骤，并在成功编辑后续租。
+
+## Current Problems
+
+### 1. Agent output has no stable top-level schema
+
+当前已有稳定结构：
+
+- `OpEnvelope`（current implementation）
+- `EditOp`（current implementation）
+- `MemoryPatch`
+- `OpenQuestion`
+- `ChapterStatus`
+- `ConventionNote`
+- `PatternNote`
+
+但没有稳定的顶层 `AgentOutput` 模型。
+
+prompt 里只是文字要求 agent 输出：
+
+```json
+{
+  "commands": [],
+  "patches": [],
+  "memory_patches": [],
+  "open_questions": [],
+  "notes": []
+}
+```
+
+这不是代码层面的 schema，也没有统一 validator/submitter。
+
+结果是：
+
+- scanner/fixer/reviewer 的完整工作包无法统一校验。
+- notes 不会被系统正式接收或归档。
+- supervisor 需要手动拆分 agent 输出，再喂给当前 `propose-op`。
+- 当前 `propose-op` 只能校验 `OpEnvelope[]`，覆盖不了完整 agent output。
+
+### 2. Agent-written JSON is unreliable
+
+在 Codex/Claude Code 这类界面下，agent 可以推理、读文件、调用命令，但不能保证最终聊天输出或手写 JSON 永远合法。
+
+风险包括：
+
+- JSON 语法不合法。
+- 字段名漂移。
+- `base_version` 过期。
+- uid 不存在。
+- 修改范围越过 chapter lease。
+- scanner/fixer/reviewer 输出形状不一致。
+
+因此应该让 agent 使用本地命令增量构造结构化产物，而不是自己拼最终 JSON。
+
+### 3. Lease only renews on explicit acquire
+
+当前 lease 行为：
+
+- 重复 `acquire-lease` 同一 chapter 且 holder 相同，会刷新 TTL。
+- 重复 `acquire-book-lock` 且 holder 相同，会刷新 TTL。
+- current `apply-queue` 成功应用 patch 不会自动续租。
+- current `propose-op`、`doctor`、`render-prompt`、`render-page`、`vlm-page` 不会续租。
+
+这会导致长任务中 agent 合法持锁开始工作，但 apply 时 lease 已过期。
+
+### 4. Lock failure happens at apply time
+
+当前 `propose-op` 不检查 lease，只要 `OpEnvelope[]` schema 合法就写入 staging。
+
+实际 lease 检查发生在 `apply-queue`：
+
+- 没有 chapter lease 的单章 patch 会被拒绝。
+- 没有 book-exclusive lock 的拓扑 patch 会被拒绝。
+- book-exclusive lock 活跃时普通 chapter patch 会被拒绝。
+
+这保证了 `book.json` 不会被无锁修改，但允许无锁 patch 进入 staging，反馈时机偏晚。
+
+### 5. VLM is overloaded as a pipeline stage
+
+当前 Stage 3 有 VLM mode 和 skip-VLM mode。这个分支让 ingestion pipeline 同时承担两种职责：
+
+- 机械抽取草稿。
+- 视觉语义判断。
+
+但如果目标是人类可读 EPUB，语义判断应该发生在 editor 修书阶段。VLM 更适合作为 scanner/fixer/reviewer 可调用的 evidence 工具，而不是 ingestion 的默认 stage。
+
+### 6. The current EditOp surface is expensive to maintain
+
+当前 `EditOp` 同时承担两类职责：
+
+- 表达 agent 的高层意图，例如 split block、merge chapters、pair footnote。
+- 表达低层 IR 变化，例如 set text、set role、set heading level、set table metadata。
+
+这会让 operation 类型、apply 分支、validator 和测试持续膨胀。很多低层字段修改本质上都是同一种事情：对某个 UID-addressed node 的某个字段做带 precondition 的替换。
+
+更好的方向是：
+
+- 保留少量底层 atomic patch 能力。
+- 在其上提供 ergonomic high-level commands/macros。
+- 推荐 agent 使用高层命令。
+- 高层命令无法表达时，才允许 agent 组合底层 atomic changes。
+
+命名决策：
+
+- 目标设计统一使用 `Patch` 术语。
+- 底层机器可应用结构叫 `BookPatch`。
+- 高层人体/agent 友好的意图叫 `PatchCommand`。
+- 不设计 `Op` → `Patch` 的兼容层；实施时可以直接替换当前 operation terminology。
+
+## Target Design
+
+### 1. Introduce AgentOutput as the top-level contract
+
+新增统一模型，覆盖 scanner/fixer/reviewer/supervisor 的提交产物。
+
+建议结构：
+
+```python
+class AgentOutput(BaseModel):
+    output_id: str
+    kind: Literal["scanner", "fixer", "reviewer", "supervisor"]
+    agent_id: str
+    chapter_uid: str | None = None
+    base_version: int
+    created_at: str
+    updated_at: str
+    patches: list[BookPatch] = []
+    commands: list[PatchCommand] = []
+    memory_patches: list[MemoryPatch] = []
+    open_questions: list[OpenQuestion] = []
+    notes: list[str] = []
+    evidence_refs: list[str] = []
+```
+
+重要点：
+
+- 这个模型是系统内部契约。
+- agent 不应直接手写完整 JSON。
+- 所有 agent 产物最终都经过同一套 validate/submit 流程。
+
+### 2. Build AgentOutput through commands, not manual JSON
+
+新增一组命令，让 agent 通过小粒度命令构造 output。
+
+示例：
+
+```bash
+epubforge editor agent-output begin work/book \
+  --kind scanner \
+  --chapter ch-1 \
+  --agent scanner-1
+```
+
+```bash
+epubforge editor agent-output add-note work/book <output-id> \
+  --text "第 12 页脚注密度异常，需要复查 callout 归属。"
+```
+
+```bash
+epubforge editor agent-output add-question work/book <output-id> \
+  --question "第 12 页脚注 ③ 是否应归属上一段？" \
+  --context-uid block-abc
+```
+
+```bash
+epubforge editor agent-output add-command work/book <output-id> \
+  --command-file scratch/command.json
+```
+
+```bash
+epubforge editor agent-output add-patch work/book <output-id> \
+  --patch-file scratch/patch.json
+```
+
+```bash
+epubforge editor agent-output validate work/book <output-id>
+epubforge editor agent-output submit work/book <output-id>
+```
+
+这样 agent 仍然使用订阅界面完成推理，但结构化数据由本地 CLI 维护。
+
+### 3. Validate AgentOutput before submission
+
+`validate` 应检查：
+
+- output 文件是合法 JSON。
+- 顶层 schema 合法。
+- `kind`、`agent_id`、`chapter_uid` 合法。
+- `base_version == current book.op_log_version`，或提供明确的 stale 处理。
+- `commands` 全部是合法 `PatchCommand`，并能编译成 `BookPatch`。
+- `patches` 全部是合法 `BookPatch`。
+- `memory_patches` 全部是合法 `MemoryPatch`。
+- `open_questions` 全部是合法 `OpenQuestion`。
+- 所有 block/chapter uid 存在。
+- 修改范围不越过当前 agent 的 chapter 或 book lock。
+- scanner 完成扫描时必须更新对应 `chapter_status.read_passes`。
+- topology patch 必须由 supervisor 或明确授权流程提交。
+
+### 4. Submit AgentOutput through one command
+
+`submit` 应成为统一入口。
+
+建议语义：
+
+```bash
+epubforge editor agent-output submit work/book <output-id> --stage
+epubforge editor agent-output submit work/book <output-id> --apply
+```
+
+`--stage`：
+
+- validate output。
+- 将合法 commands / patches 追加到 staging。
+- 归档完整 AgentOutput。
+- 不修改 `book.json`。
+
+`--apply`：
+
+- validate output。
+- 将 commands 编译成 patches，并将 patches 应用到 `book.json`。
+- 应用 memory patches。
+- 归档完整 AgentOutput。
+- 成功后续租。
+
+目标设计中不保留 `propose-op` 作为兼容入口。新的低层入口应是 `patch validate/apply`，普通 agent workflow 应走 `agent-output submit`。
+
+### 5. Introduce UID-addressed BookPatch as the atomic edit layer
+
+新增 `BookPatch` 作为底层修改语言，用 UID 而不是 JSON array index 定位节点。
+
+目标不是暴露裸 RFC 6902 JSON Patch，而是采用 JSON Patch 的思想：小而通用的 atomic operations，加上 epubforge 的 Book IR 语义校验。
+
+建议结构：
+
+```python
+class BookPatch(BaseModel):
+    patch_id: str
+    agent_id: str
+    base_version: int
+    scope: PatchScope
+    changes: list[IRChange]
+    rationale: str
+    evidence_refs: list[str] = []
+
+class PatchScope(BaseModel):
+    chapter_uid: str | None = None
+    book_wide: bool = False
+```
+
+底层 change 集合保持很小：
+
+```python
+class SetFieldChange(BaseModel):
+    op: Literal["set_field"]
+    target_uid: str
+    field: str
+    old: object
+    new: object
+
+class ReplaceNodeChange(BaseModel):
+    op: Literal["replace_node"]
+    target_uid: str
+    old_node: dict[str, object]
+    new_node: dict[str, object]
+
+class InsertNodeChange(BaseModel):
+    op: Literal["insert_node"]
+    parent_uid: str | None
+    after_uid: str | None
+    node: dict[str, object]
+
+class DeleteNodeChange(BaseModel):
+    op: Literal["delete_node"]
+    target_uid: str
+    old_node: dict[str, object]
+
+class MoveNodeChange(BaseModel):
+    op: Literal["move_node"]
+    target_uid: str
+    from_parent_uid: str | None
+    to_parent_uid: str | None
+    after_uid: str | None
+```
+
+这套底层 patch 应能表达任意合法 Book IR 状态变化：
+
+- 字段变化：`set_field`
+- 节点新增：`insert_node`
+- 节点删除：`delete_node`
+- 节点移动：`move_node`
+- 节点整体替换：`replace_node`
+
+对于大范围移动或批量操作，可以额外提供 ergonomic batch change，例如 `move_block_range`。这不是表达能力必需，但能降低 agent 输出噪音。
+
+### 6. Keep high-level ergonomic PatchCommands as macros
+
+高层能力仍然重要，因为 agent 和人类 supervisor 更容易理解“为什么改”，而不是只看底层字段变化。
+
+建议把当前一部分 `EditOp` 替换为 macro-style `PatchCommand`：
+
+- `split_block`
+- `merge_blocks`
+- `split_chapter`
+- `merge_chapters`
+- `relocate_block`
+- `pair_footnote`
+- `unpair_footnote`
+- `mark_orphan`
+- `split_merged_table`
+
+这些 high-level commands 不再各自拥有复杂 apply 逻辑，而是：
+
+```text
+PatchCommand
+        ↓ compile
+UID-addressed BookPatch
+        ↓ validate
+apply patch
+```
+
+普通字段修改则优先收敛到 `set_field` / `replace_node`：
+
+- `set_text`
+- `set_role`
+- `set_style_class`
+- `set_heading_level`
+- `set_heading_id`
+- `set_footnote_flag`
+- `set_paragraph_cross_page`
+- `set_table_metadata`
+
+推荐 agent 工作方式：
+
+- 优先使用高层 ergonomic command。
+- 如果没有对应 command，再使用底层 `BookPatch` atomic changes。
+- 所有 high-level command 最终都应可展开为 `BookPatch`，以便统一 validate/apply/rebase。
+
+### 7. Validate patches semantically, not just structurally
+
+`BookPatch` 可以表达任意状态转换，也可以表达非法状态转换。因此 validator 必须保留 Book IR 语义规则。
+
+至少需要检查：
+
+- patch schema 合法。
+- `base_version` 与当前版本兼容。
+- UID 存在且唯一。
+- `old` / `old_node` 与当前 Book 匹配，充当 precondition。
+- 修改范围匹配 lease / patch scope。
+- field 是否允许被该 agent 修改。
+- 新 node 带有合法 provenance。
+- chapter/block order 合法。
+- table HTML 合法。
+- footnote invariants 合法。
+- 应用 patch 后 Book 仍可通过 Pydantic validation 和 audit invariants。
+
+这意味着 `BookPatch` 是低层表达能力，不是绕过规则的逃生口。
+
+### 8. Use snapshot diff to generate BookPatch when possible
+
+长期可以减少 agent 手写 patch 的需求。更好的模式是：
+
+```text
+base chapter/book projection
+        ↓ agent edits proposed projection
+system computes diff(base, proposed)
+        ↓
+UID-aware BookPatch
+        ↓
+validate / rebase / apply
+```
+
+三方关系：
+
+```text
+base: agent 开始工作时看到的版本
+current: 当前主版本
+proposed: agent 修改后的版本
+```
+
+提交时可以做乐观并发：
+
+- agent 改了 block A，current 没改 block A：可自动 rebase/apply。
+- agent 和 current 都改了 block A.text：产生 conflict，交 reviewer/supervisor。
+
+这样可以减少长时间锁的压力。
+
+- Direct-edit mode: 仍可保留 lease，作为 scanner/fixer 的显式工作边界和高风险拓扑操作保护。
+- Git workspace mode: branch/worktree 已经提供 agent 工作隔离，可以取消长时间 chapter lease，只保留最终 integration 的短事务。
+
+### 9. Add Book diff as the bridge from edited state to BookPatch
+
+核心能力：
+
+```text
+old Book IR + new Book IR
+        ↓
+diff_books(base, proposed)
+        ↓
+BookPatch
+```
+
+第一版目标不应追求最小 diff，而应追求准确可重放：
+
+```text
+apply_book_patch(base, diff_books(base, proposed)) == proposed
+```
+
+建议流程：
+
+```text
+base Book
+proposed Book
+        ↓
+Pydantic validate both
+        ↓
+canonicalize both
+        ↓
+index chapters/blocks by uid
+        ↓
+compare book fields, chapter fields, block fields, parent, and order
+        ↓
+emit BookPatch
+        ↓
+apply patch to base
+        ↓
+assert canonical result == canonical proposed
+```
+
+第一版 diff 规则：
+
+- 同 UID 存在于两边：比较允许编辑的字段，生成 `set_field`。
+- 同 UID 存在于两边但 parent/order 变化：生成 `move_node`。
+- proposed 有、base 没有：生成 `insert_node`。
+- base 有、proposed 没有：生成 `delete_node`。
+- block/chapter kind 变化：优先生成 `replace_node`。
+- UID 变化：不要猜测 rename；第一版按 `delete_node` + `insert_node` 处理。
+
+每条 change 都必须携带旧值或旧节点：
+
+```json
+{
+  "op": "set_field",
+  "target_uid": "p001-b02-f91",
+  "field": "text",
+  "old": "teh book",
+  "new": "the book"
+}
+```
+
+`old` / `old_node` 充当 precondition。apply 时当前值不匹配就拒绝，交给 rebase/conflict 处理。
+
+### 10. Use Git for projection version control, not semantic correctness
+
+完成 Book diff 后，可以大量利用 Git，但 Git 仍不能完全替代 epubforge 的 patch/validator。
+
+如果仍然把整本书存成一个巨大 `book.json`，Git merge 帮助有限。更好的形态是 Git-friendly projection：
+
+```text
+book.json
+chapters/order.json
+chapters/<chapter_uid>/meta.json
+chapters/<chapter_uid>/blocks.order
+blocks/<block_uid>.md
+blocks/<block_uid>.json
+```
+
+这种形态下：
+
+- 不同 agent 修改不同 block，Git 大概率自动 merge。
+- 同一个 block 同一段文本冲突，Git 会标出冲突。
+- branch/worktree 可以承载 agent 私有工作区。
+- `git diff` / difftastic 可以作为 review display。
+
+但 Git 只能处理文本/文件层面的版本控制。merge 之后仍必须回到 epubforge 语义层：
+
+```text
+merged projection
+        ↓ parse
+proposed Book
+        ↓ diff_books(base, proposed)
+BookPatch
+        ↓ validate
+apply
+```
+
+Git 可以替代或弱化的部分：
+
+- 版本存储。
+- 分支/worktree。
+- 文本级 merge/rebase。
+- 冲突标记。
+- 历史查看。
+
+Git 不能替代的部分：
+
+- Book IR schema validation。
+- UID/scope/lease 校验。
+- footnote pairing 合法性。
+- table HTML 和跨页表格合法性。
+- provenance 完整性。
+- doctor/audit invariants。
+- patch audit log。
+
+因此推荐边界是：
+
+```text
+Git: projection history and text merge
+BookPatch: machine-applicable semantic change representation
+validator: Book-specific correctness
+```
+
+如果选择 Git 作为 agentic workflow 的 VCS/隔离机制，则应直接取消长时间 chapter lease 模型：
+
+```text
+agent A -> branch/worktree agent/a
+agent B -> branch/worktree agent/b
+        ↓
+each agent edits its own projection workspace
+        ↓
+Git merge/rebase into integration branch
+        ↓
+parse merged projection -> proposed Book
+        ↓
+diff_books(base, proposed) -> BookPatch
+        ↓
+semantic validation -> apply/commit
+```
+
+在这个模式下：
+
+- agent 读写自己的 worktree/branch，不需要 chapter lease。
+- 并发隔离由 Git branch/worktree 提供。
+- 文本冲突由 Git merge/rebase 暴露。
+- Book 语义冲突由 `BookPatch` validator 暴露。
+- 不应同时维护长期 lease 和 Git branch/worktree 两套并发模型。
+
+仍可能需要一个很短的 integration transaction，用于把已验证的 merged Book/Patch 提交到主状态；但这不是 agent 工作期间持有的 chapter lease。
+
+### 11. Use difftastic/Git/Dolt for review and storage, not as the apply layer
+
+difftastic/CST diff 适合作为 human review 展示层。它能更清楚地展示结构变化，尤其是 JSON/YAML/Markdown/projection 文件的变化。
+
+但它不应作为核心 apply 层：
+
+- difftastic 输出主要面向人类阅读，不是稳定 patch schema。
+- CST diff 懂语法树，不懂 Book IR 语义。
+- Git/Dolt 能提供版本、分支、diff/merge，但仍需要 epubforge 自己校验脚注、章节、表格、provenance 等语义。
+
+推荐分工：
+
+```text
+Git/Dolt/SQLite: storage, history, transaction, branch/diff support
+difftastic: review/display
+BookPatch: machine-applicable edit representation
+semantic validator: Book-specific correctness
+```
+
+如果未来使用 Dolt，最好把 Book IR 正规化成表，而不是把整本 `book.json` 当 blob：
+
+```text
+chapters(chapter_uid, title, level, ...)
+blocks(block_uid, kind, payload_json, provenance_json, ...)
+chapter_blocks(chapter_uid, block_uid, position_key)
+patch_log(patch_id, patch_json, ...)
+agent_outputs(output_id, output_json, ...)
+```
+
+这样 Dolt 的 row/cell diff 和 merge 才能发挥作用。
+
+### 12. Make UIDs both collision-resistant and agent-readable
+
+BookPatch 依赖 UID 定位，因此 UID 需要同时满足两个目标：
+
+- 机器层面：稳定、唯一、跨 revision 不易碰撞。
+- agent 层面：可读、可引用、可在自然语言上下文里辨认。
+
+建议：
+
+- canonical UID 继续作为不透明稳定 id，不依赖数组位置。
+- runtime-created nodes 必须包含随机/nonce 成分，避免不同 revision 或不同 agent 创建节点时碰巧生成同名。
+- 面向 agent 的 display handle 可以带 3-4 位短随机后缀，例如 `p012-heading-a3f`、`fn-014-b9c`、`tbl-008-7d2`。
+- 不能只用语义 slug 作为 UID，例如 `introduction`、`chapter-1`，因为跨 revision 和同名标题容易冲突。
+
+需要区分：
+
+```text
+uid: 系统级稳定标识，用于 patch/apply。
+display_handle: agent-readable alias，用于 prompt、projection、review。
+```
+
+如果决定把二者合并，也应确保 handle 里包含短 nonce。
+
+### 13. Provide agent-friendly serde/projections
+
+虽然 agent 是机器，但 Codex/Claude Code 的工作方式接近自然语言审读。让它直接读完整嵌套 `book.json` 并不理想。
+
+应提供可反序列化、可回写、可 diff 的 projection：
+
+```text
+edit_state/projections/chapters/<chapter_uid>.md
+edit_state/projections/chapters/<chapter_uid>.jsonl
+```
+
+示例 Markdown-ish projection：
+
+```text
+# Chapter: Introduction [ch-001-a3f]
+
+[[block p001-b01-c7e | kind=heading | page=1 | level=1]]
+Introduction
+
+[[block p001-b02-f91 | kind=paragraph | page=1 | role=body]]
+This is the first paragraph...
+
+[[block p002-fn1-8ab | kind=footnote | page=2 | callout=1 | paired=false]]
+1. Footnote text...
+```
+
+要求：
+
+- 每个 block 明确显示 UID / display handle。
+- provenance/page/role/kind 等关键元数据就近显示。
+- projection 可以 parse 回结构化 form。
+- snapshot diff 可以从 projection 变化生成 `BookPatch`。
+- agent prompt 优先引用 projection，而不是要求 agent 在巨大 JSON 里定位 block。
+
+这会让 agent 更像在审读书稿，同时仍保留机器可验证的 UID-based patch。
+
+### 14. Choose one concurrency model: explicit leases or Git workspaces
+
+自动 lock 看起来方便，但对 scanner/fixer 不理想，因为它们通常先读上下文、再判断、再产出 op。如果只在提交时自动 lock，agent 可能基于已过期上下文工作很久，最后才失败。
+
+如果不采用 Git branch/worktree 作为 agent 工作区，则保留显式工作边界：
+
+```bash
+epubforge editor acquire-lease work/book \
+  --chapter ch-1 \
+  --agent scanner-1 \
+  --task "scan chapter"
+```
+
+或未来改名为更语义化的：
+
+```bash
+epubforge editor begin-agent-task work/book \
+  --kind scanner \
+  --chapter ch-1 \
+  --agent scanner-1
+```
+
+结论：
+
+- 不采用“尝试编辑时自动长期 lock”作为主模式。
+- Direct-edit mode: 保留显式 acquire/begin，并在 submit/apply 阶段做额外 lease 校验。
+- Git workspace mode: agent 直接在自己的 branch/worktree 工作，不使用 chapter lease；最终 integration 只做短事务和 semantic validation。
+- 两种模式不要同时作为主路径存在，否则会引入双重并发协议。
+
+### 15. Renew lease after successful apply
+
+成功编辑应续租。
+
+建议规则：
+
+- patch apply 成功应用某个 agent 的 patch 后，刷新该 agent 持有的相关 chapter lease 或 book lock TTL。
+- `agent-output submit --apply` 成功后刷新相关 lease。
+- 失败不续租。
+- 纯读取命令不续租。
+- `submit --stage` 是否续租要谨慎，默认不续租更安全。
+
+需要考虑最大持锁时长：
+
+```toml
+[editor]
+lease_ttl_seconds = 1800
+book_exclusive_ttl_seconds = 300
+lease_max_age_seconds = 7200
+```
+
+避免 agent 通过持续小步 apply 无限占锁。
+
+### 16. Move VLM out of pipeline stage semantics
+
+目标状态：
+
+- ingestion Stage 3 只负责生成 Docling-derived evidence draft。
+- 不再有 VLM mode / skip-VLM mode 的主流程分叉。
+- VLM 成为 editor 工具。
+
+VLM 工具输入应包含：
+
+- 当前 `Book` IR 的指定范围。
+- 对应 PDF page image。
+- page/block/chapter context。
+- 可选 doctor issues/hints。
+
+VLM 工具输出应是 structured observation，不直接修改 `book.json`。
+
+建议 schema：
+
+```python
+class VLMObservation(BaseModel):
+    observation_id: str
+    page: int
+    chapter_uid: str | None
+    related_block_uids: list[str]
+    model: str
+    image_sha256: str
+    prompt_sha256: str
+    findings: list[VLMFinding]
+    raw_text: str | None = None
+```
+
+这些 observation 存入：
+
+```text
+edit_state/evidence/vlm_observations/
+```
+
+或继续放在：
+
+```text
+edit_state/audit/vlm_pages/
+```
+
+但需要可被 op/evidence 引用。
+
+### 17. Make doctor output schedulable
+
+doctor 现在输出 `issues`、`hints`、`readiness`、`delta`，但 supervisor 仍需要人工解释这些内容。
+
+后续应考虑把 doctor 输出转为明确工作项：
+
+```python
+class DoctorTask(BaseModel):
+    task_id: str
+    kind: Literal["scan", "fix", "review"]
+    chapter_uid: str | None
+    block_uid: str | None
+    source_issue_key: str | None
+    source_hint_key: str | None
+    priority: int
+    recommended_agent: Literal["scanner", "fixer", "reviewer"]
+```
+
+这样 supervisor 可以直接调度：
+
+- 有硬规则 issue：开 fixer。
+- 有 `needs_scan`：开 scanner。
+- 有 `open_question`：开 reviewer。
+- 有 candidate role：优先 scanner/fixer。
+- 有 VLM evidence need：scanner 调用 VLM 工具。
+
+## Proposed Workflow
+
+### Direct-edit mode scanner
+
+不使用 Git worktree/branch 时，scanner 仍通过显式 lease 声明工作边界：
+
+```bash
+epubforge editor acquire-lease work/book \
+  --chapter ch-1 \
+  --agent scanner-1 \
+  --task "scan chapter"
+
+epubforge editor render-prompt work/book \
+  --kind scanner \
+  --chapter ch-1
+
+epubforge editor agent-output begin work/book \
+  --kind scanner \
+  --chapter ch-1 \
+  --agent scanner-1
+
+# scanner uses add-note/add-question/add-command/add-patch/add-memory-patch commands
+
+epubforge editor agent-output validate work/book <output-id>
+epubforge editor agent-output submit work/book <output-id> --apply
+
+epubforge editor release-lease work/book \
+  --chapter ch-1 \
+  --agent scanner-1
+```
+
+### Direct-edit mode fixer
+
+不使用 Git worktree/branch 时，fixer 同样通过显式 lease 避免共享状态内的并发修改：
+
+```bash
+epubforge editor acquire-lease work/book \
+  --chapter ch-1 \
+  --agent fixer-1 \
+  --task "fix doctor issues"
+
+epubforge editor render-prompt work/book \
+  --kind fixer \
+  --chapter ch-1 \
+  --issues "..."
+
+epubforge editor agent-output begin work/book \
+  --kind fixer \
+  --chapter ch-1 \
+  --agent fixer-1
+
+# fixer adds commands/patches/evidence refs/notes
+
+epubforge editor agent-output submit work/book <output-id> --apply
+epubforge editor release-lease work/book --chapter ch-1 --agent fixer-1
+```
+
+### Git workspace mode scanner/fixer
+
+如果选择 Git 作为 VCS/并发隔离机制，agent 不拿 chapter lease，而是在自己的 branch/worktree 里工作：
+
+```bash
+git worktree add ../epubforge-scan-ch-1 -b agent/scanner-1/ch-1
+cd ../epubforge-scan-ch-1
+
+epubforge editor projection export work/book \
+  --chapter ch-1 \
+  --out edit_state/projections/chapters/ch-1.md
+
+# scanner/fixer edits projection files in this worktree
+
+git add edit_state/projections/chapters/ch-1.md
+git commit -m "scanner-1 scan chapter ch-1"
+```
+
+Supervisor/integration side：
+
+```bash
+git merge agent/scanner-1/ch-1
+
+epubforge editor projection diff work/book \
+  --chapter ch-1 \
+  --base-version 12 \
+  --proposed edit_state/projections/chapters/ch-1.md \
+  --out edit_state/scratch/patches/scanner-1-ch-1.patch.json
+
+epubforge editor patch validate work/book \
+  edit_state/scratch/patches/scanner-1-ch-1.patch.json
+
+epubforge editor patch apply work/book \
+  edit_state/scratch/patches/scanner-1-ch-1.patch.json
+```
+
+这个模式下：
+
+- agent 的读写隔离由 Git branch/worktree 提供。
+- 不使用长期 chapter lease。
+- Git merge 成功只说明文本层没有冲突。
+- BookPatch validation 成功才说明 Book IR 语义可接受。
+- patch apply 只需要短事务，不需要 agent 工作期间持锁。
+
+### VLM evidence
+
+```bash
+epubforge editor vlm-range work/book \
+  --chapter ch-1 \
+  --page 12 \
+  --blocks block-a,block-b
+```
+
+Expected behavior:
+
+- render relevant page image。
+- include current IR context。
+- call VLM with structured output。
+- write `VLMObservation` evidence file。
+- return `observation_id` for scanner/fixer to reference。
+
+### Projection diff to BookPatch
+
+```bash
+epubforge editor projection export work/book \
+  --chapter ch-1 \
+  --out edit_state/projections/chapters/ch-1.md
+
+# agent edits the projection through normal file editing
+
+epubforge editor projection diff work/book \
+  --chapter ch-1 \
+  --base-version 12 \
+  --proposed edit_state/projections/chapters/ch-1.md \
+  --out edit_state/scratch/patches/scanner-1-ch-1.patch.json
+
+epubforge editor patch validate work/book \
+  edit_state/scratch/patches/scanner-1-ch-1.patch.json
+
+epubforge editor patch apply work/book \
+  edit_state/scratch/patches/scanner-1-ch-1.patch.json
+```
+
+Expected behavior:
+
+- projection parser reconstructs the proposed chapter structure。
+- diff engine compares base/proposed by UID。
+- diff engine emits UID-addressed `BookPatch`。
+- validator checks semantic invariants and lease/scope。
+- apply path uses the same transaction/log mechanism as high-level commands。
+
+## Implementation Phases
+
+### Phase 1: AgentOutput model and validation
+
+- Add `editor/agent_output.py`.
+- Define `AgentOutput`.
+- Add validation helpers.
+- Add tests for malformed JSON, stale base_version, invalid uid, invalid scope.
+
+### Phase 2: BookPatch model and validator
+
+- Add `editor/patches.py`.
+- Define `BookPatch`, `PatchScope`, and small UID-addressed `PatchChange` union.
+- Implement semantic validation for UID existence, old-value preconditions, scope, and Book invariants.
+- Add tests showing low-level patch can express field edits, block insert/delete/move, and replace node.
+
+### Phase 3: High-level PatchCommand to BookPatch compilation
+
+- Replace simple existing field-edit operations with `set_field` / `replace_node`.
+- Compile macro commands like `split_block`, `merge_blocks`, `pair_footnote`, and `split_chapter` into `BookPatch`.
+- Remove the old `EditOp`/`OpEnvelope` apply surface rather than preserving compatibility wrappers.
+
+### Phase 4: Agent-friendly projections
+
+- Add projection export for chapter-scoped editable views.
+- Include UID/display handles, kind, page, role, provenance metadata, and text content.
+- Add projection parser.
+- Use difftastic/Git diff only for review display, not machine apply.
+
+### Phase 5: Book diff engine
+
+- Implement `diff_books(base: Book, proposed: Book) -> BookPatch`.
+- Implement `apply_book_patch(base: Book, patch: BookPatch) -> Book`.
+- Add the invariant test: `apply_book_patch(base, diff_books(base, proposed)) == proposed`.
+- Start with correctness, not minimality: allow delete+insert instead of rename inference.
+- Add tests for field edits, insert/delete/move block, replace block kind, chapter order changes, and invalid duplicate UID.
+
+### Phase 6: Projection diff to BookPatch
+
+- Parse edited projection into proposed Book/Chapter.
+- Compare against the base Book/Chapter snapshot with `diff_books`.
+- Emit `BookPatch`.
+- Validate patch semantically before submit/apply.
+
+### Phase 7: Git-backed projection workflow
+
+- Treat Git as optional storage/review infrastructure for projections.
+- Support branch/worktree-style agent private workspaces where useful.
+- After Git merge/rebase, parse merged projection back to Book and run `diff_books`.
+- Never treat a clean Git merge as proof of Book IR semantic correctness.
+- If Git workspace mode is selected, remove the long-running chapter lease requirement from normal scanner/fixer work.
+- Keep only a short integration transaction around semantic validation and commit/apply.
+
+### Phase 8: CLI command group
+
+- Add `epubforge editor agent-output begin`.
+- Add `add-note`.
+- Add `add-question`.
+- Add `add-command`.
+- Add `add-patch`.
+- Add `add-memory-patch`.
+- Add `validate`.
+- Add `submit`.
+
+### Phase 9: Integrate submit with staging/apply
+
+- `submit --stage` appends valid commands/patches to staging.
+- `submit --apply` compiles commands and applies patches transactionally.
+- Archive submitted outputs under `edit_state/audit/agent_outputs/`.
+- Replace `propose-op` with patch-oriented submission commands; no compatibility alias is required.
+
+### Phase 10: Lease renewal on successful apply
+
+- Add helper to renew relevant chapter/book lease after successful apply.
+- Update `apply-queue` path.
+- Update `agent-output submit --apply` path.
+- Add max-age guard if desired.
+
+### Phase 11: VLM as editor evidence tool
+
+- Introduce `VLMObservation` schema.
+- Add `vlm-range` or upgrade `vlm-page` to accept IR scope.
+- Store VLM evidence with page/image/model/prompt metadata.
+- Let AgentOutput reference evidence ids.
+
+### Phase 12: Simplify Stage 3
+
+- Make Stage 3 Docling-derived extraction the default and only ingestion mode.
+- Remove VLM-specific artifact id settings from ingestion artifact computation.
+- Keep backward compatibility for existing workdirs where practical, or require rerun with clear error.
+
+### Phase 13: Doctor task generation
+
+- Add optional task-oriented doctor output.
+- Map issues/hints/open questions to recommended scanner/fixer/reviewer work.
+- Use this as supervisor scheduling input.
+
+## Open Questions
+
+- Should `agent-output submit --stage` renew lease, or only `--apply`?
+- Should scanner be allowed to submit any low-level patch, or only low-risk intra-chapter PatchCommands?
+- Should topology patches be restricted to supervisor outputs?
+- Should memory changes be top-level `memory_patches` on `AgentOutput`, or encoded as BookPatch-adjacent records?
+- Should canonical `uid` and agent-facing `display_handle` be separate fields, or should UID itself be human-readable with a nonce suffix?
+- What exact projection format should be canonical: Markdown-ish, JSONL, or both?
+- Which high-level commands remain first-class macros after `BookPatch` exists?
+- Should the project choose Git workspace mode as the primary concurrency model and remove long-running chapter leases from normal agent work?
+- Should Git commits store projections only, or also materialized `book.json` snapshots?
+- What is the first acceptable conflict model: reject on same-field conflicts, or attempt semantic merge for selected fields?
+- Should VLM evidence live under `edit_state/audit/` or a new `edit_state/evidence/` directory?
+- How much backward compatibility is required for existing VLM Stage 3 artifacts?
+
+## Near-Term Recommendation
+
+Start with the smallest useful slice:
+
+1. Add `AgentOutput` schema.
+2. Draft `BookPatch` schema and validator.
+3. Add `PatchCommand` schema for ergonomic high-level edits.
+4. Implement `diff_books` / `apply_book_patch` with the round-trip invariant.
+5. Prototype one chapter projection export/import to validate UID/display-handle ergonomics.
+6. Add `agent-output begin/add-note/add-question/add-command/add-patch/validate`.
+7. Add lease renewal after successful patch apply.
+
+This addresses the most immediate reliability issues without first rewriting Stage 3 or the VLM path.
