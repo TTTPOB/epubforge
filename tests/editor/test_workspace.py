@@ -1,4 +1,4 @@
-"""Tests for Sub-phase 7A and 7B: Git workspace foundation layer.
+"""Tests for Sub-phase 7A, 7B, 7C, and 7D: Git workspace foundation layer.
 
 Covers (7A):
 - find_repo_root / GitError for non-repo paths
@@ -12,6 +12,15 @@ Covers (7A):
 Covers (7B):
 - create_worktree basic, custom path, base_ref, error cases, default path naming
 - list_worktrees initial state, with agent worktrees, agent_only filter
+
+Covers (7C):
+- remove_worktree merged, unmerged, force, main rejection
+- gc_worktrees stale removal, dry run, skip merged
+
+Covers (7D):
+- merge_and_validate no-conflict, git-conflict, semantic-conflict, parse-error
+- merge rollback verification
+- abort_merge
 """
 
 from __future__ import annotations
@@ -25,6 +34,8 @@ import pytest
 from epubforge.editor.workspace import (
     GCResult,
     GitError,
+    IntegrationResult,
+    MergeOutcome,
     WorktreeCreateResult,
     WorktreeInfo,
     WorktreeRemoveResult,
@@ -32,15 +43,26 @@ from epubforge.editor.workspace import (
     _default_worktree_path,
     _ensure_path_safe,
     _get_head_sha,
+    _parse_conflict_files,
     _parse_worktree_porcelain,
     _run_git,
     _validate_branch_name,
+    abort_merge,
     create_worktree,
     find_repo_root,
     gc_worktrees,
     list_worktrees,
+    merge_and_validate,
     remove_worktree,
 )
+from epubforge.ir.semantic import (
+    Book,
+    Chapter,
+    Heading,
+    Paragraph,
+    Provenance,
+)
+from epubforge.io import save_book
 
 
 # ---------------------------------------------------------------------------
@@ -800,4 +822,360 @@ def test_gc_skips_merged(git_repo: Path) -> None:
         cwd=git_repo,
         check=True,
         capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7D helpers
+# ---------------------------------------------------------------------------
+
+
+def _prov(page: int = 1) -> Provenance:
+    """Create a minimal Provenance."""
+    return Provenance(page=page, bbox=None, source="passthrough")
+
+
+def _minimal_book(
+    *,
+    title: str = "Test Book",
+    block_text: str = "Hello world.",
+    block_uid: str = "blk-1",
+    chapter_uid: str = "ch-1",
+) -> Book:
+    """Create a minimal Book suitable for edit_state/book.json."""
+    return Book(
+        initialized_at="2024-01-01T00:00:00",
+        uid_seed="test-seed",
+        title=title,
+        chapters=[
+            Chapter(
+                uid=chapter_uid,
+                title="Chapter 1",
+                level=1,
+                blocks=[
+                    Paragraph(
+                        uid=block_uid,
+                        text=block_text,
+                        role="body",
+                        provenance=_prov(),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _init_book_in_repo(repo: Path, book: Book, work_dir_rel: str = "work/book") -> Path:
+    """Write book.json into repo/work_dir_rel/edit_state/ and return work_dir."""
+    work_dir = repo / work_dir_rel
+    # save_book uses resolve_book_path which checks if work_dir is a directory.
+    # Create it first so that resolve_book_path correctly appends edit_state/book.json.
+    work_dir.mkdir(parents=True, exist_ok=True)
+    save_book(book, work_dir)
+    return work_dir
+
+
+@pytest.fixture
+def book_repo(tmp_path: Path) -> tuple[Path, str]:
+    """Create a Git repo with a committed edit_state/book.json.
+
+    Returns (repo_root, work_dir_rel).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    work_dir_rel = "work/book"
+    book = _minimal_book()
+    _init_book_in_repo(repo, book, work_dir_rel)
+
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial book"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    return repo, work_dir_rel
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7D: _parse_conflict_files
+# ---------------------------------------------------------------------------
+
+
+def test_parse_conflict_files_basic() -> None:
+    """_parse_conflict_files should extract file paths from CONFLICT lines."""
+    stdout = (
+        "Auto-merging edit_state/book.json\n"
+        "CONFLICT (content): Merge conflict in edit_state/book.json\n"
+        "Automatic merge failed; fix conflicts and then commit the result.\n"
+    )
+    files = _parse_conflict_files(stdout, "")
+    assert files == ["edit_state/book.json"]
+
+
+def test_parse_conflict_files_multiple() -> None:
+    """_parse_conflict_files should handle multiple conflict files."""
+    stdout = (
+        "CONFLICT (content): Merge conflict in a.txt\n"
+        "CONFLICT (content): Merge conflict in b/c.txt\n"
+    )
+    files = _parse_conflict_files(stdout, "")
+    assert files == ["a.txt", "b/c.txt"]
+
+
+def test_parse_conflict_files_empty() -> None:
+    """_parse_conflict_files should return empty list for no conflicts."""
+    files = _parse_conflict_files("Everything up to date", "")
+    assert files == []
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7D: merge_and_validate
+# ---------------------------------------------------------------------------
+
+
+def test_merge_no_conflict(book_repo: tuple[Path, str]) -> None:
+    """Merge with non-conflicting block text change should succeed."""
+    repo, work_dir_rel = book_repo
+
+    # Create worktree and modify book.json
+    wt = create_worktree(repo, "agent/scanner-1")
+    wt_book_path = wt.worktree_path / work_dir_rel / "edit_state" / "book.json"
+
+    # Load, modify, and save the book in the worktree
+    import json
+    book_data = json.loads(wt_book_path.read_text(encoding="utf-8"))
+    book_data["chapters"][0]["blocks"][0]["text"] = "Modified text."
+    wt_book_path.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+
+    # Commit the change in the worktree
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "modify block text"],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+
+    # Merge back
+    result = merge_and_validate(repo, work_dir_rel, "agent/scanner-1")
+
+    assert isinstance(result, IntegrationResult)
+    assert result.outcome.status == "accepted"
+    assert result.outcome.message == "merge validated"
+    assert result.change_count > 0
+    assert result.merge_commit is not None
+    assert result.pre_merge_sha is not None
+    assert result.base_sha256 is not None
+    assert result.merged_sha256 is not None
+    assert result.patch_json is not None
+    assert result.conflict_files == []
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_merge_git_conflict(book_repo: tuple[Path, str]) -> None:
+    """Merge with conflicting changes on the same line should report git_conflict."""
+    repo, work_dir_rel = book_repo
+
+    # Create worktree
+    wt = create_worktree(repo, "agent/conflict-1")
+    wt_book_path = wt.worktree_path / work_dir_rel / "edit_state" / "book.json"
+    main_book_path = repo / work_dir_rel / "edit_state" / "book.json"
+
+    import json
+
+    # Modify the same block text in the worktree
+    book_data = json.loads(wt_book_path.read_text(encoding="utf-8"))
+    book_data["chapters"][0]["blocks"][0]["text"] = "Worktree version."
+    wt_book_path.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "worktree change"],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+
+    # Modify the same block text in the main repo
+    book_data2 = json.loads(main_book_path.read_text(encoding="utf-8"))
+    book_data2["chapters"][0]["blocks"][0]["text"] = "Main repo version."
+    main_book_path.write_text(json.dumps(book_data2, indent=2), encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "main change"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    # Record pre-merge SHA
+    pre_sha = _get_head_sha(repo)
+
+    # Merge should fail with git_conflict
+    result = merge_and_validate(repo, work_dir_rel, "agent/conflict-1")
+
+    assert result.outcome.status == "git_conflict"
+    assert result.conflict_files  # should have at least one conflict file
+    # HEAD should be back to pre-merge state
+    assert _get_head_sha(repo) == pre_sha
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_merge_semantic_conflict(book_repo: tuple[Path, str]) -> None:
+    """Git merge succeeds but book-level field change causes DiffError (semantic_conflict)."""
+    repo, work_dir_rel = book_repo
+
+    # Create worktree
+    wt = create_worktree(repo, "agent/semantic-1")
+    wt_book_path = wt.worktree_path / work_dir_rel / "edit_state" / "book.json"
+
+    import json
+
+    # Change the book title in the worktree — diff_books rejects book-level field changes
+    book_data = json.loads(wt_book_path.read_text(encoding="utf-8"))
+    book_data["title"] = "A Different Title"
+    wt_book_path.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "change title"],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+
+    # Record pre-merge SHA
+    pre_sha = _get_head_sha(repo)
+
+    result = merge_and_validate(repo, work_dir_rel, "agent/semantic-1")
+
+    assert result.outcome.status == "semantic_conflict"
+    assert "title" in result.outcome.message.lower() or "unsupported" in result.outcome.message.lower()
+    # HEAD should be rolled back
+    assert _get_head_sha(repo) == pre_sha
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_merge_parse_error(book_repo: tuple[Path, str]) -> None:
+    """Git merge succeeds but merged book.json is invalid JSON -> parse_error."""
+    repo, work_dir_rel = book_repo
+
+    # Create worktree
+    wt = create_worktree(repo, "agent/parse-err-1")
+    wt_book_path = wt.worktree_path / work_dir_rel / "edit_state" / "book.json"
+
+    # Write invalid JSON
+    wt_book_path.write_text("{invalid json!!!", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "break json"],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+
+    pre_sha = _get_head_sha(repo)
+
+    result = merge_and_validate(repo, work_dir_rel, "agent/parse-err-1")
+
+    assert result.outcome.status == "parse_error"
+    assert _get_head_sha(repo) == pre_sha
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_merge_rollback_on_semantic_failure(book_repo: tuple[Path, str]) -> None:
+    """After a semantic failure the HEAD SHA should match pre_merge_sha."""
+    repo, work_dir_rel = book_repo
+
+    wt = create_worktree(repo, "agent/rollback-1")
+    wt_book_path = wt.worktree_path / work_dir_rel / "edit_state" / "book.json"
+
+    import json
+    # Change book title to trigger DiffError
+    book_data = json.loads(wt_book_path.read_text(encoding="utf-8"))
+    book_data["title"] = "Rollback Test Title"
+    wt_book_path.write_text(json.dumps(book_data, indent=2), encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "trigger rollback"],
+        cwd=wt.worktree_path, check=True, capture_output=True,
+    )
+
+    pre_sha = _get_head_sha(repo)
+    result = merge_and_validate(repo, work_dir_rel, "agent/rollback-1")
+
+    assert result.outcome.status == "semantic_conflict"
+    assert result.pre_merge_sha == pre_sha
+    # Verify HEAD matches pre_merge_sha
+    assert _get_head_sha(repo) == pre_sha
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_merge_branch_not_found(book_repo: tuple[Path, str]) -> None:
+    """Merging a non-existent branch should return git_conflict with descriptive message."""
+    repo, work_dir_rel = book_repo
+
+    result = merge_and_validate(repo, work_dir_rel, "agent/nonexistent-999")
+
+    assert result.outcome.status == "git_conflict"
+    assert "does not exist" in result.outcome.message
+
+
+def test_merge_dirty_working_tree(book_repo: tuple[Path, str]) -> None:
+    """Merge should be rejected when the working tree has uncommitted changes."""
+    repo, work_dir_rel = book_repo
+
+    # Create an uncommitted file
+    (repo / "dirty.txt").write_text("dirty", encoding="utf-8")
+
+    # Create a branch that exists (we need it to pass the branch-exists check)
+    wt = create_worktree(repo, "agent/dirty-1")
+
+    result = merge_and_validate(repo, work_dir_rel, "agent/dirty-1")
+
+    assert result.outcome.status == "git_conflict"
+    assert "uncommitted" in result.outcome.message
+
+    # Cleanup
+    (repo / "dirty.txt").unlink()
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=repo, check=True, capture_output=True,
     )

@@ -20,6 +20,12 @@ Public API (Sub-phase 7C):
     - remove_worktree      — remove a worktree and optionally its branch
     - gc_worktrees         — garbage-collect stale agent worktrees
 
+Public API (Sub-phase 7D):
+    - MergeOutcome         — outcome classification for a merge attempt
+    - IntegrationResult    — full result of an integration merge attempt
+    - merge_and_validate   — merge an agent branch with semantic validation
+    - abort_merge          — abort an in-progress merge
+
 Internal helpers:
     - _run_git              — subprocess wrapper with timeout / check
     - _validate_branch_name — branch naming safety guard
@@ -27,15 +33,18 @@ Internal helpers:
     - _ensure_path_safe      — path-escape guard
     - _get_head_sha          — abbreviated HEAD SHA helper
     - _parse_worktree_porcelain — parser for ``git worktree list --porcelain``
+    - _parse_conflict_files — extract conflicting file paths from merge output
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +121,29 @@ class GCResult:
     removed: list[WorktreeRemoveResult]  # worktrees that were removed
     skipped: list[str]                   # "path: reason" entries for skipped worktrees
     pruned: int                          # number of entries cleaned by git worktree prune
+
+
+@dataclass(frozen=True)
+class MergeOutcome:
+    """Outcome classification for a merge attempt."""
+
+    status: Literal["accepted", "git_conflict", "semantic_conflict", "parse_error"]
+    message: str
+
+
+@dataclass(frozen=True)
+class IntegrationResult:
+    """Full result of an integration merge attempt."""
+
+    outcome: MergeOutcome
+    branch: str                         # branch that was merged
+    merge_commit: str | None            # merge commit SHA (if accepted)
+    pre_merge_sha: str | None           # integration branch HEAD before merge
+    base_sha256: str | None             # base book.json SHA256
+    merged_sha256: str | None           # merged book.json SHA256
+    change_count: int                   # number of changes in BookPatch
+    patch_json: dict | None             # BookPatch JSON (if accepted)
+    conflict_files: list[str]           # Git conflict file list
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +801,328 @@ def gc_worktrees(
     return GCResult(removed=removed, skipped=skipped, pruned=pruned)
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers — Sub-phase 7D
+# ---------------------------------------------------------------------------
+
+
+def _parse_conflict_files(stdout: str, stderr: str) -> list[str]:
+    """Extract conflicting file paths from Git merge output.
+
+    Parses ``CONFLICT (content): Merge conflict in <path>`` lines
+    from both stdout and stderr.
+    """
+    pattern = re.compile(r"CONFLICT \([^)]+\):.*?(?:Merge conflict in |merge conflict in )(.+)")
+    files: list[str] = []
+    for line in (stdout + "\n" + stderr).splitlines():
+        m = pattern.search(line)
+        if m:
+            files.append(m.group(1).strip())
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Public API — Sub-phase 7D
+# ---------------------------------------------------------------------------
+
+
+def merge_and_validate(
+    repo_root: Path,
+    work_dir_rel: str,
+    branch: str,
+    *,
+    timeout: int = 60,
+) -> IntegrationResult:
+    """Merge an agent branch and validate the result semantically.
+
+    v1 always auto-aborts/rollbacks on any conflict (PD5 reject-and-report).
+
+    Flow (per plan section 8.1):
+        1.  Snapshot base Book from ``work_dir_rel/edit_state/book.json``.
+        1b. Record ``pre_merge_sha`` for rollback.
+        2.  Verify branch exists via ``git rev-parse --verify``.
+        2b. Check clean working tree via ``git status --porcelain``.
+        3.  ``git merge --no-ff <branch> -m "Merge <branch>"``
+        4.  If Git conflict: abort merge, return ``git_conflict``.
+        5.  Parse merged ``book.json``.
+        6.  ``diff_books(base, merged)`` -> BookPatch.
+        7.  ``validate_book_patch`` + ``apply_book_patch`` round-trip.
+        8.  Compare ``applied.model_dump(mode="json")`` vs ``merged.model_dump(mode="json")``.
+        9.  Accept — return merge details.
+
+    All rollback paths use ``git reset --hard <pre_merge_sha>`` (recorded
+    before the merge) instead of ``HEAD~1``.
+
+    On timeout during any git subprocess, attempts ``git merge --abort``
+    as best-effort cleanup before raising GitError.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        work_dir_rel: Relative path from repo_root to the work directory
+            (e.g. ``work/book``).
+        branch: Branch name to merge (must match ``agent/<kind>-<id>``).
+        timeout: Maximum seconds for the ``git merge`` command.
+
+    Returns:
+        An ``IntegrationResult`` describing the merge outcome.
+
+    Raises:
+        GitError: For unexpected Git failures or timeout.
+    """
+    # Lazy imports to avoid circular dependencies and keep the module
+    # importable without the full editor stack when only Git helpers are needed.
+    from epubforge.editor.diff import DiffError, diff_books
+    from epubforge.editor.patches import PatchError, apply_book_patch, validate_book_patch
+    from epubforge.io import load_book
+
+    # -- Step 1: Snapshot base Book -------------------------------------------
+    base_book_path = repo_root / work_dir_rel / "edit_state" / "book.json"
+    try:
+        base = load_book(base_book_path)
+    except Exception as exc:
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="parse_error",
+                message=f"failed to load base book.json: {exc}",
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=None,
+            base_sha256=None,
+            merged_sha256=None,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    base_raw = base_book_path.read_bytes()
+    base_sha256 = hashlib.sha256(base_raw).hexdigest()
+
+    # -- Step 1b: Record pre-merge SHA ----------------------------------------
+    pre_merge_sha = _get_head_sha(repo_root)
+
+    # -- Step 2: Verify branch exists -----------------------------------------
+    branch_check = _run_git(
+        ["rev-parse", "--verify", branch],
+        cwd=repo_root,
+        timeout=5,
+        check=False,
+    )
+    if branch_check.returncode != 0:
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="git_conflict",
+                message=f"branch '{branch}' does not exist",
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=None,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 2b: Check clean working tree ------------------------------------
+    status_result = _run_git(
+        ["status", "--porcelain"],
+        cwd=repo_root,
+        timeout=10,
+        check=False,
+    )
+    if status_result.stdout.strip():
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="git_conflict",
+                message="working tree has uncommitted changes",
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=None,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 3: git merge --no-ff --------------------------------------------
+    try:
+        merge_result = _run_git(
+            ["merge", "--no-ff", branch, "-m", f"Merge {branch}"],
+            cwd=repo_root,
+            timeout=timeout,
+            check=False,
+        )
+    except GitError:
+        # Timeout — attempt cleanup
+        try:
+            _run_git(["merge", "--abort"], cwd=repo_root, timeout=10, check=False)
+        except Exception:
+            pass  # best effort
+        raise
+
+    # -- Step 4: Check Git result ---------------------------------------------
+    if merge_result.returncode != 0:
+        conflict_files = _parse_conflict_files(merge_result.stdout, merge_result.stderr)
+        # Abort the failed merge to restore clean state
+        _run_git(["merge", "--abort"], cwd=repo_root, timeout=10, check=False)
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="git_conflict",
+                message=(
+                    f"merge conflict in {', '.join(conflict_files)}"
+                    if conflict_files
+                    else f"git merge failed (rc={merge_result.returncode})"
+                ),
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=None,
+            change_count=0,
+            patch_json=None,
+            conflict_files=conflict_files,
+        )
+
+    # -- Step 5: Parse merged Book --------------------------------------------
+    merged_book_path = repo_root / work_dir_rel / "edit_state" / "book.json"
+    try:
+        merged = load_book(merged_book_path)
+        merged_raw = merged_book_path.read_bytes()
+        merged_sha256 = hashlib.sha256(merged_raw).hexdigest()
+    except Exception as exc:
+        _run_git(
+            ["reset", "--hard", pre_merge_sha],
+            cwd=repo_root,
+            timeout=10,
+        )
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="parse_error",
+                message=f"merged book.json parse failed: {exc}",
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=None,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 6: diff_books(base, merged) -> BookPatch ------------------------
+    try:
+        patch = diff_books(base, merged)
+    except DiffError as exc:
+        _run_git(
+            ["reset", "--hard", pre_merge_sha],
+            cwd=repo_root,
+            timeout=10,
+        )
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="semantic_conflict",
+                message=str(exc),
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=merged_sha256,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 7: validate + apply round-trip ----------------------------------
+    try:
+        validate_book_patch(base, patch)
+        applied = apply_book_patch(base, patch)
+    except PatchError as exc:
+        _run_git(
+            ["reset", "--hard", pre_merge_sha],
+            cwd=repo_root,
+            timeout=10,
+        )
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="semantic_conflict",
+                message=exc.reason,
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=merged_sha256,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 8: Round-trip assertion (defensive) -----------------------------
+    applied_dump = applied.model_dump(mode="json")
+    merged_dump = merged.model_dump(mode="json")
+    if applied_dump != merged_dump:
+        diff_keys = [
+            k for k in set(applied_dump) | set(merged_dump)
+            if applied_dump.get(k) != merged_dump.get(k)
+        ]
+        _run_git(
+            ["reset", "--hard", pre_merge_sha],
+            cwd=repo_root,
+            timeout=10,
+        )
+        return IntegrationResult(
+            outcome=MergeOutcome(
+                status="semantic_conflict",
+                message=(
+                    "round-trip mismatch: applied patch does not reproduce "
+                    f"merged Book (divergent keys: {diff_keys}). "
+                    "This indicates a Phase 6 diff/apply regression."
+                ),
+            ),
+            branch=branch,
+            merge_commit=None,
+            pre_merge_sha=pre_merge_sha,
+            base_sha256=base_sha256,
+            merged_sha256=merged_sha256,
+            change_count=0,
+            patch_json=None,
+            conflict_files=[],
+        )
+
+    # -- Step 9: Accept -------------------------------------------------------
+    merge_commit_sha = _get_head_sha(repo_root)
+
+    return IntegrationResult(
+        outcome=MergeOutcome(status="accepted", message="merge validated"),
+        branch=branch,
+        merge_commit=merge_commit_sha,
+        pre_merge_sha=pre_merge_sha,
+        base_sha256=base_sha256,
+        merged_sha256=merged_sha256,
+        change_count=len(patch.changes),
+        patch_json=patch.model_dump(mode="json"),
+        conflict_files=[],
+    )
+
+
+def abort_merge(repo_root: Path, *, timeout: int = 10) -> None:
+    """Abort an in-progress merge.
+
+    Raises GitError if no merge is in progress or if the abort fails.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        timeout: Maximum seconds for the ``git merge --abort`` command.
+    """
+    _run_git(["merge", "--abort"], cwd=repo_root, timeout=timeout)
+
+
 __all__ = [
     # Sub-phase 7A
     "GitError",
@@ -783,6 +1137,11 @@ __all__ = [
     "GCResult",
     "remove_worktree",
     "gc_worktrees",
+    # Sub-phase 7D
+    "MergeOutcome",
+    "IntegrationResult",
+    "merge_and_validate",
+    "abort_merge",
     # Internal helpers exposed for testing and downstream sub-phases:
     "_DEFAULT_GIT_TIMEOUT",
     "_run_git",
@@ -791,4 +1150,5 @@ __all__ = [
     "_ensure_path_safe",
     "_get_head_sha",
     "_parse_worktree_porcelain",
+    "_parse_conflict_files",
 ]
