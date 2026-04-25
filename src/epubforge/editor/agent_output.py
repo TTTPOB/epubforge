@@ -59,8 +59,7 @@ class AgentOutput(StrictModel):
     memory_patches: list[MemoryPatch] = Field(default_factory=list)
     open_questions: list[OpenQuestion] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-    # evidence_refs: Phase 9 VLM evidence system will add validation here
-    # TODO(Phase 9): validate evidence_refs against VLM observation index
+    # evidence_refs validated by _validate_agent_output_impl when paths is provided
     evidence_refs: list[str] = Field(default_factory=list)
 
     @field_validator("output_id")
@@ -287,7 +286,10 @@ def _check_patches_permissions(
 
 
 def _validate_agent_output_impl(
-    output: AgentOutput, book: Book
+    output: AgentOutput,
+    book: Book,
+    *,
+    paths: EditorPaths | None = None,
 ) -> AgentOutputValidationResult:
     """Single shared validation helper used by both validate_agent_output and submit_agent_output.
 
@@ -428,6 +430,28 @@ def _validate_agent_output_impl(
                     f"open_questions[{i}] (q_id={q.q_id}): context_uid not found: {uid}"
                 )
 
+    # Phase 8: evidence_refs validation
+    if paths is not None:
+        from epubforge.editor.vlm_evidence import validate_evidence_refs
+
+        # Output-level evidence_refs
+        ref_errors = validate_evidence_refs(output.evidence_refs, paths)
+        errors.extend(ref_errors)
+
+        # Per-patch evidence_refs
+        for i, patch in enumerate(output.patches):
+            if patch.evidence_refs:
+                patch_ref_errors = validate_evidence_refs(patch.evidence_refs, paths)
+                for err in patch_ref_errors:
+                    errors.append(f"patches[{i}]: {err}")
+
+        # Per-compiled-patch evidence_refs (from PatchCommand compilation)
+        for i, patch in enumerate(compiled_patches):
+            if patch.evidence_refs:
+                patch_ref_errors = validate_evidence_refs(patch.evidence_refs, paths)
+                for err in patch_ref_errors:
+                    errors.append(f"compiled_patches[{i}]: {err}")
+
     return AgentOutputValidationResult(
         errors=errors,
         compiled_patches=compiled_patches,
@@ -440,13 +464,18 @@ def _validate_agent_output_impl(
 # ---------------------------------------------------------------------------
 
 
-def validate_agent_output(output: AgentOutput, book: Book) -> list[str]:
+def validate_agent_output(
+    output: AgentOutput,
+    book: Book,
+    *,
+    paths: EditorPaths | None = None,
+) -> list[str]:
     """Full semantic validation of an AgentOutput against the current Book.
 
     Returns a list of error strings. Empty list means the output is valid.
     Does not fail-fast — collects all errors before returning.
     """
-    result = _validate_agent_output_impl(output, book)
+    result = _validate_agent_output_impl(output, book, paths=paths)
     return result.errors
 
 
@@ -548,7 +577,7 @@ def submit_agent_output(
     Returns a SubmitResult. Raises CommandError on validation or apply failure.
     """
     # Step 1: validate (uses shared impl — includes command compilation)
-    validation = _validate_agent_output_impl(output, book)
+    validation = _validate_agent_output_impl(output, book, paths=paths)
     if validation.errors:
         return SubmitResult(
             submitted=False,
@@ -631,7 +660,7 @@ def stage_agent_output(
 ) -> StageResult:
     """Validate and archive an AgentOutput without mutating book.json or memory.json."""
 
-    validation = _validate_agent_output_impl(output, book)
+    validation = _validate_agent_output_impl(output, book, paths=paths)
     if validation.errors:
         return StageResult(
             staged=False,

@@ -1331,7 +1331,7 @@ def run_agent_output_validate(
 
     output = load_agent_output(paths, output_id)
     book = load_editable_book(paths)
-    errors = validate_agent_output(output, book)
+    errors = validate_agent_output(output, book, paths=paths)
     emit_json({"valid": not errors, "output_id": output_id, "errors": errors})
     return 0 if not errors else 1
 
@@ -1380,7 +1380,7 @@ def run_agent_output_submit(
 
     # Dry-run mode (no --apply flag)
     if not apply:
-        errors = validate_agent_output(output, book)
+        errors = validate_agent_output(output, book, paths=paths)
         emit_json({"valid": not errors, "output_id": output_id, "errors": errors})
         return 0 if not errors else 1
 
