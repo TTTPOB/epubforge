@@ -208,5 +208,7 @@ def _render_prompt_cmd(
 
 
 from epubforge.editor.agent_output_cli import agent_output_app  # noqa: E402
+from epubforge.editor.projection_cli import projection_app  # noqa: E402
 
 editor_app.add_typer(agent_output_app, name="agent-output")
+editor_app.add_typer(projection_app, name="projection")

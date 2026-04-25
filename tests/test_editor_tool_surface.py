@@ -284,6 +284,7 @@ def test_smoke_epubforge_editor_help_via_subprocess() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "agent-output" in result.stdout
+    assert "projection" in result.stdout
 
 
 def test_editor_snapshot_command_is_removed() -> None:

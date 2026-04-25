@@ -16,9 +16,11 @@ from epubforge.editor.doctor import DoctorReport, build_doctor_report
 from epubforge.editor.log import compact_log, count_applied_log_events
 from epubforge.editor.memory import EditMemory
 from epubforge.editor.prompts import render_prompt
+from epubforge.editor.projection import render_chapter_projection, render_index
 from epubforge.editor.scratch import allocate_script_path, run_script, write_script_stub
 from epubforge.editor.state import (
     Stage3EditorMeta,
+    atomic_write_text,
     book_id_from_paths,
     chapter_uids,
     default_init_source,
@@ -531,6 +533,102 @@ def run_render_prompt(
     return 0
 
 
+def _chapter_projection_path(chapters_dir: Path, chapter_uid: str) -> Path:
+    """Return a safe chapter projection path for a chapter UID."""
+    if not chapter_uid:
+        raise CommandError("chapter is missing uid")
+    if "/" in chapter_uid or "\\" in chapter_uid or ".." in chapter_uid:
+        raise CommandError(
+            f"unsafe chapter uid for projection path: {chapter_uid}",
+            payload={"error": f"unsafe chapter uid for projection path: {chapter_uid}"},
+        )
+
+    candidate = chapters_dir / f"{chapter_uid}.md"
+    chapters_root = chapters_dir.resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    if not resolved_candidate.is_relative_to(chapters_root):
+        raise CommandError(
+            f"unsafe chapter uid for projection path: {chapter_uid}",
+            payload={"error": f"unsafe chapter uid for projection path: {chapter_uid}"},
+        )
+    return candidate
+
+
+def run_projection_export(
+    work: Path,
+    cfg: Config,
+    *,
+    chapter_uid: str | None = None,
+) -> int:
+    """Export the initialized editable Book to read-only projection files."""
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    book = load_editable_book(paths)
+    if chapter_uid is None:
+        chapters = book.chapters
+    else:
+        chapters = [chapter for chapter in book.chapters if chapter.uid == chapter_uid]
+        if not chapters:
+            available = [chapter.uid for chapter in book.chapters if chapter.uid]
+            raise CommandError(
+                f"chapter not found: {chapter_uid}",
+                payload={
+                    "error": f"chapter not found: {chapter_uid}",
+                    "available_chapters": available,
+                },
+            )
+
+    projection_dir = paths.edit_state_dir / "projections"
+    chapters_dir = projection_dir / "chapters"
+    chapters_dir.mkdir(parents=True, exist_ok=True)
+
+    chapter_targets = [
+        (chapter, _chapter_projection_path(chapters_dir, chapter.uid or ""))
+        for chapter in chapters
+    ]
+
+    if chapter_uid is not None:
+        target_paths = {
+            chapter_path.resolve(strict=False) for _chapter, chapter_path in chapter_targets
+        }
+        for stale_path in chapters_dir.glob("*.md"):
+            if stale_path.resolve(strict=False) not in target_paths and stale_path.is_file():
+                stale_path.unlink()
+
+    exported_at = _timestamp()
+    chapter_paths: list[str] = []
+    blocks_written = 0
+    for chapter, chapter_path in chapter_targets:
+        atomic_write_text(chapter_path, render_chapter_projection(chapter))
+        chapter_paths.append(str(chapter_path))
+        blocks_written += len(chapter.blocks)
+
+    index_book = book.model_copy(update={"chapters": list(chapters)})
+    index_path = projection_dir / "index.md"
+    atomic_write_text(
+        index_path,
+        render_index(
+            index_book,
+            source="edit_state/book.json",
+            exported_at=exported_at,
+        ),
+    )
+
+    emit_json(
+        {
+            "exported_at": exported_at,
+            "projection_dir": str(projection_dir),
+            "index_path": str(index_path),
+            "chapters_written": len(chapters),
+            "blocks_written": blocks_written,
+            "chapter_paths": chapter_paths,
+        }
+    )
+    return 0
+
+
 def run_agent_output_begin(
     work: Path,
     kind: str,
@@ -973,6 +1071,7 @@ __all__ = [
     "run_compact",
     "run_doctor",
     "run_init",
+    "run_projection_export",
     "run_render_page",
     "run_render_prompt",
     "run_run_script",
