@@ -3,7 +3,7 @@ description: 轻量实现 worker — 使用 flash 模型快速实现任务
 mode: subagent
 model: deepseek/deepseek-v4-flash
 reasoningEffort: high
-steps: 25
+steps: 50
 permission:
   bash:
     # ======== DEFAULT: allow all, then deny destructive/write-only operations ========

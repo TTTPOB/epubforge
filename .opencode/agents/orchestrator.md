@@ -3,7 +3,7 @@ description: 任务编排器 — 管理 beads issue、git commit、派发 worker
 mode: primary
 model: openai/gpt-5.5
 reasoningEffort: high
-steps: 30
+steps: 100
 permission:
   edit: deny
   bash:
