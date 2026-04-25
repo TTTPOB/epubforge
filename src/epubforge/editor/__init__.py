@@ -54,8 +54,11 @@ from epubforge.editor.projection import (
 )
 from epubforge.editor.workspace import (
     GitError,
+    WorktreeCreateResult,
     WorktreeInfo,
+    create_worktree,
     find_repo_root,
+    list_worktrees,
 )
 
 __all__ = [
@@ -97,12 +100,15 @@ __all__ = [
     "compute_doctor_delta",
     "evaluate_convergence",
     "diff_books",
+    "create_worktree",
     "find_repo_root",
+    "list_worktrees",
     "merge_edit_memory",
     "read_current_log",
     "render_chapter_projection",
     "render_index",
     "validate_book_patch",
     "GitError",
+    "WorktreeCreateResult",
     "WorktreeInfo",
 ]

@@ -9,6 +9,11 @@ Public API (Sub-phase 7A):
     - find_repo_root    — locate the Git repository root
     - WorktreeInfo      — parsed worktree descriptor (used by 7B onwards)
 
+Public API (Sub-phase 7B):
+    - WorktreeCreateResult — result of create_worktree
+    - create_worktree      — create a new Git worktree with a new branch
+    - list_worktrees       — list all worktrees, optionally filtering to agent/*
+
 Internal helpers:
     - _run_git              — subprocess wrapper with timeout / check
     - _validate_branch_name — branch naming safety guard
@@ -67,6 +72,20 @@ class WorktreeInfo:
     is_bare: bool    # True when the worktree is bare
     is_main: bool    # True for the first (primary) worktree
     prunable: bool   # True when git considers this entry prunable
+
+
+@dataclass(frozen=True)
+class WorktreeCreateResult:
+    """Result of creating a new Git worktree.
+
+    Does not include ``work_dir``: the CLI layer computes it as
+    ``worktree_path / work_dir_rel`` since it already knows the
+    relative path from the positional ``work`` argument.
+    """
+
+    worktree_path: Path  # absolute path to the newly created worktree
+    branch: str          # name of the branch created in this worktree
+    commit: str          # HEAD commit SHA of the new worktree
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +340,137 @@ def find_repo_root(path: Path) -> Path:
     return Path(result.stdout.strip())
 
 
+# ---------------------------------------------------------------------------
+# Public API — Sub-phase 7B
+# ---------------------------------------------------------------------------
+
+
+def create_worktree(
+    repo_root: Path,
+    branch: str,
+    *,
+    worktree_path: Path | None = None,
+    base_ref: str = "HEAD",
+    timeout: int = 30,
+) -> WorktreeCreateResult:
+    """Create a new Git worktree with a new branch.
+
+    Flow:
+        1. Validate the branch name (must match ``agent/<kind>-<id>`` pattern).
+        2. Compute ``worktree_path`` if not provided (default naming convention).
+        3. Verify the computed/given path does not escape the sibling space.
+        4. Reject if ``worktree_path`` already exists on the filesystem.
+        5. Run ``git worktree add <worktree_path> -b <branch> <base_ref>``.
+        6. Verify that the worktree directory was created.
+        7. Retrieve the HEAD commit SHA from the new worktree.
+        8. Return ``WorktreeCreateResult``.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        branch: New branch name; must match ``agent/<kind>-<id>[/<sub>]``.
+        worktree_path: Explicit path for the new worktree directory.  When
+            ``None`` the default convention is used:
+            ``<repo_root>/../<repo_name>-<branch_slug>/``.
+        base_ref: Git ref (branch name, tag, or commit SHA) to base the new
+            branch on.  Defaults to ``HEAD``.
+        timeout: Maximum seconds for the ``git worktree add`` command.
+
+    Returns:
+        A ``WorktreeCreateResult`` describing the newly created worktree.
+
+    Raises:
+        ValueError: When the branch name is invalid or the computed path
+            escapes the allowed zone.
+        GitError: When the Git command fails (e.g. branch already exists,
+            invalid base_ref, filesystem error).
+    """
+    # Step 1: validate branch name
+    _validate_branch_name(branch)
+
+    # Step 2: resolve worktree path
+    if worktree_path is None:
+        worktree_path = _default_worktree_path(repo_root, branch)
+
+    # Step 3: path safety check
+    _ensure_path_safe(worktree_path, repo_root)
+
+    # Step 4: reject if path already exists
+    if worktree_path.exists():
+        raise GitError(
+            f"worktree path already exists: {worktree_path}",
+            returncode=1,
+            stderr="",
+        )
+
+    # Step 5: create the worktree
+    _run_git(
+        ["worktree", "add", str(worktree_path), "-b", branch, base_ref],
+        cwd=repo_root,
+        timeout=timeout,
+    )
+
+    # Step 6: verify the directory was created (defensive check)
+    if not worktree_path.exists():
+        raise GitError(
+            f"git worktree add reported success but path does not exist: {worktree_path}",
+            returncode=0,
+            stderr="",
+        )
+
+    # Step 7: retrieve HEAD commit SHA from the new worktree
+    commit = _get_head_sha(worktree_path)
+
+    return WorktreeCreateResult(
+        worktree_path=worktree_path,
+        branch=branch,
+        commit=commit,
+    )
+
+
+def list_worktrees(
+    repo_root: Path,
+    *,
+    agent_only: bool = False,
+    timeout: int = 10,
+) -> list[WorktreeInfo]:
+    """List all Git worktrees, optionally filtering to ``agent/*`` branches.
+
+    Uses ``git worktree list --porcelain`` for stable, machine-readable output.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        agent_only: When ``True``, return only worktrees whose branch name
+            starts with ``agent/``.
+        timeout: Maximum seconds for the ``git worktree list`` command.
+
+    Returns:
+        A list of ``WorktreeInfo`` entries.  The main worktree is always first
+        (``is_main=True``) when ``agent_only=False``.
+
+    Raises:
+        GitError: When the Git command fails.
+    """
+    result = _run_git(
+        ["worktree", "list", "--porcelain"],
+        cwd=repo_root,
+        timeout=timeout,
+    )
+
+    worktrees = _parse_worktree_porcelain(result.stdout)
+
+    if agent_only:
+        worktrees = [wt for wt in worktrees if wt.branch.startswith("agent/")]
+
+    return worktrees
+
+
 __all__ = [
     "GitError",
     "WorktreeInfo",
+    "WorktreeCreateResult",
     "find_repo_root",
+    "create_worktree",
+    "list_worktrees",
     # Internal helpers exposed for testing and downstream sub-phases:
     "_DEFAULT_GIT_TIMEOUT",
     "_run_git",
