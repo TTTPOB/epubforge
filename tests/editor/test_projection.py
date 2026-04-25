@@ -481,10 +481,23 @@ class TestTableRendering:
         ch = book_with_colspan_table.chapters[0]
         output = render_chapter_projection(ch)
 
-        # The HTML should appear verbatim
-        for tbl_block in ch.blocks:
-            assert isinstance(tbl_block, Table)
-            assert tbl_block.html in output, "Raw HTML not preserved in output"
+        tbl_block = ch.blocks[0]
+        assert isinstance(tbl_block, Table)
+        assert 'colspan="2"' in output
+        assert 'rowspan="2"' in output
+
+        lines = output.splitlines()
+        marker_idx = next(
+            i for i, line in enumerate(lines) if line.startswith("[[block blk-cs-tbl]] ")
+        )
+        title_idx = next(
+            i for i, line in enumerate(lines) if line.startswith("**Table title:**")
+        )
+        html_lines = lines[marker_idx + 1:title_idx]
+        while html_lines and html_lines[-1] == "":
+            html_lines.pop()
+
+        assert "\n".join(html_lines) == tbl_block.html
 
     def test_table_metadata(self, prov):
         """Table marker includes num_rows, num_cols, multi_page."""

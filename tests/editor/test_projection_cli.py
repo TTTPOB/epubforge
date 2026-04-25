@@ -62,6 +62,8 @@ def test_projection_full_export_writes_index_and_all_chapters(
 
     assert result.exit_code == 0, result.output
     summary = json.loads(result.output)
+    assert isinstance(summary["exported_at"], str)
+    assert summary["exported_at"]
     assert summary["projection_dir"] == str(paths.edit_state_dir / "projections")
     assert summary["index_path"] == str(paths.edit_state_dir / "projections" / "index.md")
     assert summary["chapters_written"] == 2
@@ -223,6 +225,13 @@ def test_projection_export_uses_edit_state_book_json_not_05_semantic(
     work_dir = _init_work_dir(prov, tmp_path, "edit-state-source")
     paths = resolve_editor_paths(work_dir)
 
+    edited_book = load_book(paths.book_path)
+    edited_book.title = "Edited Projection Book"
+    edited_block = edited_book.chapters[0].blocks[0]
+    assert isinstance(edited_block, Paragraph)
+    edited_block.text = "Edited alpha from book.json."
+    paths.book_path.write_text(edited_book.model_dump_json(indent=2), encoding="utf-8")
+
     _write_semantic_source(
         work_dir,
         Book(
@@ -246,8 +255,8 @@ def test_projection_export_uses_edit_state_book_json_not_05_semantic(
         path.read_text(encoding="utf-8")
         for path in (paths.edit_state_dir / "projections" / "chapters").glob("*.md")
     )
-    assert "Projection Book" in index_text
-    assert "Alpha from edit state." in projection_text
+    assert "Edited Projection Book" in index_text
+    assert "Edited alpha from book.json." in projection_text
     assert "Stale Semantic Source" not in index_text
     assert "Stale paragraph." not in projection_text
 
