@@ -1080,7 +1080,7 @@ def export(work, chapter):
 - **Phase 3 (PatchCommand macros)**：Projection 显示的是 patch 应用后的结果，不涉及 command 编译逻辑。
 - **Phase 6 (Book diff engine)**：Projection 是纯输出，不参与 diff 或 patch apply。
 - **Phase 7 (Git workspace workflow)**：Projection 存放在 `edit_state/projections/`，属于 worktree 内的文件，默认由 Git 跟踪。agent 提交 patch 后重新 export 会覆盖旧文件。Git 可以追踪 projection 文件本身的变更历史。
-- **Phase 9 (VLM evidence)**：Projection 可以引用 VLM observation 的 observation_id（defer 至 Phase 9 讨论）。
+- **Phase 8 (VLM evidence)**：Projection 可以引用 VLM observation 的 observation_id（defer 至 Phase 8 讨论）。
 
 #### 5.8 测试计划
 
@@ -1118,7 +1118,7 @@ def export(work, chapter):
 
 | 事项 | 原因 |
 |------|------|
-| **display_handle** | Phase 5 直接使用 UID。display_handle（UID + 短随机后缀）的设计决策放至 Phase 12 或 UID 重设计时处理 |
+| **display_handle** | Phase 5 直接使用 UID。display_handle（UID + 短随机后缀）的设计决策放至未来 UID 重设计时处理 |
 | **snapshot / projection 关系** | snapshot（`book.json` 的纯 JSON 备份）和 projection（可读渲染）是否需要统一的版本管理，目前不明确，留待 Phase 7（Git workflow）积累实际使用经验后决定 |
 | **`--stdout` 输出模式** | Phase 5 只写文件。`--stdout` 需求（piping、agent 直接读取、vlm-page caller 输出）推迟到有实际用例时再实现 |
 | **Table 摘要/截断策略** | Phase 5 完整输出 table HTML。如果实测中大 table 导致 prompt 超限，再考虑截断/摘要策略，并增加配置项 `projection.max_table_rows` |
@@ -1142,19 +1142,19 @@ def export(work, chapter):
 - No lease system; only short integration transaction.
 - Orphaned worktree cleanup（丢弃未 merge 的 worktree 即可）。
 
-### Phase 9: VLM as editor evidence tool
+### Phase 8: VLM as editor evidence tool
 
 - Introduce `VLMObservation` schema.
 - Upgrade `vlm-page` / add `vlm-range` to accept IR scope.
 - Store evidence with metadata; let AgentOutput reference evidence ids.
 
-### Phase 10: Simplify Stage 3
+### Phase 9: Simplify Stage 3
 
 - Make Docling-derived extraction the only ingestion mode.
 - Remove VLM mode branch from pipeline.
 - No backward compatibility for old workdirs.
 
-### Phase 11: Doctor task generation
+### Phase 10: Doctor task generation
 
 - Add task-oriented doctor output (`DoctorTask`).
 - Map issues/hints to recommended agent work.
