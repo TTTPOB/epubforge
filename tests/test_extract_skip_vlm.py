@@ -193,7 +193,7 @@ def test_smoke_single_text_page(tmp_path: Path) -> None:
 
     result = extract_skip_vlm(raw_path, pages_path, out_dir)
 
-    assert result.mode == "skip_vlm"
+    assert result.mode == "docling"
     assert result.selected_pages == [1]
     assert len(result.unit_files) == 1
     assert result.unit_files[0].exists()
@@ -749,7 +749,7 @@ def test_evidence_index_schema_and_mode(tmp_path: Path) -> None:
     ei = json.loads(result.evidence_index_path.read_text(encoding="utf-8"))
 
     assert ei["schema_version"] == 3
-    assert ei["mode"] == "skip_vlm"
+    assert ei["mode"] == "docling"
     assert ei["artifact_id"] == out_dir.name
 
 

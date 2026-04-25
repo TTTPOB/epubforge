@@ -181,27 +181,15 @@ def _parse_pages_json(pages_json: Path) -> tuple[list[int], list[int], list[int]
 
 def _settings_for_artifact(cfg: Config) -> dict[str, Any]:
     """Build the settings snapshot used for artifact_id computation."""
-    if cfg.extract.skip_vlm:
-        return {
-            "skip_vlm": True,
-            "contract_version": 3,
-            "vlm_dpi": None,
-            "max_vlm_batch_pages": None,
-            "enable_book_memory": False,
-            "vlm_model": None,
-            "vlm_base_url": None,
-        }
-    else:
-        resolved_vlm = cfg.resolved_vlm()
-        return {
-            "skip_vlm": False,
-            "contract_version": 3,
-            "vlm_dpi": cfg.extract.vlm_dpi,
-            "max_vlm_batch_pages": cfg.extract.max_vlm_batch_pages,
-            "enable_book_memory": cfg.extract.enable_book_memory,
-            "vlm_model": resolved_vlm.model,
-            "vlm_base_url": resolved_vlm.base_url,
-        }
+    return {
+        "skip_vlm": True,
+        "contract_version": 3,
+        "vlm_dpi": None,
+        "max_vlm_batch_pages": None,
+        "enable_book_memory": False,
+        "vlm_model": None,
+        "vlm_base_url": None,
+    }
 
 
 def run_extract(
@@ -255,7 +243,7 @@ def run_extract(
         toc_pages = sorted(p for p in toc_pages if p in pages)
         complex_pages = sorted(p for p in complex_pages if p in pages)
 
-    mode = "skip_vlm" if cfg.extract.skip_vlm else "vlm"
+    mode = "docling"
     settings = _settings_for_artifact(cfg)
 
     desired_artifact_id = build_desired_stage3_manifest(
@@ -311,38 +299,19 @@ def run_extract(
     artifact_dir = work / "03_extract" / "artifacts" / desired_artifact_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    result = None
-    if cfg.extract.skip_vlm:
-        from epubforge.extract_skip_vlm import extract_skip_vlm
+    from epubforge.extract_skip_vlm import extract_skip_vlm
 
-        log.info("Stage 3: extracting (skip-VLM evidence draft)...")
-        log.info("Stage 3: provider_required=%s", False)
-        with stage_timer(log, "3 extract"):
-            result = extract_skip_vlm(
-                raw,
-                pages_json,
-                artifact_dir,
-                force=force,
-                page_filter=pages,
-                images_dir=work / "images",
-            )
-    else:
-        from epubforge.extract import extract
-
-        log.info("Stage 3: extracting (VLM)...")
-        log.info("Stage 3: provider_required=%s", True)
-        cfg.require_llm()
-        cfg.require_vlm()
-        with stage_timer(log, "3 extract"):
-            result = extract(
-                source_pdf,
-                raw,
-                pages_json,
-                artifact_dir,
-                cfg,
-                force=force,
-                page_filter=pages,
-            )
+    log.info("Stage 3: extracting (Docling evidence draft)...")
+    log.info("Stage 3: provider_required=%s", False)
+    with stage_timer(log, "3 extract"):
+        result = extract_skip_vlm(
+            raw,
+            pages_json,
+            artifact_dir,
+            force=force,
+            page_filter=pages,
+            images_dir=work / "images",
+        )
 
     # Build and write manifest
     artifact_dir_rel = artifact_dir.relative_to(work).as_posix()

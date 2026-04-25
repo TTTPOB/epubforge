@@ -49,7 +49,7 @@ class Stage3Manifest(BaseModel):
 
     schema_version: int = 3
     stage: int = 3
-    mode: Literal["vlm", "skip_vlm"]
+    mode: Literal["vlm", "skip_vlm", "docling"]
     artifact_id: str
     artifact_dir: str
     """Workdir-relative POSIX path to the artifact directory."""
@@ -93,7 +93,7 @@ class Stage3ActivePointer(BaseModel):
 class Stage3ExtractionResult(BaseModel):
     """Returned by both VLM and skip-VLM extractors before manifest activation."""
 
-    mode: Literal["vlm", "skip_vlm"]
+    mode: Literal["vlm", "skip_vlm", "docling"]
     unit_files: list[Path]
     audit_notes_path: Path
     book_memory_path: Path
@@ -117,7 +117,7 @@ class EvidenceIndex(BaseModel):
 
     schema_version: int = 3
     artifact_id: str
-    mode: Literal["vlm", "skip_vlm"]
+    mode: Literal["vlm", "skip_vlm", "docling"]
     source_pdf: str
     pages: dict[str, Any] = Field(default_factory=dict)
     """Keys are str(page_number); values follow the per-page evidence schema."""
@@ -160,7 +160,7 @@ def _rel_posix(work_dir: Path, path: Path) -> str:
 
 def build_desired_stage3_manifest(
     *,
-    mode: Literal["vlm", "skip_vlm"],
+    mode: Literal["vlm", "skip_vlm", "docling"],
     source_pdf_rel: str,
     source_pdf_sha256: str,
     raw_sha256: str,

@@ -154,7 +154,7 @@ def default_init_source(paths: EditorPaths) -> Path:
                 return candidate
         raise FileNotFoundError(
             f"No semantic source found in {paths.work_dir}. "
-            "Run `epubforge assemble` or `epubforge run --skip-vlm` first."
+            "Run `epubforge assemble` or `epubforge run` first."
         )
 
     # Manifest exists: find a candidate whose Book.extraction metadata matches.
@@ -178,7 +178,7 @@ def default_init_source(paths: EditorPaths) -> Path:
     raise FileNotFoundError(
         f"No semantic source in {paths.work_dir} matches the active Stage 3 artifact "
         f"(artifact_id={active_artifact_id}). "
-        "Run `epubforge assemble` or `epubforge run --skip-vlm` to regenerate it."
+        "Run `epubforge assemble` or `epubforge run` to regenerate it."
     )
 
 
@@ -236,8 +236,8 @@ def load_editable_book(paths: EditorPaths) -> Book:
 class Stage3EditorMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["vlm", "skip_vlm", "unknown"]
-    skipped_vlm: bool
+    mode: Literal["vlm", "skip_vlm", "docling", "unknown"]
+    skipped_vlm: bool  # DEPRECATED: always True for new workdirs
     manifest_path: str
     manifest_sha256: str
     artifact_id: str

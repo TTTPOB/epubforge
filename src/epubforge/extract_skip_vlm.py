@@ -225,7 +225,7 @@ def extract_skip_vlm(
     )
 
     return Stage3ExtractionResult(
-        mode="skip_vlm",
+        mode="docling",
         unit_files=unit_files,
         audit_notes_path=audit_path,
         book_memory_path=book_memory_path,
@@ -659,7 +659,7 @@ def _build_evidence_index(
     return EvidenceIndex(
         schema_version=3,
         artifact_id=artifact_id,
-        mode="skip_vlm",
+        mode="docling",
         source_pdf="source/source.pdf",
         pages=pages_dict,
         refs=refs,

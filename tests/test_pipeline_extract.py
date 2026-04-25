@@ -111,7 +111,10 @@ def _setup_work_dir(
 
 
 def _build_desired_id(work: Path, skip_vlm: bool = False) -> str:
-    """Compute the expected artifact_id for the standard setup."""
+    """Compute the expected artifact_id for the standard setup.
+
+    skip_vlm is ignored — pipeline always uses docling mode now.
+    """
     import hashlib
 
     source_pdf = work / "source" / "source.pdf"
@@ -125,29 +128,18 @@ def _build_desired_id(work: Path, skip_vlm: bool = False) -> str:
                 h.update(chunk)
         return h.hexdigest()
 
-    if skip_vlm:
-        settings: dict[str, Any] = {
-            "skip_vlm": True,
-            "contract_version": 3,
-            "vlm_dpi": None,
-            "max_vlm_batch_pages": None,
-            "enable_book_memory": False,
-            "vlm_model": None,
-            "vlm_base_url": None,
-        }
-    else:
-        settings = {
-            "skip_vlm": False,
-            "contract_version": 3,
-            "vlm_dpi": 200,
-            "max_vlm_batch_pages": 4,
-            "enable_book_memory": True,
-            "vlm_model": "google/gemini-flash-3",
-            "vlm_base_url": "https://openrouter.ai/api/v1",
-        }
+    settings: dict[str, Any] = {
+        "skip_vlm": True,
+        "contract_version": 3,
+        "vlm_dpi": None,
+        "max_vlm_batch_pages": None,
+        "enable_book_memory": False,
+        "vlm_model": None,
+        "vlm_base_url": None,
+    }
 
     return build_desired_stage3_manifest(
-        mode="skip_vlm" if skip_vlm else "vlm",
+        mode="docling",
         source_pdf_rel="source/source.pdf",
         source_pdf_sha256=sha256(source_pdf),
         raw_sha256=sha256(raw),
@@ -163,7 +155,7 @@ def _build_desired_id(work: Path, skip_vlm: bool = False) -> str:
 def _create_valid_active_artifact(
     work: Path,
     artifact_id: str,
-    mode: str = "skip_vlm",
+    mode: str = "docling",
 ) -> None:
     """Create a valid artifact dir + manifest + active pointer for an artifact_id."""
     art_dir = work / "03_extract" / "artifacts" / artifact_id
@@ -315,7 +307,7 @@ class TestReuseActiveArtifact:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -378,7 +370,7 @@ class TestSkipVlmNoProviderRequired:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -430,7 +422,7 @@ class TestSkipVlmNoProviderRequired:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -449,22 +441,22 @@ class TestSkipVlmNoProviderRequired:
         caplog.set_level(logging.INFO, logger="epubforge.pipeline")
         run_extract(tmp_path / "book.pdf", cfg)
 
-        assert "skip-VLM evidence draft" in caplog.text
+        assert "Docling evidence draft" in caplog.text
 
 
 # ---------------------------------------------------------------------------
-# Test 3: VLM path requires provider when extraction is needed
+# Test 3: Pipeline never requires a VLM/LLM provider
 # ---------------------------------------------------------------------------
 
 
-class TestVlmPathRequiresProvider:
-    def test_vlm_extraction_calls_require_vlm(
+class TestNoProviderRequired:
+    def test_extraction_never_calls_require_vlm(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """VLM path must call require_llm and require_vlm before extracting."""
-        cfg = _make_cfg(tmp_path, skip_vlm=False, api_key="test-key")
+        """run_extract must never call require_llm or require_vlm — pipeline is docling-only."""
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -476,12 +468,10 @@ class TestVlmPathRequiresProvider:
         def fake_require_vlm(self: Any) -> None:
             provider_calls.append("require_vlm")
 
-        def fake_extract(
-            pdf_path: Path,
+        def fake_extract_skip_vlm(
             raw_path: Path,
             pages_path: Path,
             out_dir: Path,
-            cfg: Any,
             *,
             force: bool = False,
             page_filter: Any = None,
@@ -496,7 +486,7 @@ class TestVlmPathRequiresProvider:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -508,97 +498,31 @@ class TestVlmPathRequiresProvider:
 
         monkeypatch.setattr(Config, "require_llm", fake_require_llm)
         monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
-        monkeypatch.setattr("epubforge.extract.extract", fake_extract)
+        monkeypatch.setattr(
+            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
+        )
 
         from epubforge.pipeline import run_extract
 
         run_extract(tmp_path / "book.pdf", cfg)
 
-        assert "require_llm" in provider_calls
-        assert "require_vlm" in provider_calls
+        assert provider_calls == [], f"Unexpected provider calls: {provider_calls}"
 
-    def test_vlm_require_called_before_extractor(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """require_llm and require_vlm must be called BEFORE the extractor."""
-        cfg = _make_cfg(tmp_path, skip_vlm=False, api_key="test-key")
-        work = cfg.book_work_dir(tmp_path / "book.pdf")
-        _setup_work_dir(work)
-
-        call_order: list[str] = []
-
-        def fake_require_llm(self: Any) -> None:
-            call_order.append("require_llm")
-
-        def fake_require_vlm(self: Any) -> None:
-            call_order.append("require_vlm")
-
-        def fake_extract(
-            pdf_path: Path,
-            raw_path: Path,
-            pages_path: Path,
-            out_dir: Path,
-            cfg: Any,
-            *,
-            force: bool = False,
-            page_filter: Any = None,
-            **kwargs: Any,
-        ) -> Stage3ExtractionResult:
-            call_order.append("extract")
-            unit = out_dir / "unit_0000.json"
-            unit.write_text("{}", encoding="utf-8")
-            audit = out_dir / "audit_notes.json"
-            audit.write_text("[]", encoding="utf-8")
-            bm = out_dir / "book_memory.json"
-            bm.write_text("{}", encoding="utf-8")
-            ei = out_dir / "evidence_index.json"
-            ei.write_text("{}", encoding="utf-8")
-            return Stage3ExtractionResult(
-                mode="vlm",
-                unit_files=[unit],
-                audit_notes_path=audit,
-                book_memory_path=bm,
-                evidence_index_path=ei,
-                selected_pages=[1, 2],
-                toc_pages=[3],
-                complex_pages=[2],
-            )
-
-        monkeypatch.setattr(Config, "require_llm", fake_require_llm)
-        monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
-        monkeypatch.setattr("epubforge.extract.extract", fake_extract)
-
-        from epubforge.pipeline import run_extract
-
-        run_extract(tmp_path / "book.pdf", cfg)
-
-        assert call_order.index("require_llm") < call_order.index("extract")
-        assert call_order.index("require_vlm") < call_order.index("extract")
-
-    def test_vlm_logs_provider_required_true(
+    def test_extraction_logs_provider_required_false(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        cfg = _make_cfg(tmp_path, skip_vlm=False, api_key="test-key")
+        """run_extract must log provider_required=False."""
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        def fake_require_llm(self: Any) -> None:
-            pass
-
-        def fake_require_vlm(self: Any) -> None:
-            pass
-
-        def fake_extract(
-            pdf_path: Path,
+        def fake_extract_skip_vlm(
             raw_path: Path,
             pages_path: Path,
             out_dir: Path,
-            cfg: Any,
             *,
             force: bool = False,
             page_filter: Any = None,
@@ -613,7 +537,7 @@ class TestVlmPathRequiresProvider:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -623,16 +547,16 @@ class TestVlmPathRequiresProvider:
                 complex_pages=[2],
             )
 
-        monkeypatch.setattr(Config, "require_llm", fake_require_llm)
-        monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
-        monkeypatch.setattr("epubforge.extract.extract", fake_extract)
+        monkeypatch.setattr(
+            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
+        )
 
         from epubforge.pipeline import run_extract
 
         caplog.set_level(logging.INFO, logger="epubforge.pipeline")
         run_extract(tmp_path / "book.pdf", cfg)
 
-        assert "provider_required=True" in caplog.text
+        assert "provider_required=False" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +763,7 @@ class TestManifestActivationAfterExtraction:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -862,7 +786,7 @@ class TestManifestActivationAfterExtraction:
         assert pointer_path.exists()
 
         pointer, manifest = load_active_stage3_manifest(work)
-        assert manifest.mode == "skip_vlm"
+        assert manifest.mode == "docling"
         assert len(manifest.artifact_id) == 16
 
     def test_active_manifest_log_includes_activated_message(
@@ -893,7 +817,7 @@ class TestManifestActivationAfterExtraction:
             ei = out_dir / "evidence_index.json"
             ei.write_text("{}", encoding="utf-8")
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -1037,7 +961,7 @@ class TestPagesFilter:
             ei.write_text("{}", encoding="utf-8")
             pages_out = [p for p in [1, 2] if page_filter is None or p in page_filter]
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,
@@ -1094,7 +1018,7 @@ class TestPagesFilter:
             ei.write_text("{}", encoding="utf-8")
             # Extractor returns ALL pages (unfiltered) — pipeline must filter them
             return Stage3ExtractionResult(
-                mode="skip_vlm",
+                mode="docling",
                 unit_files=[unit],
                 audit_notes_path=audit,
                 book_memory_path=bm,

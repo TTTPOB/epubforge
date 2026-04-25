@@ -82,15 +82,12 @@ def _init_logging(
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
     log.info(
         "epubforge startup: model=%s/%s cache_dir=%s editor=compact:%d/max_loops:%d"
-        " skip_vlm=%s stage3_mode=%s max_vlm_batch_pages=%d log=%s",
+        " stage3_mode=docling log=%s",
         cfg.llm.model,
         cfg.vlm.model,
         cfg.runtime.cache_dir,
         cfg.editor.compact_threshold,
         cfg.editor.max_loops,
-        cfg.extract.skip_vlm,
-        "skip_vlm" if cfg.extract.skip_vlm else "vlm",
-        cfg.extract.max_vlm_batch_pages,
         log_path or "(stderr only)",
     )
 
@@ -159,15 +156,12 @@ def run(
     skip_vlm: bool | None = typer.Option(
         None,
         "--skip-vlm/--no-skip-vlm",
-        help="Skip Stage 3 pipeline VLM and use a Docling-derived evidence draft",
+        help="[DEPRECATED] Ignored — pipeline always uses Docling-derived extraction. "
+        "VLM is available as an editor tool (epubforge editor vlm-page/vlm-range).",
     ),
 ) -> None:
     """Run the ingestion pipeline (parse → classify → extract → assemble)."""
     cfg = _get_config(ctx)
-    if skip_vlm is not None:
-        cfg = cfg.model_copy(
-            update={"extract": cfg.extract.model_copy(update={"skip_vlm": skip_vlm})}
-        )
     app_ctx = ctx.find_root().obj
     log_file_override = (
         app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
@@ -224,15 +218,12 @@ def extract(
     skip_vlm: bool | None = typer.Option(
         None,
         "--skip-vlm/--no-skip-vlm",
-        help="Skip Stage 3 pipeline VLM and use a Docling-derived evidence draft",
+        help="[DEPRECATED] Ignored — pipeline always uses Docling-derived extraction. "
+        "VLM is available as an editor tool (epubforge editor vlm-page/vlm-range).",
     ),
 ) -> None:
-    """Stage 3 — VLM extraction → work/<name>/03_extract/."""
+    """Stage 3 — Docling extraction → work/<name>/03_extract/."""
     cfg = _get_config(ctx)
-    if skip_vlm is not None:
-        cfg = cfg.model_copy(
-            update={"extract": cfg.extract.model_copy(update={"skip_vlm": skip_vlm})}
-        )
     app_ctx = ctx.find_root().obj
     log_file_override = (
         app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None

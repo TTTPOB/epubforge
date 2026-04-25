@@ -537,7 +537,7 @@ def build_doctor_report(
         if issues is None:
             issues = bundle.to_audit_notes()
         # Emit skip-VLM guidance hints when extraction was done without VLM
-        if book.extraction.stage3_mode == "skip_vlm":
+        if book.extraction.stage3_mode in ("skip_vlm", "docling"):
             skip_vlm_hint_list = _skip_vlm_hints(book, book.extraction.complex_pages)
     if issues is None:
         raise ValueError("issues or book must be provided")

@@ -62,7 +62,7 @@ class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vlm_dpi: int = 200
-    skip_vlm: bool = False
+    skip_vlm: bool = False  # DEPRECATED: pipeline always uses docling mode. Kept for config file compatibility.
     max_vlm_batch_pages: int = 4
     enable_book_memory: bool = True
     ocr: OcrSettings = Field(default_factory=OcrSettings)
