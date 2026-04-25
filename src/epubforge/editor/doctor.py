@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from statistics import mean, pstdev
 from typing import Iterable, Literal
+from uuid import uuid4
 
 from pydantic import Field, field_validator, model_validator
 
@@ -14,7 +15,7 @@ from epubforge.audit import (
     DashInventoryChapter,
     run_all_detectors,
 )
-from epubforge.editor._validators import StrictModel, require_non_empty
+from epubforge.editor._validators import StrictModel, require_non_empty, validate_uuid4
 from epubforge.editor.memory import EditMemory, OpenQuestion
 from epubforge.ir.semantic import AuditNote, Book, Paragraph, Table
 from epubforge.query import iter_blocks
@@ -133,12 +134,46 @@ class DoctorDelta(StrictModel):
     quiet_round_streak: int = 0
 
 
+class DoctorTask(StrictModel):
+    """Machine-schedulable work item derived from a doctor hint or audit issue.
+
+    Supervisors use these tasks to dispatch scanner/fixer/reviewer subagents
+    without needing to interpret raw hints and issues.
+    """
+
+    task_id: str
+    """UUID4, unique identifier for this task."""
+    kind: Literal["scan", "fix", "review"]
+    """What type of work this task requires."""
+    chapter_uid: str | None = None
+    """Chapter scope (None means book-wide)."""
+    block_uid: str | None = None
+    """Block scope (None means chapter-wide or book-wide)."""
+    source_issue_key: str | None = None
+    """canonical_issue_key if this task was derived from an AuditNote."""
+    source_hint_key: str | None = None
+    """canonical_hint_key if this task was derived from a Hint."""
+    priority: int = Field(ge=0, le=3)
+    """0 = highest priority, 3 = lowest. Issues get 0-1, warn hints get 2, info hints get 3."""
+    recommended_agent: Literal["scanner", "fixer", "reviewer"]
+    """Which subagent type should handle this task."""
+    message: str
+    """Human-readable description of what needs to be done."""
+
+    @field_validator("task_id")
+    @classmethod
+    def _validate_task_id(cls, value: str) -> str:
+        return validate_uuid4(value, field_name="task_id")
+
+
 class DoctorReport(StrictModel):
     issues: list[AuditNote] = Field(default_factory=list)
     hints: list[Hint] = Field(default_factory=list)
     readiness: ReadinessChecklist
     suggested_next_actions: list[str] = Field(default_factory=list)
     delta: DoctorDelta | None = None
+    tasks: list[DoctorTask] = Field(default_factory=list)
+    """Schedulable work items derived from issues and hints."""
 
 
 def _book_dominant_dash(
@@ -516,6 +551,100 @@ def _suggested_next_actions(
     return actions
 
 
+_HINT_MAP: dict[
+    str,
+    tuple[
+        Literal["scan", "fix", "review"],
+        Literal["scanner", "fixer", "reviewer"],
+        int,
+    ],
+] = {
+    "needs_scan": ("scan", "scanner", 2),
+    "style_inconsistency": ("fix", "fixer", 2),
+    "unusual_density": ("scan", "scanner", 2),
+    "open_question": ("review", "reviewer", 2),
+    "candidate_review": ("scan", "scanner", 3),
+    "table_merge_pending": ("fix", "fixer", 3),
+}
+
+
+def generate_doctor_tasks(report: DoctorReport) -> list[DoctorTask]:
+    """Convert a DoctorReport's hints and issues into schedulable tasks.
+
+    Mapping rules:
+    - AuditNote issues → kind="fix", recommended_agent="fixer" (priority 0-1)
+      - orphan_footnote, unknown_callout → priority 0
+      - punctuation_anomaly → priority 1
+      - suspect_attribution, other → kind="review", recommended_agent="reviewer", priority 1
+    - Hints → mapped by hint.kind:
+      - needs_scan → kind="scan", recommended_agent="scanner", priority 2 (warn)
+      - style_inconsistency → kind="fix", recommended_agent="fixer", priority 2 (warn)
+      - unusual_density → kind="scan", recommended_agent="scanner", priority 2 (warn)
+      - open_question → kind="review", recommended_agent="reviewer", priority 2 (warn)
+      - candidate_review → kind="scan", recommended_agent="scanner", priority 3 (info)
+      - table_merge_pending → kind="fix", recommended_agent="fixer", priority 3 (info)
+      - convergence → SKIP (informational, no task generated)
+
+    Returns tasks sorted by priority (ascending), then by chapter_uid.
+    """
+    tasks: list[DoctorTask] = []
+
+    # Process AuditNote issues
+    for issue in report.issues:
+        if issue.kind in ("orphan_footnote", "unknown_callout"):
+            kind: Literal["scan", "fix", "review"] = "fix"
+            agent: Literal["scanner", "fixer", "reviewer"] = "fixer"
+            priority = 0
+        elif issue.kind == "punctuation_anomaly":
+            kind = "fix"
+            agent = "fixer"
+            priority = 1
+        else:
+            # suspect_attribution, other, and any unknown kinds
+            kind = "review"
+            agent = "reviewer"
+            priority = 1
+
+        tasks.append(
+            DoctorTask(
+                task_id=str(uuid4()),
+                kind=kind,
+                chapter_uid=None,
+                block_uid=None,
+                source_issue_key=canonical_issue_key(issue),
+                source_hint_key=None,
+                priority=priority,
+                recommended_agent=agent,
+                message=issue.hint,
+            )
+        )
+
+    # Process Hints
+    for hint in report.hints:
+        if hint.kind == "convergence":
+            continue
+        mapping = _HINT_MAP.get(hint.kind)
+        if mapping is None:
+            continue
+        h_kind, h_agent, h_priority = mapping
+        tasks.append(
+            DoctorTask(
+                task_id=str(uuid4()),
+                kind=h_kind,
+                chapter_uid=hint.chapter_uid,
+                block_uid=hint.block_uid,
+                source_issue_key=None,
+                source_hint_key=canonical_hint_key(hint),
+                priority=h_priority,
+                recommended_agent=h_agent,
+                message=hint.message,
+            )
+        )
+
+    tasks.sort(key=lambda t: (t.priority, t.chapter_uid or ""))
+    return tasks
+
+
 def build_doctor_report(
     *,
     memory: EditMemory,
@@ -579,7 +708,7 @@ def build_doctor_report(
             previous_report=previous_report,
             new_applied_op_count=new_applied_op_count,
         )
-    return DoctorReport(
+    partial_report = DoctorReport(
         issues=issues,
         hints=hints,
         readiness=readiness,
@@ -593,11 +722,15 @@ def build_doctor_report(
         ),
         delta=delta,
     )
+    return partial_report.model_copy(
+        update={"tasks": generate_doctor_tasks(partial_report)}
+    )
 
 
 __all__ = [
     "DoctorDelta",
     "DoctorReport",
+    "DoctorTask",
     "Hint",
     "ReadinessChecklist",
     "build_doctor_report",
@@ -606,5 +739,6 @@ __all__ = [
     "chapters_missing_scan",
     "compute_doctor_delta",
     "evaluate_convergence",
+    "generate_doctor_tasks",
     "unresolved_questions",
 ]

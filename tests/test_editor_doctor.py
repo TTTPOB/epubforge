@@ -86,6 +86,10 @@ def test_doctor_readiness_hints_and_actions_cover_core_paths() -> None:
     assert report.delta is not None
     assert report.delta.new_applied_op_count == 2
     assert report.delta.quiet_round is False
+    assert len(report.tasks) > 0  # tasks should be generated from issues/hints
+    # verify tasks are sorted by priority
+    for i in range(len(report.tasks) - 1):
+        assert report.tasks[i].priority <= report.tasks[i + 1].priority
 
 
 def test_convergence_hint_and_delta_use_fresh_memory_change_not_duplicates() -> None:

@@ -4,11 +4,13 @@ from epubforge.editor.agent_output import AgentOutput, StageResult, SubmitResult
 from epubforge.editor.doctor import (
     DoctorDelta,
     DoctorReport,
+    DoctorTask,
     Hint,
     ReadinessChecklist,
     build_doctor_report,
     compute_doctor_delta,
     evaluate_convergence,
+    generate_doctor_tasks,
 )
 from epubforge.editor.diff import DiffError, diff_books
 from epubforge.editor.log import (
@@ -92,6 +94,7 @@ __all__ = [
     "DiffError",
     "DoctorDelta",
     "DoctorReport",
+    "DoctorTask",
     "EditMemory",
     "Hint",
     "InsertNodeChange",
@@ -121,6 +124,7 @@ __all__ = [
     "compile_patch_commands",
     "compute_doctor_delta",
     "evaluate_convergence",
+    "generate_doctor_tasks",
     "diff_books",
     "create_worktree",
     "find_repo_root",
