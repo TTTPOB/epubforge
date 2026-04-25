@@ -1,8 +1,7 @@
 """Book snapshot diff generation for UID-addressed editor patches.
 
-Phase 6C supports same-UID / same-topology field diffs and block
-``replace_node`` semantics. Topology planning remains deliberately fail-closed
-until Phase 6D.
+Phase 6D supports apply-safe topology planning in addition to same-UID field
+diffs and block ``replace_node`` semantics.
 """
 
 from __future__ import annotations
@@ -12,6 +11,9 @@ from uuid import uuid4
 
 from epubforge.editor.patches import (
     BookPatch,
+    DeleteNodeChange,
+    InsertNodeChange,
+    MoveNodeChange,
     PatchScope,
     ReplaceNodeChange,
     SetFieldChange,
@@ -45,6 +47,15 @@ class BookDiffIndex:
     loc_by_uid: dict[str, NodeLoc]
 
 
+@dataclass
+class SimBookOrder:
+    """Mutable topology simulation matching sequential BookPatch apply order."""
+
+    chapters: list[str]
+    blocks_by_chapter: dict[str, list[str]]
+    parent_by_block: dict[str, str]
+
+
 _BOOK_LEVEL_FIELDS: tuple[str, ...] = (
     "initialized_at",
     "uid_seed",
@@ -55,18 +66,12 @@ _BOOK_LEVEL_FIELDS: tuple[str, ...] = (
     "extraction",
 )
 
-_TOPOLOGY_NOT_IMPLEMENTED = (
-    "topology diff generation is not implemented in Phase 6C yet"
-)
-
-
 def diff_books(base: Book, proposed: Book) -> BookPatch:
     """Return a UID-addressed BookPatch from ``base`` to ``proposed``.
 
-    Phase 6C supports same-UID / same-topology chapter and block field diffs,
+    Supports apply-safe topology deltas, same-UID chapter/block field diffs,
     plus block replacement for kind changes, table ``merge_record`` changes,
-    and coupled footnote ``paired``/``orphan`` changes. Topology deltas still
-    fail closed until Phase 6D.
+    and coupled footnote ``paired``/``orphan`` changes.
     """
 
     if not isinstance(base, Book):
@@ -81,11 +86,6 @@ def diff_books(base: Book, proposed: Book) -> BookPatch:
 
     _reject_book_level_deltas(base, proposed)
     _reject_unsupported_immutable_deltas(base_index, proposed_index)
-
-    topology_deltas = _detect_topology_deltas(base_index, proposed_index)
-    if topology_deltas:
-        details = _format_delta_details(topology_deltas)
-        raise DiffError(f"{_TOPOLOGY_NOT_IMPLEMENTED}: {details}")
 
     replace_changes, replaced_block_uids = _compare_block_replacements(
         base_index, proposed_index
@@ -104,8 +104,14 @@ def diff_books(base: Book, proposed: Book) -> BookPatch:
         proposed_index,
         replaced_block_uids=replaced_block_uids,
     )
+    topology_changes = _plan_topology_changes(
+        base,
+        proposed,
+        base_index=base_index,
+        proposed_index=proposed_index,
+    )
 
-    changes = [*replace_changes, *field_changes]
+    changes = [*topology_changes, *replace_changes, *field_changes]
     if changes:
         return BookPatch(
             patch_id=str(uuid4()),
@@ -358,6 +364,287 @@ def _detect_topology_deltas(
             )
 
     return deltas
+
+
+def _plan_topology_changes(
+    base: Book,
+    proposed: Book,
+    *,
+    base_index: BookDiffIndex,
+    proposed_index: BookDiffIndex,
+) -> list[InsertNodeChange | MoveNodeChange | DeleteNodeChange]:
+    """Plan topology changes while updating a lightweight apply simulation."""
+
+    sim = _build_sim_order(base)
+    changes: list[InsertNodeChange | MoveNodeChange | DeleteNodeChange] = []
+
+    base_chapter_uids = set(base_index.chapter_by_uid)
+    proposed_chapter_order = _chapter_order(proposed_index)
+
+    # 1. Insert proposed-only chapters as empty containers. Blocks are placed
+    # later through block-level operations to avoid full-node chapter inserts.
+    previous_chapter_uid: str | None = None
+    for chapter_uid in proposed_chapter_order:
+        if chapter_uid not in base_chapter_uids:
+            proposed_chapter = proposed_index.chapter_by_uid[chapter_uid]
+            empty_chapter = proposed_chapter.model_copy(update={"blocks": []})
+            changes.append(
+                InsertNodeChange(
+                    op="insert_node",
+                    parent_uid=None,
+                    after_uid=previous_chapter_uid,
+                    node=empty_chapter.model_dump(mode="python"),
+                )
+            )
+            _sim_insert_chapter(sim, chapter_uid, after_uid=previous_chapter_uid)
+        previous_chapter_uid = chapter_uid
+
+    # 2. Reorder all proposed chapters. Missing base-only chapters may still be
+    # present as temporary source containers and will be deleted after blocks.
+    previous_chapter_uid = None
+    for chapter_uid in proposed_chapter_order:
+        if not _sim_is_immediately_after(sim.chapters, chapter_uid, previous_chapter_uid):
+            changes.append(
+                MoveNodeChange(
+                    op="move_node",
+                    target_uid=chapter_uid,
+                    from_parent_uid=None,
+                    to_parent_uid=None,
+                    after_uid=previous_chapter_uid,
+                )
+            )
+            _sim_move_chapter(sim, chapter_uid, after_uid=previous_chapter_uid)
+        previous_chapter_uid = chapter_uid
+
+    # 3. Insert/move blocks into their proposed chapters in proposed order.
+    base_block_uids = set(base_index.block_by_uid)
+    for proposed_chapter in proposed.chapters:
+        target_chapter_uid = _require_uid(
+            proposed_chapter.uid,
+            snapshot_name="proposed",
+            node_kind="chapter",
+            path="chapters[*]",
+        )
+        previous_block_uid: str | None = None
+        for proposed_block in proposed_chapter.blocks:
+            block_uid = _require_uid(
+                proposed_block.uid,
+                snapshot_name="proposed",
+                node_kind=proposed_block.kind,
+                path=f"chapter {target_chapter_uid!r}.blocks[*]",
+            )
+            if block_uid not in base_block_uids:
+                changes.append(
+                    InsertNodeChange(
+                        op="insert_node",
+                        parent_uid=target_chapter_uid,
+                        after_uid=previous_block_uid,
+                        node=proposed_block.model_dump(mode="python"),
+                    )
+                )
+                _sim_insert_block(
+                    sim,
+                    block_uid,
+                    parent_uid=target_chapter_uid,
+                    after_uid=previous_block_uid,
+                )
+            else:
+                current_parent_uid = sim.parent_by_block[block_uid]
+                target_blocks = sim.blocks_by_chapter[target_chapter_uid]
+                if (
+                    current_parent_uid != target_chapter_uid
+                    or not _sim_is_immediately_after(
+                        target_blocks, block_uid, previous_block_uid
+                    )
+                ):
+                    changes.append(
+                        MoveNodeChange(
+                            op="move_node",
+                            target_uid=block_uid,
+                            from_parent_uid=current_parent_uid,
+                            to_parent_uid=target_chapter_uid,
+                            after_uid=previous_block_uid,
+                        )
+                    )
+                    _sim_move_block(
+                        sim,
+                        block_uid,
+                        from_parent_uid=current_parent_uid,
+                        to_parent_uid=target_chapter_uid,
+                        after_uid=previous_block_uid,
+                    )
+            previous_block_uid = block_uid
+
+    # 4. Delete base blocks absent from proposed, in base order for stability.
+    proposed_block_uids = set(proposed_index.block_by_uid)
+    for block_uid in _block_order(base_index):
+        if block_uid in proposed_block_uids or block_uid not in sim.parent_by_block:
+            continue
+        changes.append(
+            DeleteNodeChange(
+                op="delete_node",
+                target_uid=block_uid,
+                old_node=base_index.block_by_uid[block_uid].model_dump(mode="python"),
+            )
+        )
+        _sim_delete_block(sim, block_uid)
+
+    # 5. Delete missing chapters after they have become empty.
+    proposed_chapter_uids = set(proposed_index.chapter_by_uid)
+    for chapter_uid in _chapter_order(base_index):
+        if chapter_uid in proposed_chapter_uids:
+            continue
+        if sim.blocks_by_chapter.get(chapter_uid):
+            raise DiffError(
+                f"internal topology planning error: missing chapter {chapter_uid!r} "
+                "still contains blocks after move/delete planning"
+            )
+        old_empty_chapter = base_index.chapter_by_uid[chapter_uid].model_copy(
+            update={"blocks": []}
+        )
+        changes.append(
+            DeleteNodeChange(
+                op="delete_node",
+                target_uid=chapter_uid,
+                old_node=old_empty_chapter.model_dump(mode="python"),
+            )
+        )
+        _sim_delete_chapter(sim, chapter_uid)
+
+    return changes
+
+
+def _build_sim_order(book: Book) -> SimBookOrder:
+    chapters: list[str] = []
+    blocks_by_chapter: dict[str, list[str]] = {}
+    parent_by_block: dict[str, str] = {}
+    for chapter in book.chapters:
+        assert chapter.uid is not None
+        chapter_uid = chapter.uid
+        chapters.append(chapter_uid)
+        block_uids: list[str] = []
+        for block in chapter.blocks:
+            assert block.uid is not None
+            block_uids.append(block.uid)
+            parent_by_block[block.uid] = chapter_uid
+        blocks_by_chapter[chapter_uid] = block_uids
+    return SimBookOrder(
+        chapters=chapters,
+        blocks_by_chapter=blocks_by_chapter,
+        parent_by_block=parent_by_block,
+    )
+
+
+def _sim_is_immediately_after(
+    items: list[str],
+    uid: str,
+    after_uid: str | None,
+) -> bool:
+    if uid not in items:
+        return False
+    if after_uid is None:
+        return bool(items) and items[0] == uid
+    try:
+        after_index = items.index(after_uid)
+    except ValueError:
+        return False
+    return after_index + 1 < len(items) and items[after_index + 1] == uid
+
+
+def _sim_insert_chapter(
+    sim: SimBookOrder,
+    chapter_uid: str,
+    *,
+    after_uid: str | None,
+) -> None:
+    _sim_insert_uid_after(sim.chapters, chapter_uid, after_uid=after_uid)
+    sim.blocks_by_chapter[chapter_uid] = []
+
+
+def _sim_move_chapter(
+    sim: SimBookOrder,
+    chapter_uid: str,
+    *,
+    after_uid: str | None,
+) -> None:
+    _sim_move_uid_after(sim.chapters, chapter_uid, after_uid=after_uid)
+
+
+def _sim_delete_chapter(sim: SimBookOrder, chapter_uid: str) -> None:
+    sim.chapters.remove(chapter_uid)
+    sim.blocks_by_chapter.pop(chapter_uid, None)
+
+
+def _sim_insert_block(
+    sim: SimBookOrder,
+    block_uid: str,
+    *,
+    parent_uid: str,
+    after_uid: str | None,
+) -> None:
+    _sim_insert_uid_after(sim.blocks_by_chapter[parent_uid], block_uid, after_uid=after_uid)
+    sim.parent_by_block[block_uid] = parent_uid
+
+
+def _sim_move_block(
+    sim: SimBookOrder,
+    block_uid: str,
+    *,
+    from_parent_uid: str,
+    to_parent_uid: str,
+    after_uid: str | None,
+) -> None:
+    sim.blocks_by_chapter[from_parent_uid].remove(block_uid)
+    _sim_insert_uid_after(
+        sim.blocks_by_chapter[to_parent_uid], block_uid, after_uid=after_uid
+    )
+    sim.parent_by_block[block_uid] = to_parent_uid
+
+
+def _sim_delete_block(sim: SimBookOrder, block_uid: str) -> None:
+    parent_uid = sim.parent_by_block.pop(block_uid)
+    sim.blocks_by_chapter[parent_uid].remove(block_uid)
+
+
+def _sim_insert_uid_after(
+    items: list[str],
+    uid: str,
+    *,
+    after_uid: str | None,
+) -> None:
+    if uid in items:
+        raise DiffError(f"internal topology planning error: duplicate simulated uid {uid!r}")
+    if after_uid is None:
+        insert_at = 0
+    else:
+        try:
+            insert_at = items.index(after_uid) + 1
+        except ValueError as exc:
+            raise DiffError(
+                f"internal topology planning error: after_uid {after_uid!r} not found"
+            ) from exc
+    items.insert(insert_at, uid)
+
+
+def _sim_move_uid_after(
+    items: list[str],
+    uid: str,
+    *,
+    after_uid: str | None,
+) -> None:
+    if uid not in items:
+        raise DiffError(f"internal topology planning error: uid {uid!r} not found")
+    items.remove(uid)
+    if after_uid is None:
+        insert_at = 0
+    else:
+        try:
+            insert_at = items.index(after_uid) + 1
+        except ValueError as exc:
+            raise DiffError(
+                f"internal topology planning error: after_uid {after_uid!r} not found"
+            ) from exc
+    items.insert(insert_at, uid)
 
 
 def _compare_block_replacements(

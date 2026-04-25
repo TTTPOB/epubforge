@@ -9,6 +9,9 @@ from epubforge.editor import diff_books as public_diff_books
 from epubforge.editor.diff import DiffError, diff_books
 from epubforge.editor.patches import (
     BookPatch,
+    DeleteNodeChange,
+    InsertNodeChange,
+    MoveNodeChange,
     ReplaceNodeChange,
     SetFieldChange,
     apply_book_patch,
@@ -81,7 +84,12 @@ def _chapter(
     title: str = "Chapter 1",
     blocks: list[Block] | None = None,
 ) -> Chapter:
-    return Chapter(uid=uid, title=title, level=1, blocks=blocks or [_paragraph()])
+    return Chapter(
+        uid=uid,
+        title=title,
+        level=1,
+        blocks=[_paragraph()] if blocks is None else blocks,
+    )
 
 
 def _book(*, chapters: list[Chapter] | None = None, title: str = "Test Book") -> Book:
@@ -304,12 +312,320 @@ def test_table_merge_record_delta_uses_replace_node_round_trip() -> None:
     assert change.new_node["merge_record"] == merge_record.model_dump(mode="python")
 
 
-def test_topology_delta_still_fails_closed_for_phase_6d() -> None:
-    base = _book(chapters=[_chapter(blocks=[_paragraph(uid="a"), _paragraph(uid="b")])])
-    proposed = _book(chapters=[_chapter(blocks=[_paragraph(uid="b"), _paragraph(uid="a")])])
+@pytest.mark.parametrize(
+    ("proposed_blocks", "expected_after_uid"),
+    [
+        (["x", "a", "c"], None),
+        (["a", "x", "c"], "a"),
+        (["a", "c", "x"], "c"),
+    ],
+)
+def test_insert_block_head_middle_tail_round_trips(
+    proposed_blocks: list[str], expected_after_uid: str | None
+) -> None:
+    base = _book(
+        chapters=[_chapter(blocks=[_paragraph(uid="a"), _paragraph(uid="c")])]
+    )
+    block_by_uid = {
+        "a": _paragraph(uid="a"),
+        "c": _paragraph(uid="c"),
+        "x": _paragraph(uid="x", text="Inserted"),
+    }
+    proposed = _book(
+        chapters=[_chapter(blocks=[block_by_uid[uid] for uid in proposed_blocks])]
+    )
 
-    with pytest.raises(DiffError, match="topology diff generation.*Phase 6C.*block"):
-        diff_books(base, proposed)
+    patch = _assert_round_trip(base, proposed)
+
+    inserts = [change for change in patch.changes if isinstance(change, InsertNodeChange)]
+    assert len(inserts) == 1
+    assert inserts[0].parent_uid == "ch-1"
+    assert inserts[0].after_uid == expected_after_uid
+    assert inserts[0].node["uid"] == "x"
+
+
+def test_delete_block_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(
+                blocks=[_paragraph(uid="a"), _paragraph(uid="b"), _paragraph(uid="c")]
+            )
+        ]
+    )
+    proposed = _book(
+        chapters=[_chapter(blocks=[_paragraph(uid="a"), _paragraph(uid="c")])]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    deletes = [change for change in patch.changes if isinstance(change, DeleteNodeChange)]
+    assert [change.target_uid for change in deletes] == ["b"]
+
+
+@pytest.mark.parametrize(
+    "proposed_order",
+    [
+        ["b", "a"],
+        ["b", "a", "c"],
+        ["b", "c", "a"],
+    ],
+)
+def test_same_chapter_reorder_swap_rotate_round_trips(
+    proposed_order: list[str],
+) -> None:
+    base_order = sorted(proposed_order)
+    base = _book(
+        chapters=[_chapter(blocks=[_paragraph(uid=uid) for uid in base_order])]
+    )
+    proposed = _book(
+        chapters=[_chapter(blocks=[_paragraph(uid=uid) for uid in proposed_order])]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    assert any(isinstance(change, MoveNodeChange) for change in patch.changes)
+
+
+def test_cross_chapter_move_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a"), _paragraph(uid="b")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="c")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b"), _paragraph(uid="c")]),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    moves = [change for change in patch.changes if isinstance(change, MoveNodeChange)]
+    assert any(
+        change.target_uid == "b"
+        and change.from_parent_uid == "ch-a"
+        and change.to_parent_uid == "ch-b"
+        for change in moves
+    )
+
+
+def test_chapter_reorder_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b")]),
+            _chapter(uid="ch-c", blocks=[_paragraph(uid="c")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-c", blocks=[_paragraph(uid="c")]),
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b")]),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    assert isinstance(patch.changes[0], MoveNodeChange)
+    assert patch.changes[0].target_uid == "ch-c"
+
+
+def test_split_chapter_like_diff_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a"), _paragraph(uid="b"), _paragraph(uid="c")])
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b"), _paragraph(uid="c")]),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    chapter_insert = next(
+        change
+        for change in patch.changes
+        if isinstance(change, InsertNodeChange) and change.parent_uid is None
+    )
+    assert chapter_insert.node["uid"] == "ch-b"
+    assert chapter_insert.node["blocks"] == []
+
+
+def test_merge_chapter_like_diff_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b"), _paragraph(uid="c")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a"), _paragraph(uid="b"), _paragraph(uid="c")])
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    assert isinstance(patch.changes[-1], DeleteNodeChange)
+    assert patch.changes[-1].target_uid == "ch-b"
+    assert patch.changes[-1].old_node["blocks"] == []
+
+
+def test_new_chapter_mixed_existing_and_new_blocks_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a"), _paragraph(uid="b")])
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(
+                uid="ch-x",
+                blocks=[
+                    _paragraph(uid="x", text="New head"),
+                    _paragraph(uid="b"),
+                    _paragraph(uid="y", text="New tail"),
+                ],
+            ),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    chapter_insert = next(
+        change
+        for change in patch.changes
+        if isinstance(change, InsertNodeChange) and change.parent_uid is None
+    )
+    assert chapter_insert.node["blocks"] == []
+    assert any(
+        isinstance(change, MoveNodeChange)
+        and change.target_uid == "b"
+        and change.to_parent_uid == "ch-x"
+        for change in patch.changes
+    )
+
+
+def test_delete_chapter_but_retain_subset_blocks_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-z", blocks=[_paragraph(uid="a"), _paragraph(uid="b"), _paragraph(uid="c")]),
+            _chapter(uid="ch-keep", blocks=[_paragraph(uid="d")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[_chapter(uid="ch-keep", blocks=[_paragraph(uid="d"), _paragraph(uid="b")])]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    deleted_uids = [
+        change.target_uid
+        for change in patch.changes
+        if isinstance(change, DeleteNodeChange)
+    ]
+    assert deleted_uids == ["a", "c", "ch-z"]
+
+
+def test_pure_new_chapter_uses_empty_container_then_block_inserts() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b")]),
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(
+                uid="ch-new",
+                blocks=[_paragraph(uid="x", text="X"), _paragraph(uid="y", text="Y")],
+            ),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="b")]),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    chapter_inserts = [
+        change
+        for change in patch.changes
+        if isinstance(change, InsertNodeChange) and change.parent_uid is None
+    ]
+    assert len(chapter_inserts) == 1
+    assert chapter_inserts[0].node["uid"] == "ch-new"
+    assert chapter_inserts[0].node["blocks"] == []
+    block_insert_uids = [
+        change.node["uid"]
+        for change in patch.changes
+        if isinstance(change, InsertNodeChange) and change.parent_uid == "ch-new"
+    ]
+    assert block_insert_uids == ["x", "y"]
+
+
+def test_delete_non_empty_chapter_uses_block_deletes_then_empty_chapter_delete() -> None:
+    base = _book(
+        chapters=[
+            _chapter(uid="ch-a", blocks=[_paragraph(uid="a")]),
+            _chapter(uid="ch-z", blocks=[_paragraph(uid="b"), _paragraph(uid="c")]),
+        ]
+    )
+    proposed = _book(chapters=[_chapter(uid="ch-a", blocks=[_paragraph(uid="a")])])
+
+    patch = _assert_round_trip(base, proposed)
+
+    delete_changes = [
+        change for change in patch.changes if isinstance(change, DeleteNodeChange)
+    ]
+    assert [change.target_uid for change in delete_changes] == ["b", "c", "ch-z"]
+    assert delete_changes[-1].old_node["blocks"] == []
+
+
+def test_combined_topology_field_and_replace_round_trips() -> None:
+    base = _book(
+        chapters=[
+            _chapter(
+                uid="ch-a",
+                blocks=[_paragraph(uid="a"), _paragraph(uid="b", text="Old B")],
+            ),
+            _chapter(uid="ch-b", blocks=[_paragraph(uid="c")]),
+        ]
+    )
+    proposed = _book(
+        chapters=[
+            _chapter(
+                uid="ch-b",
+                title="Changed chapter",
+                blocks=[_paragraph(uid="b", text="New B"), _paragraph(uid="c")],
+            ),
+            _chapter(
+                uid="ch-a",
+                blocks=[
+                    _heading(uid="a", text="Promoted", level=2),
+                    _paragraph(uid="x", text="Inserted X"),
+                ],
+            ),
+        ]
+    )
+
+    patch = _assert_round_trip(base, proposed)
+
+    assert any(isinstance(change, MoveNodeChange) for change in patch.changes)
+    assert any(isinstance(change, InsertNodeChange) for change in patch.changes)
+    assert any(isinstance(change, ReplaceNodeChange) for change in patch.changes)
+    assert any(
+        isinstance(change, SetFieldChange)
+        and change.target_uid == "b"
+        and change.field == "text"
+        for change in patch.changes
+    )
 
 
 def test_public_imports_work() -> None:

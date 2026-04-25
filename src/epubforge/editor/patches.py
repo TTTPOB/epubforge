@@ -1372,16 +1372,25 @@ def _validate_static_move_node(
     so that move_node targeting those new chapters is not wrongly rejected.
     """
     all_chapter_uids = set(chapter_index.keys()) | (inserted_chapter_uids or set())
+    inserted_chapter_uids = inserted_chapter_uids or set()
 
     if change.target_uid not in block_index and change.target_uid not in chapter_index:
-        raise PatchError(
-            f"move_node target_uid {change.target_uid!r} not found",
-            pid,
-        )
+        if not (
+            change.from_parent_uid is None
+            and change.to_parent_uid is None
+            and change.target_uid in inserted_chapter_uids
+        ):
+            raise PatchError(
+                f"move_node target_uid {change.target_uid!r} not found",
+                pid,
+            )
 
     if change.from_parent_uid is None and change.to_parent_uid is None:
         # Chapter-level move: target must be a chapter
-        if change.target_uid not in chapter_index:
+        if (
+            change.target_uid not in chapter_index
+            and change.target_uid not in inserted_chapter_uids
+        ):
             raise PatchError(
                 f"move_node with from_parent_uid=None and to_parent_uid=None requires "
                 f"target_uid {change.target_uid!r} to be a chapter",
