@@ -1,4 +1,9 @@
-"""Stage 3 — unified VLM extraction with mechanical batching and evidence index."""
+"""DEPRECATED: VLM pipeline extraction mode.
+
+This module is no longer used by the ingestion pipeline (Phase 9).
+VLM analysis is now available as an editor tool (vlm-page, vlm-range).
+This file is kept as reference code and may be removed in a future version.
+"""
 
 from __future__ import annotations
 
