@@ -23,6 +23,10 @@ SCANNER_PROMPT = """你是 epubforge 编辑系统的 scanner subagent。
 
 当前 memory 快照：{memory_snapshot}
 
+你的工作项来自 `epubforge editor doctor` 输出的 tasks 列表。
+每个 task 包含 kind、priority（0-3，0最高）、recommended_agent、scope 等信息。
+优先处理 priority 较低（更紧急）的 task。
+
 如需临时脚本，先调 `epubforge editor run-script {work_dir} --write <desc>` 获取 scratch 路径，
 写代码后再调 `epubforge editor run-script {work_dir} --exec <path>` 执行。
 
@@ -37,6 +41,10 @@ FIXER_PROMPT = """你是 epubforge 编辑系统的 fixer subagent。
 
 任务：修复以下 audit issues / hints：
 {issues_and_hints}
+
+你的工作项来自 `epubforge editor doctor` 输出的 tasks 列表（kind="fix"）。
+每个 task 包含 priority（0-3，0最高）、source_issue_key/source_hint_key 追踪来源。
+优先处理 priority 较低（更紧急）的 task。
 
 约束：
 - 只对 chapter {chapter_uid} 的 block 产出 chapter-scoped AgentOutput
@@ -55,6 +63,9 @@ REVIEWER_PROMPT = """你是 epubforge 编辑系统的 reviewer subagent。
 
 任务：复核以下问题与建议：
 {issues_and_hints}
+
+你的工作项来自 `epubforge editor doctor` 输出的 tasks 列表（kind="review"）。
+每个 task 包含 priority（0-3，0最高）、source_issue_key/source_hint_key 追踪来源。
 
 约束：
 - 你只能给出审查意见、OpenQuestion 或少量高确定性 BookPatch.set_field 修正
@@ -81,7 +92,7 @@ def _chapter_for_uid(book: Book, chapter_uid: str) -> Chapter:
 
 def _issues_block(issues: list[str] | None) -> str:
     if not issues:
-        return "- 未显式提供 issues；请先查看 doctor 输出。"
+        return "- 未显式提供 issues；请运行 `epubforge editor doctor` 获取 tasks 列表。"
     return "\n".join(f"- {item}" for item in issues)
 
 

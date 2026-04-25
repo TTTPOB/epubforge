@@ -112,3 +112,11 @@ class TestExtractionContextVLMTools:
         # deprecated field key must be absent (bare substr check excluded due to tmp_path name)
         assert "skipped_vlm:" not in result
         assert "skipped_vlm " not in result
+
+
+def test_prompts_mention_doctor_tasks():
+    """All agent prompts should mention doctor tasks."""
+    from epubforge.editor.prompts import SCANNER_PROMPT, FIXER_PROMPT, REVIEWER_PROMPT
+    for prompt in (SCANNER_PROMPT, FIXER_PROMPT, REVIEWER_PROMPT):
+        assert "doctor" in prompt.lower()
+        assert "tasks" in prompt.lower() or "task" in prompt.lower()
