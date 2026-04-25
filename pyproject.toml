@@ -31,7 +31,6 @@ dev = [
     "pytest-timeout>=2.4",
     "pyrefly>=0.16",
     "pre-commit>=4",
-    "ruff>=0.14",
 ]
 
 [tool.hatch.build.targets.wheel]

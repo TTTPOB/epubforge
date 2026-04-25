@@ -137,4 +137,4 @@ permission:
 - issue 追踪使用 `bd`（beads）
 - 实现风格遵循 `AGENTS.md` 中的项目约定
 - 测试框架：pytest
-- 代码质量：ruff（lint + format）
+- 代码质量：pyrefly（type check）

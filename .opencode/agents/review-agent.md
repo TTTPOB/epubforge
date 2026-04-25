@@ -206,5 +206,5 @@ permission:
 
 ### 测试结果
 - pytest: [通过/X 失败]
-- ruff: [通过/X 问题]
+- pyrefly: [通过/X 问题]
 ```

@@ -210,9 +210,6 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
-# Ruff stuff:
-.ruff_cache/
-
 # PyPI configuration file
 .pypirc
 
