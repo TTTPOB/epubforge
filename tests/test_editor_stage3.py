@@ -576,6 +576,8 @@ class TestVLMPage:
 
     def test_vlm_page_does_not_mutate_book_json(self, tmp_path: Path) -> None:
         """vlm-page must not modify book.json."""
+        from epubforge.editor.vlm_evidence import VLMPageAnalysis
+
         work_dir = tmp_path / "book"
         work_dir.mkdir()
         self._setup_work_dir_with_pdf(work_dir)
@@ -586,17 +588,12 @@ class TestVLMPage:
         book_before = load_book(paths.book_path)
         book_before_json = book_before.model_dump_json()
 
-        mock_result = MagicMock()
-        mock_result.model_dump.return_value = {
-            "page": 1,
-            "issues": [],
-            "suggestions": [],
-            "notes": "ok",
-        }
+        mock_result = VLMPageAnalysis(page=1, findings=[], summary="ok")
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
             mock_llm_instance.chat_parsed.return_value = mock_result
+            mock_llm_instance.model = "test-vlm-model"
             mock_llm_cls.return_value = mock_llm_instance
 
             result = runner.invoke(
@@ -614,21 +611,18 @@ class TestVLMPage:
         assert book_after.model_dump_json() == book_before_json
 
     def test_vlm_page_writes_output_json(self, tmp_path: Path) -> None:
+        from epubforge.editor.vlm_evidence import VLMPageAnalysis
+
         work_dir = tmp_path / "book"
         work_dir.mkdir()
         self._setup_work_dir_with_pdf(work_dir)
 
-        mock_result = MagicMock()
-        mock_result.model_dump.return_value = {
-            "page": 1,
-            "issues": ["issue A"],
-            "suggestions": [],
-            "notes": "",
-        }
+        mock_result = VLMPageAnalysis(page=1, findings=[], summary="")
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
             mock_llm_instance.chat_parsed.return_value = mock_result
+            mock_llm_instance.model = "test-vlm-model"
             mock_llm_cls.return_value = mock_llm_instance
 
             result = runner.invoke(
@@ -639,12 +633,9 @@ class TestVLMPage:
 
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
-        assert "output_path" in payload
-        out_path = Path(payload["output_path"])
-        assert out_path.exists()
-        output_data = json.loads(out_path.read_text(encoding="utf-8"))
-        assert output_data["page"] == 1
-        assert "vlm_result" in output_data
+        assert "observation_id" in payload
+        assert payload["page"] == 1
+        assert "findings_count" in payload
 
     def test_vlm_page_rejects_non_selected_page(self, tmp_path: Path) -> None:
         work_dir = tmp_path / "book"
@@ -661,22 +652,19 @@ class TestVLMPage:
         assert "99" in output.get("error", "")
 
     def test_vlm_page_custom_out_path(self, tmp_path: Path) -> None:
+        from epubforge.editor.vlm_evidence import VLMPageAnalysis
+
         work_dir = tmp_path / "book"
         work_dir.mkdir()
         self._setup_work_dir_with_pdf(work_dir)
 
         out_path = tmp_path / "vlm_out.json"
-        mock_result = MagicMock()
-        mock_result.model_dump.return_value = {
-            "page": 2,
-            "issues": [],
-            "suggestions": [],
-            "notes": "",
-        }
+        mock_result = VLMPageAnalysis(page=2, findings=[], summary="")
 
         with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
             mock_llm_instance = MagicMock()
             mock_llm_instance.chat_parsed.return_value = mock_result
+            mock_llm_instance.model = "test-vlm-model"
             mock_llm_cls.return_value = mock_llm_instance
 
             result = runner.invoke(
