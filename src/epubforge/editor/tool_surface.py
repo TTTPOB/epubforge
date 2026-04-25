@@ -980,6 +980,70 @@ def run_vlm_page(
     return 0
 
 
+def run_vlm_range(
+    work: Path,
+    start_page: int,
+    end_page: int,
+    dpi: int,
+    cfg: Config,
+    *,
+    chapter: str | None = None,
+    blocks: list[str] | None = None,
+) -> int:
+    """Analyze a range of pages with VLM, creating one observation per page."""
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+    meta = load_editor_meta(paths)
+
+    if meta.stage3 is None:
+        raise CommandError(
+            "edit_state/meta.json has no stage3 section. "
+            "Re-initialize with `epubforge editor init` after running Stage 3."
+        )
+
+    if start_page > end_page:
+        raise CommandError(f"start_page ({start_page}) > end_page ({end_page})")
+
+    selected_set = set(meta.stage3.selected_pages)
+    pages_in_range = [
+        p for p in range(start_page, end_page + 1)
+        if p in selected_set
+    ]
+
+    if not pages_in_range:
+        raise CommandError(
+            f"no selected pages in range [{start_page}, {end_page}]"
+        )
+
+    observation_ids: list[str] = []
+    results: list[dict] = []
+
+    for page in pages_in_range:
+        obs, _warn = _run_vlm_page_core(
+            paths=paths,
+            page=page,
+            dpi=dpi,
+            cfg=cfg,
+            chapter=chapter,
+            blocks=blocks,
+        )
+        observation_ids.append(obs.observation_id)
+        results.append({
+            "observation_id": obs.observation_id,
+            "page": page,
+            "findings_count": len(obs.findings),
+        })
+
+    emit_json({
+        "observation_ids": observation_ids,
+        "pages_analyzed": len(pages_in_range),
+        "total_findings": sum(r["findings_count"] for r in results),
+        "per_page": results,
+    })
+    return 0
+
+
 def run_render_prompt(
     work: Path,
     kind: Literal["scanner", "fixer", "reviewer"],
