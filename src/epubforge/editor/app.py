@@ -116,6 +116,38 @@ def _compact_cmd(
     raise typer.Exit(_run(run_compact, work=work, cfg=cfg))
 
 
+@editor_app.command("diff-books")
+def _diff_books_cmd(
+    ctx: typer.Context,
+    work: Annotated[Path, typer.Argument(help="Work directory")],
+    proposed_file: Annotated[
+        Path,
+        typer.Option("--proposed-file", help="Proposed Book JSON file to compare"),
+    ],
+    base_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--base-file",
+            help="Base Book JSON file (default: <work>/edit_state/book.json)",
+        ),
+    ] = None,
+) -> None:
+    """Diff two Book JSON files and print a schema-valid BookPatch JSON."""
+    from epubforge.editor.tool_surface import run_diff_books
+
+    app_ctx = ctx.find_root().obj
+    cfg = app_ctx.config
+    raise typer.Exit(
+        _run(
+            run_diff_books,
+            work=work,
+            proposed_file=proposed_file,
+            base_file=base_file,
+            cfg=cfg,
+        )
+    )
+
+
 @editor_app.command("render-page")
 def _render_page_cmd(
     ctx: typer.Context,

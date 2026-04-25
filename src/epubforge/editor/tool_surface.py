@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from epubforge.config import Config
 from epubforge.editor.cli_support import CommandError, emit_json, emit_text
+from epubforge.editor.diff import DiffError, diff_books
 from epubforge.editor.doctor import DoctorReport, build_doctor_report
 from epubforge.editor.log import compact_log, count_applied_log_events
 from epubforge.editor.memory import EditMemory
+from epubforge.editor.patches import PatchError, apply_book_patch, validate_book_patch
 from epubforge.editor.prompts import render_prompt
 from epubforge.editor.projection import render_chapter_projection, render_index
 from epubforge.editor.scratch import allocate_script_path, run_script, write_script_stub
@@ -35,6 +38,7 @@ from epubforge.editor.state import (
     initialize_book_state,
 )
 from epubforge.io import load_book, save_book
+from epubforge.ir.semantic import Book
 
 
 class DoctorContext(BaseModel):
@@ -43,6 +47,21 @@ class DoctorContext(BaseModel):
     applied_event_count: int
     memory: EditMemory
     report: DoctorReport
+
+
+class DiffBooksResult(BaseModel):
+    """Machine-readable result for the editor diff-books tool surface."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    diff_applies: bool
+    round_trip_verified: bool
+    change_count: int
+    base_sha256: str
+    proposed_sha256: str
+    patch: dict[str, Any]
+    unsupported_diffs: list[dict[str, str]] = Field(default_factory=list)
+    review_groups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _timestamp() -> str:
@@ -282,6 +301,209 @@ def run_compact(work: Path, cfg: Config) -> int:
     book = load_editable_book(paths)
     marker = compact_log(paths.edit_state_dir, book, ts=_timestamp())
     emit_json(marker.model_dump(mode="json"))
+    return 0
+
+
+def _read_book_snapshot(path: Path, *, label: str) -> tuple[Book, bytes]:
+    resolved = path.expanduser()
+    if not resolved.exists():
+        raise CommandError(
+            f"{label} file not found: {resolved}",
+            exit_code=2,
+            payload={
+                "error": f"{label} file not found: {resolved}",
+                "kind": "file_not_found",
+                "path": str(resolved),
+            },
+        )
+    if not resolved.is_file():
+        raise CommandError(
+            f"{label} path is not a file: {resolved}",
+            exit_code=2,
+            payload={
+                "error": f"{label} path is not a file: {resolved}",
+                "kind": "not_a_file",
+                "path": str(resolved),
+            },
+        )
+
+    raw = resolved.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CommandError(
+            f"invalid UTF-8 in {label} Book JSON {resolved}: {exc}",
+            exit_code=1,
+            payload={
+                "error": f"invalid UTF-8 in {label} Book JSON: {exc}",
+                "kind": "invalid_json",
+                "path": str(resolved),
+            },
+        ) from exc
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CommandError(
+            f"invalid JSON in {label} Book file {resolved}: {exc.msg}",
+            exit_code=1,
+            payload={
+                "error": f"invalid JSON in {label} Book file: {exc.msg}",
+                "kind": "invalid_json",
+                "path": str(resolved),
+                "line": exc.lineno,
+                "column": exc.colno,
+            },
+        ) from exc
+
+    try:
+        return Book.model_validate(payload), raw
+    except ValidationError as exc:
+        raise CommandError(
+            f"invalid Book schema in {label} file {resolved}: {exc}",
+            exit_code=1,
+            payload={
+                "error": f"invalid Book schema in {label} file: {exc}",
+                "kind": "invalid_book_schema",
+                "path": str(resolved),
+            },
+        ) from exc
+
+
+def _sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _classify_diff_error(exc: DiffError) -> tuple[str, int]:
+    message = str(exc)
+    if any(
+        marker in message
+        for marker in (
+            "duplicate uid",
+            "uid=None",
+            "empty uid",
+            "non-string uid",
+        )
+    ):
+        return "uid_error", 1
+    if any(
+        marker in message
+        for marker in (
+            "unsupported",
+            "unclassified",
+            "Book-level",
+            "immutable",
+        )
+    ):
+        return "unsupported_diff", 2
+    return "diff_error", 1
+
+
+def build_diff_books_result(
+    work: Path,
+    *,
+    proposed_file: Path,
+    base_file: Path | None = None,
+    verify_round_trip: bool = True,
+) -> DiffBooksResult:
+    """Build a machine-readable diff result from two Book JSON snapshots.
+
+    If *base_file* is omitted, the base snapshot defaults to
+    ``<work>/edit_state/book.json``. This helper is read-only: it validates and
+    applies the generated patch in memory for round-trip verification, but never
+    writes to ``edit_state/book.json`` or any other editor state file.
+    """
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    resolved_base_file = base_file or paths.book_path
+
+    base, base_raw = _read_book_snapshot(resolved_base_file, label="base")
+    proposed, proposed_raw = _read_book_snapshot(proposed_file, label="proposed")
+    base_sha256 = _sha256_bytes(base_raw)
+    proposed_sha256 = _sha256_bytes(proposed_raw)
+
+    try:
+        patch = diff_books(base, proposed)
+    except DiffError as exc:
+        kind, exit_code = _classify_diff_error(exc)
+        unsupported_diffs = [{"message": str(exc)}] if kind == "unsupported_diff" else []
+        raise CommandError(
+            str(exc),
+            exit_code=exit_code,
+            payload={
+                "error": str(exc),
+                "kind": kind,
+                "base_sha256": base_sha256,
+                "proposed_sha256": proposed_sha256,
+                "unsupported_diffs": unsupported_diffs,
+            },
+        ) from exc
+
+    try:
+        validate_book_patch(base, patch)
+        applied = apply_book_patch(base, patch)
+    except PatchError as exc:
+        raise CommandError(
+            f"generated patch did not apply: {exc.reason}",
+            exit_code=2,
+            payload={
+                "error": f"generated patch did not apply: {exc.reason}",
+                "kind": "patch_apply_failed",
+                "patch_id": exc.patch_id,
+                "base_sha256": base_sha256,
+                "proposed_sha256": proposed_sha256,
+                "change_count": len(patch.changes),
+                "diff_applies": False,
+                "round_trip_verified": False,
+            },
+        ) from exc
+
+    round_trip_verified = False
+    if verify_round_trip:
+        round_trip_verified = applied.model_dump(mode="json") == proposed.model_dump(
+            mode="json"
+        )
+        if not round_trip_verified:
+            raise CommandError(
+                "generated patch applied but did not reproduce the proposed Book snapshot",
+                exit_code=2,
+                payload={
+                    "error": "generated patch applied but did not reproduce the proposed Book snapshot",
+                    "kind": "round_trip_mismatch",
+                    "base_sha256": base_sha256,
+                    "proposed_sha256": proposed_sha256,
+                    "change_count": len(patch.changes),
+                    "diff_applies": True,
+                    "round_trip_verified": False,
+                },
+            )
+
+    return DiffBooksResult(
+        diff_applies=True,
+        round_trip_verified=round_trip_verified,
+        change_count=len(patch.changes),
+        base_sha256=base_sha256,
+        proposed_sha256=proposed_sha256,
+        patch=patch.model_dump(mode="json"),
+        unsupported_diffs=[],
+        review_groups=[],
+    )
+
+
+def run_diff_books(
+    work: Path,
+    proposed_file: Path,
+    base_file: Path | None,
+    cfg: Config,
+) -> int:
+    _ = cfg
+    result = build_diff_books_result(
+        work,
+        proposed_file=proposed_file,
+        base_file=base_file,
+    )
+    emit_json(result.model_dump(mode="json"))
     return 0
 
 
