@@ -34,8 +34,6 @@ Stage 3 artifacts are **manifest-addressed**: the `artifact_id` is derived from 
 **Old workdirs** (layout: `03_extract/unit_*.json` at root level, no `source/source.pdf`) are
 **not migrated**. Rerun the full pipeline to generate the new format.
 
-> Note: `pipeline.py` has a lingering `stage_timer(log, "8 build")` label at line 117
-> (a pre-D6 artifact). This is cosmetic only — the stage is Stage 5 per D6=B.
 > CLI `--from` accepts `max=4` (build is not re-runnable via `--from`).
 
 All stages accept `--force-rerun` (`-f`) to re-run even when output exists.

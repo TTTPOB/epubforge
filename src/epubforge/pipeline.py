@@ -293,7 +293,7 @@ def run_extract(
         old_pointer, _ = load_active_stage3_manifest(work)
         old_artifact_id = old_pointer.active_artifact_id
     except Exception:
-        pass
+        log.debug("No prior artifact found, starting fresh")
 
     # Create artifact directory
     artifact_dir = work / "03_extract" / "artifacts" / desired_artifact_id
@@ -424,7 +424,7 @@ def run_build(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     if _skip(out, force, "build"):
         return
     log.info("Stage 5: building EPUB...")
-    with stage_timer(log, "8 build"):
+    with stage_timer(log, "5 build"):
         build_epub(
             semantic,
             out,
