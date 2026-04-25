@@ -1,8 +1,8 @@
 # Phase 6 实施计划：Book Diff Engine
 
-> 状态：修订后的实施计划（pro review）  
-> 对应主设计：`agentic-improvement.md` §8（Integration merge validation）、§9（Book diff bridge）、D3（`diff_books` 不做语义推断）、D6（不使用 `base_version` / `op_log_version`）  
-> 前置条件：Phase 1–3 的 `BookPatch` / `PatchCommand` / `AgentOutput` workflow 已可作为 editor mutation 层；Phase 5 projection 是只读上下文  
+> 状态：修订后的实施计划（pro review）
+> 对应主设计：`agentic-improvement.md` §8（Integration merge validation）、§9（Book diff bridge）、D3（`diff_books` 不做语义推断）、D6（不使用 `base_version` / `op_log_version`）
+> 前置条件：Phase 1–3 的 `BookPatch` / `PatchCommand` / `AgentOutput` workflow 已可作为 editor mutation 层；Phase 5 projection 是只读上下文
 > 下游依赖：Phase 7 Git-backed workspace workflow 依赖本 phase 把 Git merge 后的 `Book` 快照转为 UID-addressed semantic `BookPatch`
 
 ---
