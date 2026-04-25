@@ -37,7 +37,6 @@ AUDIT_DIRNAME = "audit"
 DOCTOR_REPORT_FILENAME = "doctor_report.json"
 DOCTOR_CONTEXT_FILENAME = "doctor_context.json"
 SCRATCH_DIRNAME = "scratch"
-SNAPSHOTS_DIRNAME = "snapshots"
 AGENT_OUTPUTS_DIRNAME = "agent_outputs"
 AGENT_OUTPUTS_ARCHIVES_DIRNAME = "archives"
 
@@ -53,7 +52,6 @@ class EditorPaths:
     doctor_report_path: Path
     doctor_context_path: Path
     scratch_dir: Path
-    snapshots_dir: Path
     current_log_path: Path
     agent_outputs_dir: Path
     agent_outputs_archives_dir: Path
@@ -78,7 +76,6 @@ def resolve_editor_paths(path: str | Path) -> EditorPaths:
         doctor_report_path=edit_state_dir / AUDIT_DIRNAME / DOCTOR_REPORT_FILENAME,
         doctor_context_path=edit_state_dir / AUDIT_DIRNAME / DOCTOR_CONTEXT_FILENAME,
         scratch_dir=edit_state_dir / SCRATCH_DIRNAME,
-        snapshots_dir=edit_state_dir / SNAPSHOTS_DIRNAME,
         current_log_path=edit_state_dir / CURRENT_LOG,
         agent_outputs_dir=edit_state_dir / AGENT_OUTPUTS_DIRNAME,
         agent_outputs_archives_dir=edit_state_dir
@@ -304,7 +301,6 @@ def write_initial_state(
     paths.edit_state_dir.mkdir(parents=True, exist_ok=True)
     paths.audit_dir.mkdir(parents=True, exist_ok=True)
     paths.scratch_dir.mkdir(parents=True, exist_ok=True)
-    paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
     paths.agent_outputs_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_model(paths.meta_path, build_editor_meta(book, stage3=stage3))
     atomic_write_model(paths.memory_path, memory)

@@ -150,7 +150,7 @@ def test_agent_output_submit_updates_book_and_audit_log(prov, tmp_path: Path) ->
     assert [entry.kind for entry in log] == ["agent_output_submitted"]
 
 
-def test_doctor_render_prompt_run_script_snapshot_and_compact(
+def test_doctor_render_prompt_run_script_and_compact(
     prov, tmp_path: Path
 ) -> None:
     work_dir = _init_work_dir(prov, tmp_path, "tools")
@@ -216,10 +216,6 @@ print(json.dumps(payload, ensure_ascii=False))
     )
     assert executed.exit_code == 0, executed.output
     assert json.loads(executed.output)["work_dir"] == str(work_dir.resolve())
-
-    snapshotted = _invoke(["editor", "snapshot", str(work_dir), "--tag", "pre-compact"])
-    assert snapshotted.exit_code == 0, snapshotted.output
-    assert (Path(json.loads(snapshotted.output)["snapshot"]) / "book.json").exists()
 
     compacted = _invoke(["editor", "compact", str(work_dir)])
     assert compacted.exit_code == 0, compacted.output
@@ -288,3 +284,35 @@ def test_smoke_epubforge_editor_help_via_subprocess() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "agent-output" in result.stdout
+
+
+def test_editor_snapshot_command_is_removed() -> None:
+    """Regression: 'editor snapshot' must fail with 'No such command'."""
+    result = subprocess.run(
+        ["uv", "run", "python", "-m", "epubforge", "editor", "snapshot", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, f"expected non-zero exit, got:\n{result.stdout}"
+    assert "No such command" in result.stderr
+
+
+def test_editor_snapshot_not_listed_in_help() -> None:
+    """Regression: 'editor --help' must not list snapshot as a command."""
+    result = subprocess.run(
+        ["uv", "run", "python", "-m", "epubforge", "editor", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Check that "snapshot" does not appear as a command line item.
+    # "snapshot" could appear in other contexts (e.g. compact description),
+    # so we specifically look for the command listing pattern.
+    # The Typer Commands section lists each command on its own line
+    # starting with │ command-name.
+    for line in result.stdout.splitlines():
+        assert "snapshot" not in line, f"snapshot found in help line: {line!r}"

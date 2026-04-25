@@ -283,27 +283,6 @@ def run_compact(work: Path, cfg: Config) -> int:
     return 0
 
 
-def run_snapshot(work: Path, tag: str | None, cfg: Config) -> int:
-    paths = resolve_editor_paths(work)
-    ensure_work_dir(paths)
-    ensure_initialized(paths)
-    resolved_tag = tag or _timestamp().replace(":", "-")
-    destination = paths.snapshots_dir / resolved_tag
-    if destination.exists():
-        raise CommandError(f"snapshot already exists: {destination}")
-    destination.mkdir(parents=True, exist_ok=False)
-    for entry in paths.edit_state_dir.iterdir():
-        if entry.name == paths.snapshots_dir.name:
-            continue
-        target = destination / entry.name
-        if entry.is_dir():
-            shutil.copytree(entry, target)
-        else:
-            shutil.copy2(entry, target)
-    emit_json({"snapshot": str(destination)})
-    return 0
-
-
 def _render_pdf_page_image(
     pdf_path: Path,
     page: int,
@@ -997,6 +976,5 @@ __all__ = [
     "run_render_page",
     "run_render_prompt",
     "run_run_script",
-    "run_snapshot",
     "run_vlm_page",
 ]

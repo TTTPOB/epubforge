@@ -108,29 +108,12 @@ def _compact_cmd(
     ctx: typer.Context,
     work: Annotated[Path, typer.Argument(help="Work directory")],
 ) -> None:
-    """Compact the current audit log into an archive snapshot."""
+    """Compact accepted edit log into an archive record."""
     from epubforge.editor.tool_surface import run_compact
 
     app_ctx = ctx.find_root().obj
     cfg = app_ctx.config
     raise typer.Exit(_run(run_compact, work=work, cfg=cfg))
-
-
-@editor_app.command("snapshot")
-def _snapshot_cmd(
-    ctx: typer.Context,
-    work: Annotated[Path, typer.Argument(help="Work directory")],
-    tag: Annotated[
-        Optional[str],
-        typer.Option("--tag", help="Snapshot tag (default: current timestamp)"),
-    ] = None,
-) -> None:
-    """Copy current edit_state into snapshots/<tag>/."""
-    from epubforge.editor.tool_surface import run_snapshot
-
-    app_ctx = ctx.find_root().obj
-    cfg = app_ctx.config
-    raise typer.Exit(_run(run_snapshot, work=work, tag=tag, cfg=cfg))
 
 
 @editor_app.command("render-page")

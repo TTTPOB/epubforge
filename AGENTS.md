@@ -71,7 +71,6 @@ edit_state/
   audit/             # doctor report + context JSON
   agent_outputs/     # in-progress AgentOutput JSON plus archives/
   scratch/           # temporary scripts allocated by run-script
-  snapshots/         # archived edit_state copies (tagged)
 ```
 
 ### AgentOutput / BookPatch workflow
@@ -106,8 +105,7 @@ effective config from `ctx.find_root().obj.config` (injected by the root Typer c
 | `agent-output validate` | Validate an AgentOutput without mutation |
 | `agent-output submit` | Dry-run, stage, or apply an AgentOutput |
 | `run-script` | Allocate or execute scratch scripts in `edit_state/scratch/` |
-| `compact` | Compact the accepted edit log into an archive snapshot |
-| `snapshot` | Copy current `edit_state/` into `snapshots/<tag>/` |
+| `compact` | Compact accepted edit log into an archive record |
 | `render-prompt` | Render a subagent prompt with current memory and patch workflow instructions |
 | `render-page` | Render a page from `source/source.pdf` to JPEG; **no LLM/VLM calls** |
 | `vlm-page` | Re-analyze a selected page via VLM; writes to `edit_state/audit/vlm_pages/`; never mutates `book.json` |

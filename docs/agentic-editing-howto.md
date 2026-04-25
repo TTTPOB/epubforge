@@ -16,7 +16,6 @@
 - `epubforge editor agent-output submit`
 - `epubforge editor run-script`
 - `epubforge editor compact`
-- `epubforge editor snapshot`
 - `epubforge editor render-prompt`
 - `epubforge editor render-page`
 - `epubforge editor vlm-page`
@@ -45,7 +44,7 @@ fixer 通过以下新工作流修复语义：
 - 生成 `meta.json`（含 `stage3` 上下文，如果 Stage 3 产物存在）
 - 生成 `memory.json`
 - 初始化空的 `edit_log.jsonl`
-- 创建 `agent_outputs/`、`scratch/`、`snapshots/` 等目录
+- 创建 `agent_outputs/`、`scratch/` 等目录
 - 为 chapter / block 补全稳定 uid
 
 ## 核心循环
@@ -108,5 +107,4 @@ epubforge --config config.toml editor vlm-page work/mybook --page 5
 ## 收敛与归档
 
 - `doctor` 连续 quiet round 后可认为当前轮次收敛。
-- `snapshot` 复制当前 `edit_state/` 到 `snapshots/<tag>/`。
 - `compact` 归档当前 audit log 并写入 compact marker，不修改书稿内容。

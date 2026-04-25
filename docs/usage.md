@@ -150,8 +150,7 @@ work/
     │   ├── audit/
     │   │   ├── doctor_report.json
     │   │   └── doctor_context.json
-    │   ├── scratch/
-    │   └── snapshots/
+    │   └── scratch/
     ├── images/                 # figure crops only (not whole-page renders)
     └── logs/
 out/
@@ -175,7 +174,6 @@ out/
 - `epubforge editor agent-output submit`
 - `epubforge editor run-script`
 - `epubforge editor compact`
-- `epubforge editor snapshot`
 - `epubforge editor render-prompt`
 - `epubforge editor render-page`
 - `epubforge editor vlm-page`
