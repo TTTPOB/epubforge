@@ -14,6 +14,12 @@ Public API (Sub-phase 7B):
     - create_worktree      — create a new Git worktree with a new branch
     - list_worktrees       — list all worktrees, optionally filtering to agent/*
 
+Public API (Sub-phase 7C):
+    - WorktreeRemoveResult — result of remove_worktree
+    - GCResult             — result of gc_worktrees
+    - remove_worktree      — remove a worktree and optionally its branch
+    - gc_worktrees         — garbage-collect stale agent worktrees
+
 Internal helpers:
     - _run_git              — subprocess wrapper with timeout / check
     - _validate_branch_name — branch naming safety guard
@@ -27,7 +33,8 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -86,6 +93,25 @@ class WorktreeCreateResult:
     worktree_path: Path  # absolute path to the newly created worktree
     branch: str          # name of the branch created in this worktree
     commit: str          # HEAD commit SHA of the new worktree
+
+
+@dataclass(frozen=True)
+class WorktreeRemoveResult:
+    """Result of removing a Git worktree."""
+
+    worktree_path: Path   # absolute path of the removed worktree
+    branch: str           # branch that was associated with the worktree
+    branch_deleted: bool  # True when the branch was also deleted
+    force_used: bool      # True when --force was passed to worktree remove
+
+
+@dataclass(frozen=True)
+class GCResult:
+    """Result of garbage-collecting stale agent worktrees."""
+
+    removed: list[WorktreeRemoveResult]  # worktrees that were removed
+    skipped: list[str]                   # "path: reason" entries for skipped worktrees
+    pruned: int                          # number of entries cleaned by git worktree prune
 
 
 # ---------------------------------------------------------------------------
@@ -464,13 +490,299 @@ def list_worktrees(
     return worktrees
 
 
+# ---------------------------------------------------------------------------
+# Public API — Sub-phase 7C
+# ---------------------------------------------------------------------------
+
+
+def remove_worktree(
+    repo_root: Path,
+    branch: str,
+    *,
+    force: bool = False,
+    delete_branch: bool = True,
+    timeout: int = 30,
+) -> WorktreeRemoveResult:
+    """Remove a worktree and optionally its branch.
+
+    Flow:
+        1. Call ``list_worktrees`` to find the worktree path for *branch*.
+        2. If not found, ``git worktree prune`` first, then proceed to
+           branch deletion only (worktree path is already gone).
+        3. Reject if the found worktree is the main worktree.
+        4. ``git worktree remove <path> [--force]``
+        5. If *delete_branch*:
+           - Try ``git branch -d <branch>`` (safe delete, merged only).
+           - If that fails and *force* is True, retry with ``-D``.
+           - If it fails and *force* is False, skip branch deletion
+             (``branch_deleted=False``).
+        6. Return ``WorktreeRemoveResult``.
+
+    Edge cases:
+        - Worktree path does not exist but Git still has a record →
+          run ``git worktree prune`` first, then delete branch.
+        - Branch does not exist but worktree path does →
+          remove worktree, skip branch deletion.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        branch: Branch name to remove the worktree for.
+        force: When ``True``, pass ``--force`` to ``git worktree remove``
+            and use ``-D`` for the branch delete.
+        delete_branch: When ``True`` (default), also delete the branch after
+            removing the worktree.
+        timeout: Maximum seconds for each git sub-command.
+
+    Returns:
+        A ``WorktreeRemoveResult`` describing what was done.
+
+    Raises:
+        GitError: When the worktree is the main worktree, or when a git
+            command fails unexpectedly.
+    """
+    # Step 1: find the worktree for this branch
+    worktrees = list_worktrees(repo_root, timeout=timeout)
+    matched = [wt for wt in worktrees if wt.branch == branch]
+
+    worktree_path: Path | None
+    if matched:
+        wt_info = matched[0]
+        # Step 3: reject main worktree
+        if wt_info.is_main:
+            raise GitError(
+                f"cannot remove main worktree (branch={branch!r})",
+                returncode=1,
+                stderr="",
+            )
+        worktree_path = wt_info.path
+    else:
+        # Step 2: branch not found in list — prune stale entries first
+        _run_git(["worktree", "prune"], cwd=repo_root, timeout=timeout)
+        # Re-scan after prune; if still absent, worktree was already gone
+        worktrees_after = list_worktrees(repo_root, timeout=timeout)
+        rematched = [wt for wt in worktrees_after if wt.branch == branch]
+        if rematched:
+            if rematched[0].is_main:
+                raise GitError(
+                    f"cannot remove main worktree (branch={branch!r})",
+                    returncode=1,
+                    stderr="",
+                )
+            worktree_path = rematched[0].path
+        else:
+            # Worktree is completely gone; fall through to branch deletion only
+            worktree_path = None
+
+    branch_deleted = False
+    force_used = force
+
+    # Step 4: remove the worktree directory if it still exists
+    if worktree_path is not None:
+        remove_args = ["worktree", "remove", str(worktree_path)]
+        if force:
+            remove_args.append("--force")
+        _run_git(remove_args, cwd=repo_root, timeout=timeout)
+
+    # Step 5: optionally delete the branch
+    if delete_branch:
+        # First check whether the branch actually exists
+        branch_check = _run_git(
+            ["rev-parse", "--verify", branch],
+            cwd=repo_root,
+            timeout=5,
+            check=False,
+        )
+        if branch_check.returncode != 0:
+            # Branch does not exist — nothing to delete
+            branch_deleted = False
+        else:
+            # Try safe delete first (-d only succeeds for merged branches)
+            safe_del = _run_git(
+                ["branch", "-d", branch],
+                cwd=repo_root,
+                timeout=timeout,
+                check=False,
+            )
+            if safe_del.returncode == 0:
+                branch_deleted = True
+            elif force:
+                # Force delete for unmerged branch
+                _run_git(["branch", "-D", branch], cwd=repo_root, timeout=timeout)
+                branch_deleted = True
+            else:
+                # Branch not merged and force=False — leave the branch intact
+                branch_deleted = False
+
+    if worktree_path is None:
+        # Construct a synthetic path for the result (already removed from fs)
+        worktree_path = _default_worktree_path(repo_root, branch)
+
+    return WorktreeRemoveResult(
+        worktree_path=worktree_path,
+        branch=branch,
+        branch_deleted=branch_deleted,
+        force_used=force_used,
+    )
+
+
+def gc_worktrees(
+    repo_root: Path,
+    *,
+    max_age_days: int = 7,
+    dry_run: bool = False,
+    timeout: int = 60,
+) -> GCResult:
+    """Garbage-collect orphaned agent worktrees older than *max_age_days*.
+
+    An agent worktree is considered a GC candidate when ALL of the
+    following are true:
+
+    1. Its branch matches the ``agent/*`` pattern.
+    2. The branch has at least one commit beyond the fork point
+       (``git log HEAD..<branch> --oneline`` has output).  Branches with no
+       new commits are skipped to avoid false positives on freshly created
+       worktrees whose ``git log -1`` would return the (potentially old)
+       fork-point timestamp.
+    3. Its last commit timestamp is older than ``max_age_days * 86400`` seconds.
+    4. The branch has **not** been merged into the current HEAD.
+
+    Flow:
+        1. ``git worktree prune`` — removes stale Git records for deleted dirs.
+        2. ``list_worktrees(agent_only=True)`` — get remaining agent worktrees.
+        3. For each agent worktree:
+           a. Check merged: ``git branch --merged HEAD`` includes branch?
+              If yes → skip (reason: "branch merged, should be cleaned by remove").
+           b. Check new commits: ``git log HEAD..<branch> --oneline``
+              If empty → skip (reason: "no new commits (recently created)").
+           c. Get last commit timestamp: ``git log -1 --format=%ct <branch>``
+           d. Compute age; if age <= max_age_days * 86400 → skip (too young).
+           e. Otherwise → add to candidates.
+        4. For each candidate:
+           - *dry_run* → add to skipped with reason "dry_run".
+           - Otherwise → ``remove_worktree(force=True)`` → add to removed.
+        5. Return ``GCResult``.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        max_age_days: Worktrees whose last commit is older than this many days
+            are eligible for removal.
+        dry_run: When ``True``, report candidates but do not remove anything.
+        timeout: Maximum seconds for the overall gc operation.  Individual
+            sub-commands use a proportional share of this budget.
+
+    Returns:
+        A ``GCResult`` summarising what was done.
+
+    Raises:
+        GitError: When an unexpected git command failure occurs.
+    """
+    # Step 1: prune stale worktree records and count entries cleaned
+    prune_result = _run_git(
+        ["worktree", "prune", "--verbose"],
+        cwd=repo_root,
+        timeout=min(timeout, 10),
+    )
+    # Count pruned entries by counting non-empty lines in prune output
+    pruned_lines = [
+        line for line in prune_result.stdout.splitlines() if line.strip()
+    ]
+    pruned = len(pruned_lines)
+
+    # Step 2: list remaining agent worktrees
+    agent_worktrees = list_worktrees(repo_root, agent_only=True, timeout=10)
+
+    removed: list[WorktreeRemoveResult] = []
+    skipped: list[str] = []
+    now = int(time.time())
+    max_age_seconds = max_age_days * 86400
+
+    for wt in agent_worktrees:
+        branch = wt.branch
+        wt_label = f"{wt.path}: {branch}"
+
+        # Step 3a: check if already merged into HEAD
+        merged_result = _run_git(
+            ["branch", "--merged", "HEAD"],
+            cwd=repo_root,
+            timeout=10,
+            check=False,
+        )
+        merged_branches = {
+            line.strip().lstrip("* ") for line in merged_result.stdout.splitlines()
+        }
+        if branch in merged_branches:
+            skipped.append(f"{wt_label}: branch merged, should be cleaned by remove")
+            continue
+
+        # Step 3b: check whether the branch has any new commits beyond HEAD
+        new_commits_result = _run_git(
+            ["log", f"HEAD..{branch}", "--oneline"],
+            cwd=repo_root,
+            timeout=10,
+            check=False,
+        )
+        new_commits_output = new_commits_result.stdout.strip()
+        if not new_commits_output:
+            skipped.append(f"{wt_label}: no new commits (recently created)")
+            continue
+
+        # Step 3c: get last commit timestamp for the branch
+        ts_result = _run_git(
+            ["log", "-1", "--format=%ct", branch],
+            cwd=repo_root,
+            timeout=5,
+            check=False,
+        )
+        ts_str = ts_result.stdout.strip()
+        if not ts_str:
+            # Cannot determine age; skip conservatively
+            skipped.append(f"{wt_label}: cannot determine last commit time")
+            continue
+
+        try:
+            last_commit_ts = int(ts_str)
+        except ValueError:
+            skipped.append(f"{wt_label}: cannot parse commit timestamp: {ts_str!r}")
+            continue
+
+        # Step 3d: check age
+        age = now - last_commit_ts
+        if age <= max_age_seconds:
+            skipped.append(
+                f"{wt_label}: last commit {age // 86400}d old (threshold {max_age_days}d)"
+            )
+            continue
+
+        # Step 4: GC candidate — dry run or remove
+        if dry_run:
+            skipped.append(f"{wt_label}: dry_run")
+        else:
+            result = remove_worktree(
+                repo_root,
+                branch,
+                force=True,
+                delete_branch=True,
+                timeout=timeout,
+            )
+            removed.append(result)
+
+    return GCResult(removed=removed, skipped=skipped, pruned=pruned)
+
+
 __all__ = [
+    # Sub-phase 7A
     "GitError",
     "WorktreeInfo",
-    "WorktreeCreateResult",
     "find_repo_root",
+    # Sub-phase 7B
+    "WorktreeCreateResult",
     "create_worktree",
     "list_worktrees",
+    # Sub-phase 7C
+    "WorktreeRemoveResult",
+    "GCResult",
+    "remove_worktree",
+    "gc_worktrees",
     # Internal helpers exposed for testing and downstream sub-phases:
     "_DEFAULT_GIT_TIMEOUT",
     "_run_git",

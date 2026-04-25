@@ -16,15 +16,18 @@ Covers (7B):
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from epubforge.editor.workspace import (
+    GCResult,
     GitError,
     WorktreeCreateResult,
     WorktreeInfo,
+    WorktreeRemoveResult,
     _DEFAULT_GIT_TIMEOUT,
     _default_worktree_path,
     _ensure_path_safe,
@@ -34,7 +37,9 @@ from epubforge.editor.workspace import (
     _validate_branch_name,
     create_worktree,
     find_repo_root,
+    gc_worktrees,
     list_worktrees,
+    remove_worktree,
 )
 
 
@@ -504,6 +509,294 @@ def test_list_worktrees_agent_only(git_repo: Path) -> None:
 
     subprocess.run(
         ["git", "worktree", "remove", str(wt1.worktree_path), "--force"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7C: remove_worktree
+# ---------------------------------------------------------------------------
+
+
+def _make_commit_in_worktree(worktree_path: Path, filename: str = "change.txt") -> None:
+    """Helper: add a file and commit in the given worktree directory."""
+    (worktree_path / filename).write_text("content", encoding="utf-8")
+    subprocess.run(["git", "add", filename], cwd=worktree_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"add {filename}"],
+        cwd=worktree_path,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_remove_worktree_merged(git_repo: Path) -> None:
+    """After merging a branch, remove_worktree should delete the worktree path and branch."""
+    # Create worktree and make a commit in it
+    wt = create_worktree(git_repo, "agent/rm-merged-1")
+    _make_commit_in_worktree(wt.worktree_path)
+
+    # Merge the branch into main repo (fast-forward or no-ff both fine)
+    subprocess.run(
+        ["git", "merge", "--no-ff", "agent/rm-merged-1", "-m", "merge agent"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Now remove the worktree
+    result = remove_worktree(git_repo, "agent/rm-merged-1")
+
+    assert isinstance(result, WorktreeRemoveResult)
+    assert result.branch == "agent/rm-merged-1"
+    assert result.branch_deleted is True
+    assert result.force_used is False
+    # Worktree path should no longer exist
+    assert not wt.worktree_path.exists()
+    # Branch should no longer exist in git
+    branch_check = subprocess.run(
+        ["git", "branch", "--list", "agent/rm-merged-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "agent/rm-merged-1" not in branch_check.stdout
+
+
+def test_remove_worktree_unmerged_no_force(git_repo: Path) -> None:
+    """With force=False, an unmerged branch's worktree should be removed but branch kept."""
+    wt = create_worktree(git_repo, "agent/rm-unmerged-1")
+    # Make an unmerged commit in the worktree
+    _make_commit_in_worktree(wt.worktree_path)
+
+    # Remove without force — worktree should be removed, but branch should be kept
+    result = remove_worktree(git_repo, "agent/rm-unmerged-1", force=False)
+
+    assert isinstance(result, WorktreeRemoveResult)
+    assert result.branch == "agent/rm-unmerged-1"
+    assert result.force_used is False
+    # Worktree directory must be gone
+    assert not wt.worktree_path.exists()
+    # Branch_deleted should be False because branch was not merged
+    assert result.branch_deleted is False
+    # Branch must still exist (unmerged, not force deleted)
+    branch_check = subprocess.run(
+        ["git", "branch", "--list", "agent/rm-unmerged-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "agent/rm-unmerged-1" in branch_check.stdout
+
+    # Cleanup remaining branch
+    subprocess.run(
+        ["git", "branch", "-D", "agent/rm-unmerged-1"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_remove_worktree_unmerged_force(git_repo: Path) -> None:
+    """With force=True, an unmerged worktree and its branch should both be deleted."""
+    wt = create_worktree(git_repo, "agent/rm-force-1")
+    # Make an unmerged commit in the worktree
+    _make_commit_in_worktree(wt.worktree_path)
+
+    result = remove_worktree(git_repo, "agent/rm-force-1", force=True)
+
+    assert isinstance(result, WorktreeRemoveResult)
+    assert result.branch == "agent/rm-force-1"
+    assert result.force_used is True
+    assert result.branch_deleted is True
+    # Both worktree path and branch should be gone
+    assert not wt.worktree_path.exists()
+    branch_check = subprocess.run(
+        ["git", "branch", "--list", "agent/rm-force-1"],
+        cwd=git_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert "agent/rm-force-1" not in branch_check.stdout
+
+
+def test_remove_worktree_main_rejected(git_repo: Path) -> None:
+    """Attempting to remove the main worktree should raise GitError."""
+    # Find the branch name of the main worktree
+    worktrees = list_worktrees(git_repo)
+    main_wt = next(wt for wt in worktrees if wt.is_main)
+    main_branch = main_wt.branch  # e.g. "master" or "main"
+
+    with pytest.raises(GitError, match="cannot remove main worktree"):
+        remove_worktree(git_repo, main_branch)
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7C: gc_worktrees
+# ---------------------------------------------------------------------------
+
+
+def test_gc_no_stale(git_repo: Path) -> None:
+    """With no agent worktrees at all, gc should return empty removed list."""
+    result = gc_worktrees(git_repo, max_age_days=0)
+
+    assert isinstance(result, GCResult)
+    assert result.removed == []
+    # pruned may be 0 or higher (no stale entries expected in fresh repo)
+    assert result.pruned >= 0
+
+
+def test_gc_removes_stale(git_repo: Path) -> None:
+    """A worktree with a commit older than max_age_days=0 should be removed."""
+    wt = create_worktree(git_repo, "agent/gc-stale-1")
+
+    # Make a commit in the worktree using a very old date to simulate staleness.
+    old_date = "2000-01-01T00:00:00"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": old_date,
+        "GIT_COMMITTER_DATE": old_date,
+    }
+    (wt.worktree_path / "stale.txt").write_text("old", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "stale.txt"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "old commit"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+
+    # With max_age_days=0 any commit older than now should qualify
+    result = gc_worktrees(git_repo, max_age_days=0)
+
+    assert isinstance(result, GCResult)
+    removed_branches = [r.branch for r in result.removed]
+    assert "agent/gc-stale-1" in removed_branches
+    # Worktree directory should be gone
+    assert not wt.worktree_path.exists()
+
+
+def test_gc_dry_run(git_repo: Path) -> None:
+    """With dry_run=True, gc should report candidates without actually deleting."""
+    wt = create_worktree(git_repo, "agent/gc-dry-1")
+
+    # Make an old commit
+    old_date = "2000-01-01T00:00:00"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": old_date,
+        "GIT_COMMITTER_DATE": old_date,
+    }
+    (wt.worktree_path / "dry.txt").write_text("dry", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "dry.txt"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "dry run commit"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+
+    result = gc_worktrees(git_repo, max_age_days=0, dry_run=True)
+
+    assert isinstance(result, GCResult)
+    # Nothing should have been removed
+    assert result.removed == []
+    # The dry_run skip reason should appear for this branch
+    dry_run_skips = [s for s in result.skipped if "agent/gc-dry-1" in s and "dry_run" in s]
+    assert len(dry_run_skips) >= 1
+    # Worktree directory must still exist
+    assert wt.worktree_path.exists()
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "agent/gc-dry-1"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_gc_skips_merged(git_repo: Path) -> None:
+    """A worktree whose branch has been merged should be skipped by gc."""
+    wt = create_worktree(git_repo, "agent/gc-merged-1")
+
+    # Make an old commit in the worktree
+    old_date = "2000-01-01T00:00:00"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": old_date,
+        "GIT_COMMITTER_DATE": old_date,
+    }
+    (wt.worktree_path / "merged.txt").write_text("merged", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "merged.txt"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "merged commit"],
+        cwd=wt.worktree_path,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+
+    # Merge the branch into main repo so it appears in --merged
+    subprocess.run(
+        ["git", "merge", "--no-ff", "agent/gc-merged-1", "-m", "merge for gc test"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Run GC — the merged worktree should be skipped, not removed
+    result = gc_worktrees(git_repo, max_age_days=0)
+
+    assert isinstance(result, GCResult)
+    removed_branches = [r.branch for r in result.removed]
+    assert "agent/gc-merged-1" not in removed_branches
+    # Check it appears in the skipped list with the "merged" reason
+    merged_skips = [
+        s for s in result.skipped
+        if "agent/gc-merged-1" in s and "merged" in s
+    ]
+    assert len(merged_skips) >= 1
+    # Worktree should still be present (not removed by gc)
+    assert wt.worktree_path.exists()
+
+    # Cleanup
+    subprocess.run(
+        ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", "agent/gc-merged-1"],
         cwd=git_repo,
         check=True,
         capture_output=True,

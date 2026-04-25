@@ -53,12 +53,16 @@ from epubforge.editor.projection import (
     render_index,
 )
 from epubforge.editor.workspace import (
+    GCResult,
     GitError,
     WorktreeCreateResult,
     WorktreeInfo,
+    WorktreeRemoveResult,
     create_worktree,
     find_repo_root,
+    gc_worktrees,
     list_worktrees,
+    remove_worktree,
 )
 
 __all__ = [
@@ -102,13 +106,17 @@ __all__ = [
     "diff_books",
     "create_worktree",
     "find_repo_root",
+    "gc_worktrees",
     "list_worktrees",
     "merge_edit_memory",
     "read_current_log",
     "render_chapter_projection",
     "render_index",
     "validate_book_patch",
+    "remove_worktree",
+    "GCResult",
     "GitError",
     "WorktreeCreateResult",
     "WorktreeInfo",
+    "WorktreeRemoveResult",
 ]
