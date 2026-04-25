@@ -109,9 +109,12 @@ def _extraction_context_block(
         else (stage3.selected_pages[0] if stage3.selected_pages else 1)
     )
 
+    start_page = chapter_pages[0] if chapter_pages else example_page
+    end_page = chapter_pages[-1] if chapter_pages else example_page
+
     lines = [
         "## Extraction context (Stage 3)",
-        f"- mode: {stage3.mode}  skipped_vlm: {stage3.skipped_vlm}",
+        f"- mode: {stage3.mode}",
         f"- artifact_id: {stage3.artifact_id}",
         f"- manifest: {stage3.manifest_path}  sha256: {stage3.manifest_sha256[:12]}…",
         f"- evidence_index: {stage3.evidence_index_path}",
@@ -123,8 +126,13 @@ def _extraction_context_block(
         "### Page inspection tools",
         "  # render whole page as JPEG (no LLM/VLM):",
         f"  epubforge editor render-page {work_dir_abs} --page {example_page}",
-        "  # call VLM on a page (writes to edit_state/audit/vlm_pages/):",
-        f"  epubforge editor vlm-page {work_dir_abs} --page {example_page}",
+        "  # call VLM to analyze a page (produces a VLMObservation with observation_id):",
+        f"  epubforge editor vlm-page {work_dir_abs} --page {example_page} --chapter {chapter.uid}",
+        "  # call VLM on a range of pages:",
+        f"  epubforge editor vlm-range {work_dir_abs} --start-page {start_page} --end-page {end_page}",
+        "",
+        "  VLM observations are stored in edit_state/vlm_observations/ and can be",
+        "  referenced in evidence_refs fields of AgentOutput and BookPatch.",
         "",
         "### Candidate roles note",
         "  Blocks with roles matching `docling_*_candidate` (e.g. `docling_heading_candidate`,",

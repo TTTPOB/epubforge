@@ -746,9 +746,14 @@ class TestRenderPromptExtractionContext:
         prompt = result.output
 
         assert "Extraction context" in prompt
-        assert "stage3" in prompt.lower() or "skip_vlm" in prompt
+        assert "mode:" in prompt
         assert "render-page" in prompt
         assert "vlm-page" in prompt
+        assert "vlm-range" in prompt
+        assert "--chapter" in prompt
+        assert "VLMObservation" in prompt or "observation_id" in prompt
+        assert "skipped_vlm:" not in prompt
+        assert "skipped_vlm " not in prompt
 
     def test_render_prompt_contains_candidate_role_guidance(
         self, tmp_path: Path
