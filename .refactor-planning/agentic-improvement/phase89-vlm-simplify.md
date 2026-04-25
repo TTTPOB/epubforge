@@ -303,6 +303,7 @@ After Phase 9:
 | PD11 | observation_index 使用单一 JSON 文件而非目录索引 | observation 数量不会很多（每页最多几个），单文件索引足够；也便于 Git 追踪变化 |
 | PD12 | Stage 3 artifact 不重命名为 "extract artifact" | 见非目标第 10 点。影响范围过大（路径 `03_extract/`、`Stage3Manifest`、`Stage3ActivePointer` 等），与 Phase 9 的简化目标无关 |
 | PD13 | 兼容旧 mode 值：Stage3Manifest.mode 接受 `"vlm" | "skip_vlm" | "docling"`，但新创建的 manifest 只使用 `"docling"` | 允许读取旧 manifest 不报错，但新写入统一为 `"docling"` |
+| PD14 | 简化后 `_settings_for_artifact` 保留 `enable_book_memory: True` 默认值 | 不改变现有默认行为。虽然 VLM 从 pipeline 移除，但 `enable_book_memory` 控制 Docling 提取时的滚动记忆功能，与 VLM 无关 |
 
 ### 4.2 新增类型：VLM Evidence 模型
 
@@ -661,7 +662,7 @@ def _settings_for_artifact(cfg: Config) -> dict[str, Any]:
         "contract_version": 3,
         "vlm_dpi": None,
         "max_vlm_batch_pages": None,
-        "enable_book_memory": False,
+        "enable_book_memory": True,
         "vlm_model": None,
         "vlm_base_url": None,
     }
@@ -890,6 +891,8 @@ Step 8: 构建 VLMObservation
         dpi=dpi,
         source_pdf=meta.stage3.source_pdf,
     )
+
+**注意**：VLM 返回的 `VLMFinding.block_uids` 可能包含幻觉 UID。在构建 `VLMObservation` 时，对每个 finding 的 `block_uids` 做过滤，只保留 `scope_blocks` 中实际存在的 UID（如果 scope_blocks 非空）。
 
 Step 9: 存储
     obs_path = save_vlm_observation(paths, obs)
@@ -1431,9 +1434,10 @@ uv run pyrefly check
 2. 修改 `validate_agent_output` 公共 API，增加可选 `paths` 参数。
 3. 修改 `submit_agent_output`，传递 `paths` 给验证。
 4. 修改 `stage_agent_output`，同上。
-5. 更新 `agent_output_cli.py` 中的调用者传递 `paths`。
-6. 更新现有测试以适配新签名。
-7. 新增 evidence_refs 验证测试。
+5. 更新 `tool_surface.py` 中的 `run_agent_output_validate` 和 `run_agent_output_submit` 函数，传递 `paths` 参数给 `validate_agent_output`。
+6. 更新 `agent_output.py` 中的 TODO 注释：将 `Phase 9` 引用改为 `Phase 8`（或直接删除 TODO，替换为实际验证逻辑）。
+7. 更新现有测试以适配新签名。
+8. 新增 evidence_refs 验证测试。
 
 **验收**：
 
@@ -1458,7 +1462,7 @@ uv run pyrefly check
 
 ### Sub-phase 9A：Pipeline 简化
 
-**依赖**：8A-8D 全部完成（VLM evidence 系统已建立，VLM 作为 editor 工具可用）。
+**依赖**：无（可与 Phase 8 并行实施。Pipeline 简化与 editor VLM 工具系统独立）。
 
 **任务**：
 
@@ -1467,7 +1471,8 @@ uv run pyrefly check
 3. 修改 `stage3_artifacts.py`：mode Literal 扩展。
 4. 修改 `ir/semantic.py`：`ExtractionMetadata.stage3_mode` 扩展。
 5. 修改 `editor/state.py`：`Stage3EditorMeta.mode` 扩展。
-6. 测试：`tests/test_stage3_simplify.py`。
+6. 在 `Stage3EditorMeta.skipped_vlm` 字段上添加 deprecation 注释：`# DEPRECATED: always True for new workdirs`。
+7. 测试：`tests/test_stage3_simplify.py`。
 
 **验收**：
 
@@ -1518,10 +1523,9 @@ uv run pyrefly check
 
 ```text
 8A: VLMObservation 模型 ──────┐
-                               ├──> 8B: vlm-page 重写 ──> 8C: vlm-range
+                               ├──> 8B: vlm-page 重写 ──┬──> 8C: vlm-range
+                               │                         └──> 8E: Prompt 更新
                                ├──> 8D: evidence_refs 验证
-                               │                          │
-                               │    8E: Prompt 更新 <──────┘
                                │
                                └──> 9A: Pipeline 简化
                                         │
