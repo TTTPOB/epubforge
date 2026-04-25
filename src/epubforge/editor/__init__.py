@@ -47,6 +47,10 @@ from epubforge.editor.patches import (
     apply_book_patch,
     validate_book_patch,
 )
+from epubforge.editor.projection import (
+    render_chapter_projection,
+    render_index,
+)
 
 __all__ = [
     "AgentOutput",
@@ -87,5 +91,7 @@ __all__ = [
     "evaluate_convergence",
     "merge_edit_memory",
     "read_current_log",
+    "render_chapter_projection",
+    "render_index",
     "validate_book_patch",
 ]
