@@ -1,0 +1,336 @@
+"""Git workspace operations for the agentic editing workflow.
+
+This module provides a subprocess-based wrapper around Git CLI commands.
+All Git operations use ``git`` from the system PATH; no external Python
+Git libraries are used (PD1).
+
+Public API (Sub-phase 7A):
+    - GitError          — exception raised on Git command failures
+    - find_repo_root    — locate the Git repository root
+    - WorktreeInfo      — parsed worktree descriptor (used by 7B onwards)
+
+Internal helpers:
+    - _run_git              — subprocess wrapper with timeout / check
+    - _validate_branch_name — branch naming safety guard
+    - _default_worktree_path — conventional worktree path derivation
+    - _ensure_path_safe      — path-escape guard
+    - _get_head_sha          — abbreviated HEAD SHA helper
+    - _parse_worktree_porcelain — parser for ``git worktree list --porcelain``
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_GIT_TIMEOUT = 30  # seconds
+
+# Branch name must be agent/<segment>[/<segment>...] where each segment
+# consists solely of [A-Za-z0-9._-] characters.  Segments that start with
+# a dot or hyphen are rejected by the extra checks in _validate_branch_name.
+_BRANCH_PATTERN = re.compile(r"^agent/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class GitError(RuntimeError):
+    """Raised when a Git subprocess command fails or times out."""
+
+    def __init__(self, message: str, returncode: int, stderr: str) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WorktreeInfo:
+    """Describes a single Git worktree entry."""
+
+    path: Path       # absolute filesystem path to the worktree
+    branch: str      # branch name (e.g. "agent/scanner-1"), "" for detached HEAD
+    commit: str      # HEAD commit SHA (abbreviated or full depending on source)
+    is_bare: bool    # True when the worktree is bare
+    is_main: bool    # True for the first (primary) worktree
+    prunable: bool   # True when git considers this entry prunable
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: int = _DEFAULT_GIT_TIMEOUT,
+    check: bool = True,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a git command and return the CompletedProcess.
+
+    Args:
+        args: Git command arguments (without the leading ``git`` token).
+        cwd: Working directory for the command.
+        timeout: Maximum seconds before ``subprocess.TimeoutExpired`` is
+            wrapped and re-raised as ``GitError``.
+        check: If ``True`` and the command exits with a non-zero return code,
+            raise ``GitError``.
+        input_text: Optional text to pass on stdin.
+
+    Returns:
+        The ``subprocess.CompletedProcess[str]`` result.
+
+    Raises:
+        GitError: When the command times out or (if check=True) exits non-zero.
+    """
+    cmd = ["git"] + args
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            input=input_text,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(
+            f"git {' '.join(args[:3])} timed out after {timeout}s. "
+            "If a merge was in progress, the working tree may be in a "
+            "dirty state. Check for stale .git/index.lock.",
+            returncode=-1,
+            stderr=str(exc),
+        ) from exc
+
+    if check and result.returncode != 0:
+        stderr_preview = result.stderr.strip()[:500]
+        raise GitError(
+            f"git {' '.join(args[:3])} failed (rc={result.returncode}): {stderr_preview}",
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
+    return result
+
+
+def _validate_branch_name(branch: str) -> None:
+    """Validate *branch* against the project naming convention.
+
+    Only ``agent/<kind>-<id>[/<sub>]`` patterns are accepted (PD3).
+    Each path segment must consist solely of ``[A-Za-z0-9._-]`` characters
+    and must not start with a dot or hyphen.
+
+    Raises:
+        ValueError: When the branch name does not conform.
+    """
+    if not branch:
+        raise ValueError("branch name must not be empty")
+
+    if not _BRANCH_PATTERN.fullmatch(branch):
+        raise ValueError(
+            f"branch name {branch!r} does not match required pattern "
+            "'agent/<kind>-<id>[/<sub>]'; only alphanumeric, dot, dash, "
+            "underscore allowed in each segment"
+        )
+
+    # Reject ".." anywhere in the name (path-traversal guard).
+    if ".." in branch:
+        raise ValueError(
+            f"branch name {branch!r} contains '..'; path traversal is not allowed"
+        )
+
+    # Each segment (after stripping the "agent/" prefix) must not start with
+    # a dot or a hyphen.
+    segments = branch[len("agent/"):].split("/")
+    for seg in segments:
+        if seg.startswith("."):
+            raise ValueError(
+                f"branch segment {seg!r} starts with '.'; hidden segments are not allowed"
+            )
+        if seg.startswith("-"):
+            raise ValueError(
+                f"branch segment {seg!r} starts with '-'; this is not allowed"
+            )
+
+
+def _default_worktree_path(repo_root: Path, branch: str) -> Path:
+    """Compute the default worktree directory path from *repo_root* and *branch*.
+
+    Convention::
+
+        <repo_root>/../<repo_name>-<branch_slug>/
+
+    where ``branch_slug`` replaces ``/`` with ``-``.
+
+    Note:
+        Slug collision is theoretically possible (e.g. ``agent/a-b`` and
+        ``agent/a/b`` both produce slug ``agent-a-b``).  In practice this is
+        unlikely given the ``agent/<kind>-<id>`` naming convention.  If it
+        does occur, ``git worktree add`` will fail because the target directory
+        already exists, producing a clear error for the caller.
+    """
+    repo_name = repo_root.name
+    branch_slug = branch.replace("/", "-")
+    return repo_root.parent / f"{repo_name}-{branch_slug}"
+
+
+def _ensure_path_safe(path: Path, repo_root: Path) -> None:
+    """Verify that *path* does not escape the sibling directory space of *repo_root*.
+
+    Allowed zone: ``repo_root.parent`` and its descendants (the same directory
+    level as the repository root).  Path traversal into arbitrary filesystem
+    locations is rejected.
+
+    Args:
+        path: The candidate path to validate.
+        repo_root: The repository root used as the reference anchor.
+
+    Raises:
+        ValueError: When *path* escapes the allowed zone.
+    """
+    resolved = path.resolve()
+    allowed_root = repo_root.parent.resolve()
+    try:
+        resolved.relative_to(allowed_root)
+    except ValueError:
+        raise ValueError(
+            f"path {path} escapes the expected parent directory {allowed_root}"
+        )
+
+
+def _get_head_sha(repo_root: Path) -> str:
+    """Return the abbreviated HEAD SHA for the repository at *repo_root*.
+
+    Uses ``git rev-parse --short HEAD`` for a compact identifier.
+    """
+    result = _run_git(
+        ["rev-parse", "--short", "HEAD"],
+        cwd=repo_root,
+        timeout=5,
+    )
+    return result.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# Porcelain parser
+# ---------------------------------------------------------------------------
+
+
+def _parse_worktree_porcelain(output: str) -> list[WorktreeInfo]:
+    """Parse ``git worktree list --porcelain`` output into a list of WorktreeInfo.
+
+    Each worktree block is separated by a blank line.  The expected block format::
+
+        worktree /path/to/worktree
+        HEAD <sha>
+        branch refs/heads/<name>
+        [bare]
+        [prunable gitdir file points to non-existent location ...]
+
+    Detached-HEAD worktrees have ``detached`` instead of a ``branch`` line.
+
+    The first block (index 0) is always the main worktree (``is_main=True``).
+    """
+    worktrees: list[WorktreeInfo] = []
+    # Split on blank lines; strip trailing whitespace from each line.
+    blocks = re.split(r"\n\n+", output.strip())
+    for block_index, block in enumerate(blocks):
+        if not block.strip():
+            continue
+
+        path: Path | None = None
+        commit: str = ""
+        branch: str = ""
+        is_bare: bool = False
+        prunable: bool = False
+
+        for line in block.splitlines():
+            line = line.strip()
+            if line.startswith("worktree "):
+                path = Path(line[len("worktree "):].strip())
+            elif line.startswith("HEAD "):
+                commit = line[len("HEAD "):].strip()
+            elif line.startswith("branch refs/heads/"):
+                branch = line[len("branch refs/heads/"):].strip()
+            elif line == "bare":
+                is_bare = True
+            elif line.startswith("prunable"):
+                prunable = True
+            # "detached" line: branch stays "" (already initialized)
+
+        if path is None:
+            # Malformed block; skip gracefully (forward-compat with new Git versions).
+            continue
+
+        worktrees.append(
+            WorktreeInfo(
+                path=path,
+                branch=branch,
+                commit=commit,
+                is_bare=is_bare,
+                is_main=(block_index == 0),
+                prunable=prunable,
+            )
+        )
+
+    return worktrees
+
+
+# ---------------------------------------------------------------------------
+# Public API — Sub-phase 7A
+# ---------------------------------------------------------------------------
+
+
+def find_repo_root(path: Path) -> Path:
+    """Find the Git repository root that contains *path*.
+
+    Uses ``git rev-parse --show-toplevel``.
+
+    Args:
+        path: Any path inside (or equal to) a Git repository.
+
+    Returns:
+        The absolute Path to the repository root.
+
+    Raises:
+        GitError: When *path* is not inside a Git repository or the git
+            command fails for any other reason.
+    """
+    cwd = path if path.is_dir() else path.parent
+    result = _run_git(
+        ["rev-parse", "--show-toplevel"],
+        cwd=cwd,
+        timeout=5,
+    )
+    return Path(result.stdout.strip())
+
+
+__all__ = [
+    "GitError",
+    "WorktreeInfo",
+    "find_repo_root",
+    # Internal helpers exposed for testing and downstream sub-phases:
+    "_DEFAULT_GIT_TIMEOUT",
+    "_run_git",
+    "_validate_branch_name",
+    "_default_worktree_path",
+    "_ensure_path_safe",
+    "_get_head_sha",
+    "_parse_worktree_porcelain",
+]

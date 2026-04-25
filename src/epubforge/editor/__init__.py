@@ -52,6 +52,11 @@ from epubforge.editor.projection import (
     render_chapter_projection,
     render_index,
 )
+from epubforge.editor.workspace import (
+    GitError,
+    WorktreeInfo,
+    find_repo_root,
+)
 
 __all__ = [
     "AgentOutput",
@@ -92,9 +97,12 @@ __all__ = [
     "compute_doctor_delta",
     "evaluate_convergence",
     "diff_books",
+    "find_repo_root",
     "merge_edit_memory",
     "read_current_log",
     "render_chapter_projection",
     "render_index",
     "validate_book_patch",
+    "GitError",
+    "WorktreeInfo",
 ]
