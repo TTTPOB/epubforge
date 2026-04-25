@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from epubforge.ir.semantic import Book
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1123,6 +1125,49 @@ def abort_merge(repo_root: Path, *, timeout: int = 10) -> None:
     _run_git(["merge", "--abort"], cwd=repo_root, timeout=timeout)
 
 
+def resolve_book_at_ref(
+    repo_root: Path,
+    ref: str,
+    work_dir_rel: str,
+    *,
+    timeout: int = 10,
+) -> str:
+    """Return the raw JSON string of book.json at the given Git ref.
+
+    Uses ``git show <ref>:<work_dir_rel>/edit_state/book.json``.
+    Path separators are normalized to forward slashes for Git compatibility.
+
+    Raises GitError if the ref or path does not exist.
+    """
+    # Normalize path separators (Windows backslashes -> forward slashes)
+    normalized_rel = work_dir_rel.replace("\\", "/")
+    git_path = f"{normalized_rel}/edit_state/book.json"
+    result = _run_git(
+        ["show", f"{ref}:{git_path}"],
+        cwd=repo_root,
+        timeout=timeout,
+    )
+    return result.stdout
+
+
+def resolve_book_path_at_ref(
+    repo_root: Path,
+    ref: str,
+    work_dir_rel: str,
+    *,
+    timeout: int = 10,
+) -> tuple[Book, bytes]:
+    """Resolve the Book at a Git ref, returning (Book, raw_bytes).
+
+    Convenience wrapper around resolve_book_at_ref that parses + validates.
+    Raises GitError if ref/path missing, or pydantic ValidationError if invalid.
+    """
+    json_text = resolve_book_at_ref(repo_root, ref, work_dir_rel, timeout=timeout)
+    raw = json_text.encode("utf-8")
+    book = Book.model_validate_json(json_text)
+    return book, raw
+
+
 __all__ = [
     # Sub-phase 7A
     "GitError",
@@ -1142,6 +1187,9 @@ __all__ = [
     "IntegrationResult",
     "merge_and_validate",
     "abort_merge",
+    # Sub-phase 7E
+    "resolve_book_at_ref",
+    "resolve_book_path_at_ref",
     # Internal helpers exposed for testing and downstream sub-phases:
     "_DEFAULT_GIT_TIMEOUT",
     "_run_git",

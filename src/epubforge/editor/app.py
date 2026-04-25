@@ -121,15 +121,23 @@ def _diff_books_cmd(
     ctx: typer.Context,
     work: Annotated[Path, typer.Argument(help="Work directory")],
     proposed_file: Annotated[
-        Path,
+        Optional[Path],
         typer.Option("--proposed-file", help="Proposed Book JSON file to compare"),
-    ],
+    ] = None,
     base_file: Annotated[
         Optional[Path],
         typer.Option(
             "--base-file",
             help="Base Book JSON file (default: <work>/edit_state/book.json)",
         ),
+    ] = None,
+    base_ref: Annotated[
+        Optional[str],
+        typer.Option("--base-ref", help="Git ref for base Book"),
+    ] = None,
+    proposed_ref: Annotated[
+        Optional[str],
+        typer.Option("--proposed-ref", help="Git ref for proposed Book"),
     ] = None,
 ) -> None:
     """Diff two Book JSON files and print a schema-valid BookPatch JSON."""
@@ -144,6 +152,8 @@ def _diff_books_cmd(
             proposed_file=proposed_file,
             base_file=base_file,
             cfg=cfg,
+            proposed_ref=proposed_ref,
+            base_ref=base_ref,
         )
     )
 

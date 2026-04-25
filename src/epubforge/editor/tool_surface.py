@@ -37,6 +37,7 @@ from epubforge.editor.state import (
     write_initial_state,
     initialize_book_state,
 )
+from epubforge.editor.workspace import GitError, find_repo_root, resolve_book_path_at_ref
 from epubforge.io import load_book, save_book
 from epubforge.ir.semantic import Book
 
@@ -62,6 +63,8 @@ class DiffBooksResult(BaseModel):
     patch: dict[str, Any]
     unsupported_diffs: list[dict[str, str]] = Field(default_factory=list)
     review_groups: list[dict[str, Any]] = Field(default_factory=list)
+    base_ref: str | None = None
+    proposed_ref: str | None = None
 
 
 def _timestamp() -> str:
@@ -402,29 +405,139 @@ def _classify_diff_error(exc: DiffError) -> tuple[str, int]:
 def build_diff_books_result(
     work: Path,
     *,
-    proposed_file: Path,
+    proposed_file: Path | None = None,
     base_file: Path | None = None,
+    proposed_ref: str | None = None,
+    base_ref: str | None = None,
     verify_round_trip: bool = True,
 ) -> DiffBooksResult:
     """Build a machine-readable diff result from two Book JSON snapshots.
 
-    If *base_file* is omitted, the base snapshot defaults to
-    ``<work>/edit_state/book.json``. This helper is read-only: it validates and
-    applies the generated patch in memory for round-trip verification, but never
-    writes to ``edit_state/book.json`` or any other editor state file.
+    If *base_file* is omitted and *base_ref* is also omitted, the base snapshot
+    defaults to ``<work>/edit_state/book.json``. This helper is read-only: it
+    validates and applies the generated patch in memory for round-trip
+    verification, but never writes to ``edit_state/book.json`` or any other
+    editor state file.
 
-    Phase 7 integration should resolve Git refs/worktrees outside this helper,
-    pass the resulting ``edit_state/book.json`` paths here (or parse them and call
-    ``diff_books`` directly), and keep all Git operations out of the Phase 6
-    semantic diff bridge.
+    Either *proposed_file* or *proposed_ref* must be provided (but not both).
+    Similarly, *base_file* and *base_ref* are mutually exclusive.
+
+    When a ref is provided, the Book is resolved via ``git show`` using
+    ``resolve_book_path_at_ref``.
     """
+    # Validate mutual exclusivity
+    if base_file is not None and base_ref is not None:
+        raise CommandError(
+            "--base-file and --base-ref are mutually exclusive",
+            exit_code=2,
+            payload={
+                "error": "--base-file and --base-ref are mutually exclusive",
+                "kind": "invalid_args",
+            },
+        )
+    if proposed_file is not None and proposed_ref is not None:
+        raise CommandError(
+            "--proposed-file and --proposed-ref are mutually exclusive",
+            exit_code=2,
+            payload={
+                "error": "--proposed-file and --proposed-ref are mutually exclusive",
+                "kind": "invalid_args",
+            },
+        )
+    if proposed_file is None and proposed_ref is None:
+        raise CommandError(
+            "one of --proposed-file or --proposed-ref is required",
+            exit_code=2,
+            payload={
+                "error": "one of --proposed-file or --proposed-ref is required",
+                "kind": "invalid_args",
+            },
+        )
 
     paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
-    resolved_base_file = base_file or paths.book_path
 
-    base, base_raw = _read_book_snapshot(resolved_base_file, label="base")
-    proposed, proposed_raw = _read_book_snapshot(proposed_file, label="proposed")
+    # Resolve base Book
+    if base_ref is not None:
+        try:
+            repo_root = find_repo_root(work.resolve())
+        except GitError as exc:
+            raise CommandError(
+                f"work directory is not inside a Git repo: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"work directory is not inside a Git repo: {exc}",
+                    "kind": "not_a_repo",
+                },
+            ) from exc
+        work_dir_rel = str(work.resolve().relative_to(repo_root))
+        try:
+            base, base_raw = resolve_book_path_at_ref(repo_root, base_ref, work_dir_rel)
+        except GitError as exc:
+            raise CommandError(
+                f"failed to resolve base ref {base_ref!r}: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"failed to resolve base ref {base_ref!r}: {exc}",
+                    "kind": "git_ref_error",
+                    "ref": base_ref,
+                },
+            ) from exc
+        except ValidationError as exc:
+            raise CommandError(
+                f"base ref {base_ref!r} does not contain a valid Book schema: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"base ref {base_ref!r} does not contain a valid Book schema: {exc}",
+                    "kind": "invalid_book_schema",
+                    "ref": base_ref,
+                },
+            ) from exc
+    else:
+        resolved_base_file = base_file or paths.book_path
+        base, base_raw = _read_book_snapshot(resolved_base_file, label="base")
+
+    # Resolve proposed Book
+    if proposed_ref is not None:
+        try:
+            repo_root = find_repo_root(work.resolve())
+        except GitError as exc:
+            raise CommandError(
+                f"work directory is not inside a Git repo: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"work directory is not inside a Git repo: {exc}",
+                    "kind": "not_a_repo",
+                },
+            ) from exc
+        work_dir_rel = str(work.resolve().relative_to(repo_root))
+        try:
+            proposed, proposed_raw = resolve_book_path_at_ref(
+                repo_root, proposed_ref, work_dir_rel
+            )
+        except GitError as exc:
+            raise CommandError(
+                f"failed to resolve proposed ref {proposed_ref!r}: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"failed to resolve proposed ref {proposed_ref!r}: {exc}",
+                    "kind": "git_ref_error",
+                    "ref": proposed_ref,
+                },
+            ) from exc
+        except ValidationError as exc:
+            raise CommandError(
+                f"proposed ref {proposed_ref!r} does not contain a valid Book schema: {exc}",
+                exit_code=1,
+                payload={
+                    "error": f"proposed ref {proposed_ref!r} does not contain a valid Book schema: {exc}",
+                    "kind": "invalid_book_schema",
+                    "ref": proposed_ref,
+                },
+            ) from exc
+    else:
+        assert proposed_file is not None  # guaranteed by mutual-exclusivity check above
+        proposed, proposed_raw = _read_book_snapshot(proposed_file, label="proposed")
     base_sha256 = _sha256_bytes(base_raw)
     proposed_sha256 = _sha256_bytes(proposed_raw)
 
@@ -493,20 +606,27 @@ def build_diff_books_result(
         patch=patch.model_dump(mode="json"),
         unsupported_diffs=[],
         review_groups=[],
+        base_ref=base_ref,
+        proposed_ref=proposed_ref,
     )
 
 
 def run_diff_books(
     work: Path,
-    proposed_file: Path,
+    proposed_file: Path | None,
     base_file: Path | None,
     cfg: Config,
+    *,
+    proposed_ref: str | None = None,
+    base_ref: str | None = None,
 ) -> int:
     _ = cfg
     result = build_diff_books_result(
         work,
         proposed_file=proposed_file,
         base_file=base_file,
+        proposed_ref=proposed_ref,
+        base_ref=base_ref,
     )
     emit_json(result.model_dump(mode="json"))
     return 0

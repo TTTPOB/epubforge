@@ -67,6 +67,8 @@ from epubforge.editor.workspace import (
     list_worktrees,
     merge_and_validate,
     remove_worktree,
+    resolve_book_at_ref,
+    resolve_book_path_at_ref,
 )
 
 __all__ = [
@@ -120,6 +122,8 @@ __all__ = [
     "render_index",
     "validate_book_patch",
     "remove_worktree",
+    "resolve_book_at_ref",
+    "resolve_book_path_at_ref",
     "GCResult",
     "GitError",
     "IntegrationResult",

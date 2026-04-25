@@ -54,6 +54,8 @@ from epubforge.editor.workspace import (
     list_worktrees,
     merge_and_validate,
     remove_worktree,
+    resolve_book_at_ref,
+    resolve_book_path_at_ref,
 )
 from epubforge.ir.semantic import (
     Book,
@@ -1179,3 +1181,69 @@ def test_merge_dirty_working_tree(book_repo: tuple[Path, str]) -> None:
         ["git", "worktree", "remove", str(wt.worktree_path), "--force"],
         cwd=repo, check=True, capture_output=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 7E: resolve_book_at_ref / resolve_book_path_at_ref
+# ---------------------------------------------------------------------------
+
+
+def _commit_file(repo: Path, rel_path: str, content: str, message: str = "add file") -> None:
+    """Write a file, stage it, and commit in the given repo."""
+    target = repo / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", rel_path], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def test_resolve_book_at_ref_success(book_repo: tuple[Path, str]) -> None:
+    """resolve_book_at_ref should return the raw JSON for a valid ref+path."""
+    repo, work_dir_rel = book_repo
+    json_text = resolve_book_at_ref(repo, "HEAD", work_dir_rel)
+    assert isinstance(json_text, str)
+    assert "title" in json_text or "chapters" in json_text
+
+
+def test_resolve_book_at_ref_not_found(git_repo: Path) -> None:
+    """resolve_book_at_ref should raise GitError for a non-existent ref."""
+    with pytest.raises(GitError):
+        resolve_book_at_ref(git_repo, "nonexistent-ref-xyz", "work/book")
+
+
+def test_resolve_book_at_ref_path_not_found(git_repo: Path) -> None:
+    """resolve_book_at_ref should raise GitError when the path doesn't exist at ref."""
+    with pytest.raises(GitError):
+        resolve_book_at_ref(git_repo, "HEAD", "nonexistent/work/dir")
+
+
+def test_resolve_book_path_at_ref_success(book_repo: tuple[Path, str]) -> None:
+    """resolve_book_path_at_ref should return (Book, bytes) for a valid ref+path."""
+    repo, work_dir_rel = book_repo
+    book, raw = resolve_book_path_at_ref(repo, "HEAD", work_dir_rel)
+    assert isinstance(book, Book)
+    assert isinstance(raw, bytes)
+    assert len(raw) > 0
+    assert book.title == "Test Book"
+
+
+def test_resolve_book_path_at_ref_invalid_json(git_repo: Path) -> None:
+    """resolve_book_path_at_ref should raise ValidationError for invalid Book JSON."""
+    from pydantic import ValidationError
+
+    _commit_file(git_repo, "work/book/edit_state/book.json", '{"not": "a valid book"}')
+    with pytest.raises(ValidationError):
+        resolve_book_path_at_ref(git_repo, "HEAD", "work/book")
+
+
+def test_resolve_book_at_ref_backslash_normalization(book_repo: tuple[Path, str]) -> None:
+    """resolve_book_at_ref should handle Windows-style backslash separators."""
+    repo, work_dir_rel = book_repo
+    # Replace forward slashes with backslashes to simulate Windows paths
+    windows_rel = work_dir_rel.replace("/", "\\")
+    json_text = resolve_book_at_ref(repo, "HEAD", windows_rel)
+    assert isinstance(json_text, str)
+    assert len(json_text) > 0
