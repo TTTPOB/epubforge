@@ -990,6 +990,25 @@ class TestValidate:
         ]
         assert len(kind_errors) == 0
 
+    def test_validate_supervisor_empty_book_patch(self, initialized_work):
+        """AgentOutput validation accepts an empty no-op BookPatch."""
+        work, book = initialized_work
+        output = _make_agent_output(
+            kind="supervisor",
+            agent_id="supervisor-1",
+            patches=[
+                BookPatch(
+                    patch_id=str(uuid4()),
+                    agent_id="supervisor-1",
+                    scope=PatchScope(chapter_uid=None),
+                    changes=[],
+                    rationale="No semantic changes detected",
+                )
+            ],
+        )
+
+        assert validate_agent_output(output, book) == []
+
     def test_validate_catches_stale_patch_precondition_without_side_effects(
         self, initialized_work
     ):
@@ -1167,6 +1186,44 @@ class TestSubmit:
         assert not (paths.agent_outputs_dir / f"{oid}.json").exists()
 
         # book unchanged
+        book_after = load_book(paths.book_path)
+        assert book_after.model_dump(mode="python") == book_before.model_dump(
+            mode="python"
+        )
+
+    def test_submit_apply_empty_book_patch(self, initialized_work, tmp_path, capsys):
+        """Apply with an empty no-op BookPatch archives one patch and leaves book unchanged."""
+        work, book = initialized_work
+        oid = self._begin_supervisor(work, book, capsys)
+        paths = resolve_editor_paths(work)
+        book_before = load_book(paths.book_path)
+
+        patch_data = {
+            "patch_id": str(uuid4()),
+            "agent_id": "supervisor-1",
+            "scope": {"chapter_uid": None},
+            "changes": [],
+            "rationale": "No semantic changes detected",
+        }
+        patch_file = tmp_path / "empty_patch.json"
+        patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+        run_agent_output_add_patch(
+            work=work, output_id=oid, patch_file=patch_file, cfg=_cfg()
+        )
+        capsys.readouterr()
+
+        run_agent_output_submit(
+            work=work,
+            output_id=oid,
+            apply=True,
+            stage=False,
+            cfg=_cfg(),
+        )
+        out = json.loads(capsys.readouterr().out)
+
+        assert out["submitted"] is True
+        assert out["patches_applied"] == 1
+        assert not (paths.agent_outputs_dir / f"{oid}.json").exists()
         book_after = load_book(paths.book_path)
         assert book_after.model_dump(mode="python") == book_before.model_dump(
             mode="python"

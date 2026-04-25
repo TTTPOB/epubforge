@@ -14,7 +14,9 @@ from epubforge.editor.patches import (
     PatchScope,
     ReplaceNodeChange,
     SetFieldChange,
+    allowed_set_fields,
     apply_book_patch,
+    serialize_patch_field_value,
     validate_book_patch,
 )
 from epubforge.ir.semantic import (
@@ -25,6 +27,7 @@ from epubforge.ir.semantic import (
     Paragraph,
     Provenance,
     Table,
+    TableMergeRecord,
 )
 from uuid import uuid4
 
@@ -620,6 +623,157 @@ class TestReplaceNodeChange:
         with pytest.raises(PatchError):
             apply_book_patch(sample_book, patch)
 
+    def test_replace_table_preserves_merge_record(self, sample_book):
+        """Table replace_node payload round-trips merge_record."""
+        table = sample_book.chapters[1].blocks[1]
+        assert isinstance(table, Table)
+        old_node = table.model_dump(mode="python")
+        merge_record = {
+            "segment_html": [
+                "<tbody><tr><td>A</td></tr></tbody>",
+                "<tbody><tr><td>B</td></tr></tbody>",
+            ],
+            "segment_pages": [1, 2],
+            "segment_order": [0, 1],
+            "column_widths": [1, 1],
+        }
+        patch = _make_patch(
+            [
+                ReplaceNodeChange(
+                    op="replace_node",
+                    target_uid="blk-5",
+                    old_node=old_node,
+                    new_node={
+                        "kind": "table",
+                        "html": "<table><tbody><tr><td>A</td></tr>"
+                        "<tr><td>B</td></tr></tbody></table>",
+                        "table_title": "Merged table",
+                        "caption": "",
+                        "continuation": False,
+                        "multi_page": True,
+                        "bbox": None,
+                        "provenance": _prov().model_dump(mode="python"),
+                        "merge_record": merge_record,
+                    },
+                )
+            ]
+        )
+
+        result = apply_book_patch(sample_book, patch)
+        updated = result.chapters[1].blocks[1]
+        assert isinstance(updated, Table)
+        assert updated.uid == "blk-5"
+        assert updated.merge_record == TableMergeRecord.model_validate(merge_record)
+
+    def test_replace_table_legacy_payload_without_merge_record(self, sample_book):
+        """Legacy table payloads without merge_record remain valid."""
+        table = sample_book.chapters[1].blocks[1]
+        assert isinstance(table, Table)
+        old_node = table.model_dump(mode="python")
+        old_node.pop("merge_record")
+        patch = _make_patch(
+            [
+                ReplaceNodeChange(
+                    op="replace_node",
+                    target_uid="blk-5",
+                    old_node=old_node,
+                    new_node={
+                        "kind": "table",
+                        "html": "<table><tr><td>legacy</td></tr></table>",
+                        "provenance": _prov().model_dump(mode="python"),
+                    },
+                )
+            ]
+        )
+
+        result = apply_book_patch(sample_book, patch)
+        updated = result.chapters[1].blocks[1]
+        assert isinstance(updated, Table)
+        assert updated.html == "<table><tr><td>legacy</td></tr></table>"
+        assert updated.merge_record is None
+
+    def test_replace_table_old_node_missing_merge_record_fails_when_present(self):
+        """Legacy old_node without merge_record is rejected when current table has one."""
+        table = Table(
+            uid="tbl-merged",
+            html="<table><tbody><tr><td>A</td></tr></tbody></table>",
+            multi_page=True,
+            provenance=_prov(),
+            merge_record=TableMergeRecord(
+                segment_html=[
+                    "<tbody><tr><td>A</td></tr></tbody>",
+                    "<tbody><tr><td>B</td></tr></tbody>",
+                ],
+                segment_pages=[1, 2],
+                segment_order=[0, 1],
+                column_widths=[1, 1],
+            ),
+        )
+        book = Book(
+            title="Merged Table Book",
+            chapters=[Chapter(uid="ch-table", title="Tables", blocks=[table])],
+        )
+        old_node = table.model_dump(mode="python")
+        old_node.pop("merge_record")
+        new_node = table.model_dump(mode="python")
+        new_node.pop("uid")
+        new_node["table_title"] = "Updated title"
+        patch = _make_patch(
+            [
+                ReplaceNodeChange(
+                    op="replace_node",
+                    target_uid="tbl-merged",
+                    old_node=old_node,
+                    new_node=new_node,
+                )
+            ]
+        )
+
+        with pytest.raises(PatchError):
+            apply_book_patch(book, patch)
+
+    def test_replace_table_old_node_precondition_includes_merge_record(self, sample_book):
+        """Table old_node precondition accepts a full snapshot with merge_record."""
+        table = Table(
+            uid="tbl-merged",
+            html="<table><tbody><tr><td>A</td></tr></tbody></table>",
+            multi_page=True,
+            provenance=_prov(),
+            merge_record=TableMergeRecord(
+                segment_html=[
+                    "<tbody><tr><td>A</td></tr></tbody>",
+                    "<tbody><tr><td>B</td></tr></tbody>",
+                ],
+                segment_pages=[1, 2],
+                segment_order=[0, 1],
+                column_widths=[1, 1],
+            ),
+        )
+        book = Book(
+            title="Merged Table Book",
+            chapters=[Chapter(uid="ch-table", title="Tables", blocks=[table])],
+        )
+        old_node = table.model_dump(mode="python")
+        new_node = old_node.copy()
+        new_node.pop("uid")
+        new_node["table_title"] = "Updated title"
+        patch = _make_patch(
+            [
+                ReplaceNodeChange(
+                    op="replace_node",
+                    target_uid="tbl-merged",
+                    old_node=old_node,
+                    new_node=new_node,
+                )
+            ]
+        )
+
+        result = apply_book_patch(book, patch)
+        updated = result.chapters[0].blocks[0]
+        assert isinstance(updated, Table)
+        assert updated.table_title == "Updated title"
+        assert updated.merge_record == table.merge_record
+
 
 # ---------------------------------------------------------------------------
 # 8.3 InsertNodeChange tests
@@ -688,6 +842,46 @@ class TestInsertNodeChange:
         ch = result.chapters[0]
         assert len(ch.blocks) == 4
         assert ch.blocks[0].uid == "blk-new"
+
+    def test_insert_table_preserves_merge_record(self, sample_book):
+        """Table insert_node payload round-trips merge_record."""
+        merge_record = {
+            "segment_html": [
+                "<tbody><tr><td>1</td></tr></tbody>",
+                "<tbody><tr><td>2</td></tr></tbody>",
+            ],
+            "segment_pages": [10, 11],
+            "segment_order": [0, 1],
+            "column_widths": [1, 1],
+        }
+        patch = _make_patch(
+            [
+                InsertNodeChange(
+                    op="insert_node",
+                    parent_uid="ch-1",
+                    after_uid="blk-3",
+                    node={
+                        "uid": "tbl-new",
+                        "kind": "table",
+                        "html": "<table><tbody><tr><td>1</td></tr>"
+                        "<tr><td>2</td></tr></tbody></table>",
+                        "table_title": "Inserted merged table",
+                        "caption": "",
+                        "continuation": False,
+                        "multi_page": True,
+                        "bbox": None,
+                        "provenance": _prov().model_dump(mode="python"),
+                        "merge_record": merge_record,
+                    },
+                )
+            ]
+        )
+
+        result = apply_book_patch(sample_book, patch)
+        inserted = result.chapters[0].blocks[-1]
+        assert isinstance(inserted, Table)
+        assert inserted.uid == "tbl-new"
+        assert inserted.merge_record == TableMergeRecord.model_validate(merge_record)
 
     def test_insert_block_in_middle(self, sample_book):
         """Insert block in the middle of a chapter."""
@@ -878,6 +1072,58 @@ class TestDeleteNodeChange:
         ch = result.chapters[0]
         assert len(ch.blocks) == 2
         assert all(b.uid != "blk-1" for b in ch.blocks)
+
+    def test_delete_table_old_node_missing_merge_record_passes_when_none(self, sample_book):
+        """Legacy table old_node without merge_record can delete a table with merge_record=None."""
+        table = sample_book.chapters[1].blocks[1]
+        assert isinstance(table, Table)
+        old_node = table.model_dump(mode="python")
+        old_node.pop("merge_record")
+        patch = _make_patch(
+            [
+                DeleteNodeChange(
+                    op="delete_node", target_uid="blk-5", old_node=old_node
+                ),
+            ]
+        )
+
+        result = apply_book_patch(sample_book, patch)
+
+        assert [block.uid for block in result.chapters[1].blocks] == ["blk-4", "blk-6"]
+
+    def test_delete_table_old_node_missing_merge_record_fails_when_present(self):
+        """Legacy table old_node without merge_record is rejected for merged tables."""
+        table = Table(
+            uid="tbl-merged",
+            html="<table><tbody><tr><td>A</td></tr></tbody></table>",
+            multi_page=True,
+            provenance=_prov(),
+            merge_record=TableMergeRecord(
+                segment_html=[
+                    "<tbody><tr><td>A</td></tr></tbody>",
+                    "<tbody><tr><td>B</td></tr></tbody>",
+                ],
+                segment_pages=[1, 2],
+                segment_order=[0, 1],
+                column_widths=[1, 1],
+            ),
+        )
+        book = Book(
+            title="Merged Table Book",
+            chapters=[Chapter(uid="ch-table", title="Tables", blocks=[table])],
+        )
+        old_node = table.model_dump(mode="python")
+        old_node.pop("merge_record")
+        patch = _make_patch(
+            [
+                DeleteNodeChange(
+                    op="delete_node", target_uid="tbl-merged", old_node=old_node
+                ),
+            ]
+        )
+
+        with pytest.raises(PatchError):
+            apply_book_patch(book, patch)
 
     def test_delete_empty_chapter(self, sample_book):
         """Delete an empty chapter — success."""
@@ -1249,15 +1495,51 @@ class TestBookPatchModel:
             )
 
     def test_empty_changes(self):
-        """Empty changes list — Pydantic ValidationError (min_length=1)."""
-        with pytest.raises(ValidationError):
-            BookPatch(
-                patch_id=str(uuid4()),
-                agent_id="test-agent",
-                scope=PatchScope(),
-                changes=[],
-                rationale="test",
-            )
+        """Empty changes list is a legal no-op patch."""
+        patch = BookPatch(
+            patch_id=str(uuid4()),
+            agent_id="test-agent",
+            scope=PatchScope(),
+            changes=[],
+            rationale="test",
+        )
+        assert patch.changes == []
+
+
+class TestPublicPatchHelpers:
+    def test_allowed_set_fields_returns_public_frozenset(self):
+        """allowed_set_fields exposes the editable field mapping for diff code."""
+        assert allowed_set_fields("paragraph") == frozenset(
+            {"text", "role", "style_class", "cross_page", "display_lines"}
+        )
+        assert "merge_record" not in allowed_set_fields("table")
+        assert allowed_set_fields("unknown") == frozenset()
+
+    def test_serialize_patch_field_value_serializes_models_recursively(self):
+        """serialize_patch_field_value matches patch precondition serialization."""
+        value = {
+            "provenance": _prov(),
+            "records": [
+                TableMergeRecord(
+                    segment_html=["<tbody></tbody>", "<tbody></tbody>"],
+                    segment_pages=[1, 2],
+                    segment_order=[0, 1],
+                    column_widths=[1, 1],
+                )
+            ],
+        }
+
+        assert serialize_patch_field_value(value) == {
+            "provenance": _prov().model_dump(mode="json"),
+            "records": [
+                {
+                    "segment_html": ["<tbody></tbody>", "<tbody></tbody>"],
+                    "segment_pages": [1, 2],
+                    "segment_order": [0, 1],
+                    "column_widths": [1, 1],
+                }
+            ],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1548,16 @@ class TestBookPatchModel:
 
 
 class TestApplyResults:
+    def test_empty_patch_validates_and_applies_as_noop(self, sample_book):
+        """Empty BookPatch validates and applies without changing book semantics."""
+        patch = _make_patch([])
+
+        validate_book_patch(sample_book, patch)
+        result = apply_book_patch(sample_book, patch)
+
+        assert result.model_dump(mode="python") == sample_book.model_dump(mode="python")
+        assert result is not sample_book
+
     def test_original_book_unchanged(self, sample_book):
         """Deep copy semantics: original book not modified after apply."""
         original_title = sample_book.chapters[0].blocks[0].text  # type: ignore[union-attr]

@@ -31,6 +31,7 @@ from epubforge.ir.semantic import (
     Paragraph,
     Provenance,
     Table,
+    TableMergeRecord,
 )
 from epubforge.ir.style_registry import ALLOWED_ROLES
 
@@ -198,7 +199,7 @@ class BookPatch(StrictModel):
     patch_id: UUID4, used as context key in PatchError.
     agent_id: non-empty string identifying the originating agent.
     scope: restricts which nodes the patch may touch.
-    changes: ordered list of atomic IRChange operations (min 1).
+    changes: ordered list of atomic IRChange operations. Empty lists are legal no-op patches.
     rationale: non-empty explanation for the changes.
     evidence_refs: optional list of VLMObservation ids or other evidence refs.
     """
@@ -206,7 +207,7 @@ class BookPatch(StrictModel):
     patch_id: str
     agent_id: str
     scope: PatchScope
-    changes: list[IRChange] = Field(min_length=1)
+    changes: list[IRChange]
     rationale: str
     evidence_refs: list[str] = []
 
@@ -329,6 +330,7 @@ class TablePayload(StrictModel):
     multi_page: bool = False
     bbox: list[float] | None = None
     provenance: Provenance
+    merge_record: TableMergeRecord | None = None
 
     @field_validator("html")
     @classmethod
@@ -449,6 +451,35 @@ def _serialize_field_value(value: Any) -> Any:
         return {k: _serialize_field_value(v) for k, v in value.items()}
     # str, int, float, bool, None — return directly
     return value
+
+
+def allowed_set_fields(kind: str) -> frozenset[str]:
+    """Return fields editable via SetFieldChange for a block/chapter kind."""
+
+    return _ALLOWED_SET_FIELD.get(kind, frozenset())
+
+
+def serialize_patch_field_value(value: object) -> object:
+    """Serialize a field value using BookPatch precondition comparison semantics."""
+
+    return _serialize_field_value(value)
+
+
+def _normalize_legacy_table_old_node_precondition(
+    current_node: Block | Chapter,
+    expected_old_node: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize old table snapshots written before merge_record was in patch payloads."""
+
+    if (
+        isinstance(current_node, Table)
+        and current_node.merge_record is None
+        and "merge_record" not in expected_old_node
+    ):
+        normalized = dict(expected_old_node)
+        normalized["merge_record"] = None
+        return normalized
+    return expected_old_node
 
 
 def _block_pos_in_chapter(chapter: Chapter, uid: str, patch_id: str) -> int:
@@ -577,7 +608,7 @@ def _check_set_field_preconditions(
         )
 
     # Allowed field guard
-    allowed = _ALLOWED_SET_FIELD.get(node_kind, frozenset())
+    allowed = allowed_set_fields(node_kind)
     if change.field not in allowed:
         raise PatchError(
             f"field {change.field!r} is not editable for kind {node_kind!r}",
@@ -586,7 +617,7 @@ def _check_set_field_preconditions(
 
     # Precondition: compare serialized current value against change.old
     current_value = getattr(node, change.field)
-    current_serialized = _serialize_field_value(current_value)
+    current_serialized = serialize_patch_field_value(current_value)
     if current_serialized != change.old:
         raise PatchError(
             f"set_field precondition mismatch for {change.target_uid}.{change.field}: "
@@ -673,7 +704,10 @@ def _check_replace_node_preconditions(
 
     current_node = _get_node(working, change.target_uid, index)
     current_serialized = current_node.model_dump(mode="python")  # type: ignore[union-attr]
-    if current_serialized != change.old_node:
+    expected_old_node = _normalize_legacy_table_old_node_precondition(
+        current_node, change.old_node
+    )
+    if current_serialized != expected_old_node:
         raise PatchError(
             f"replace_node old_node precondition mismatch for {change.target_uid!r}",
             patch_id,
@@ -791,7 +825,10 @@ def _check_delete_node_preconditions(
 
     current_node = _get_node(working, change.target_uid, index)
     current_serialized = current_node.model_dump(mode="python")  # type: ignore[union-attr]
-    if current_serialized != change.old_node:
+    expected_old_node = _normalize_legacy_table_old_node_precondition(
+        current_node, change.old_node
+    )
+    if current_serialized != expected_old_node:
         raise PatchError(
             f"delete_node old_node precondition mismatch for {change.target_uid!r}",
             patch_id,
@@ -1202,14 +1239,14 @@ def _validate_static_set_field(
         if change.target_uid in block_index:
             ch_idx, b_idx = block_index[change.target_uid]
             block = book.chapters[ch_idx].blocks[b_idx]
-            allowed = _ALLOWED_SET_FIELD.get(block.kind, frozenset())
+            allowed = allowed_set_fields(block.kind)
             if change.field not in allowed:
                 raise PatchError(
                     f"field {change.field!r} is not editable for kind {block.kind!r}",
                     pid,
                 )
         elif change.target_uid in chapter_index:
-            allowed = _ALLOWED_SET_FIELD.get("chapter", frozenset())
+            allowed = allowed_set_fields("chapter")
             if change.field not in allowed:
                 raise PatchError(
                     f"field {change.field!r} is not editable for kind 'chapter'",
@@ -1495,6 +1532,8 @@ __all__ = [
     "PatchScope",
     "ReplaceNodeChange",
     "SetFieldChange",
+    "allowed_set_fields",
     "apply_book_patch",
+    "serialize_patch_field_value",
     "validate_book_patch",
 ]
