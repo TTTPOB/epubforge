@@ -65,7 +65,7 @@ def assemble_from_manifest(work_dir: Path, manifest: Any) -> Book:
         default_page: int = data["unit"]["pages"][0]
 
         if unit_kind == "docling_page":
-            # skip-VLM: read draft_blocks
+            # Docling mode: read draft_blocks
             raw_blocks = data.get("draft_blocks", [])
         else:
             # vlm_batch: read blocks
@@ -91,7 +91,7 @@ def assemble_from_manifest(work_dir: Path, manifest: Any) -> Book:
 def _parse_block(raw: dict[str, Any], default_page: int, source: str) -> Block | None:
     kind = raw.get("kind", "")
 
-    # Detect block format: skip-VLM has nested provenance dict, VLM has flat page
+    # Detect block format: Docling has nested provenance dict
     prov_raw = raw.get("provenance")
     if isinstance(prov_raw, dict):
         page = prov_raw.get("page", default_page)

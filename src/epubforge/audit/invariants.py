@@ -15,7 +15,7 @@ _DRAFT_EXTRACTION_TITLE = "Draft extraction"
 def _is_single_draft_chapter(book: Book) -> bool:
     """Return True when the book contains a single chapter titled 'Draft extraction'.
 
-    A skip-VLM evidence draft may legitimately have a single unsplit chapter.
+    A Docling evidence draft may legitimately have a single unsplit chapter.
     This is valid — the invariant detector must not treat it as an error.
     """
     return len(book.chapters) == 1 and book.chapters[0].title == _DRAFT_EXTRACTION_TITLE

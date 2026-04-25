@@ -1,8 +1,8 @@
-"""End-to-end no-API-key test for the skip-VLM pipeline.
+"""End-to-end no-API-key test for the docling pipeline.
 
-This test simulates the full skip-VLM pipeline without any API keys or real
+This test simulates the full docling pipeline without any API keys or real
 Docling/VLM calls.  It creates a minimal workdir with fake parse/classify
-outputs, runs extraction (Stage 3) → assemble (Stage 4) → editor init →
+outputs, runs extraction (Stage 3) -> assemble (Stage 4) -> editor init ->
 build_epub in sequence and verifies each stage produces the expected outputs.
 """
 
@@ -93,13 +93,8 @@ _PAGES_DATA: dict[str, Any] = {
 }
 
 _BASE_SETTINGS: dict[str, Any] = {
-    "skip_vlm": True,
     "contract_version": 3,
-    "vlm_dpi": None,
-    "max_vlm_batch_pages": None,
     "enable_book_memory": False,
-    "vlm_model": None,
-    "vlm_base_url": None,
 }
 
 
@@ -109,11 +104,11 @@ _BASE_SETTINGS: dict[str, Any] = {
 
 
 def _make_cfg(tmp_path: Path) -> Config:
-    """Config with skip_vlm=True and no API keys."""
+    """Config with no API keys."""
     return Config(
         runtime=RuntimeSettings(work_dir=tmp_path / "work"),
-        extract=ExtractSettings(skip_vlm=True),
-        # no llm/vlm api_key → provider_required must never be True on this path
+        extract=ExtractSettings(),
+        # no llm/vlm api_key - provider_required must never be True on this path
     )
 
 
@@ -152,7 +147,7 @@ def _fake_extract_skip_vlm(
             "kind": "docling_page",
             "pages": [1],
             "page_kinds": ["simple"],
-            "extractor": "skip_vlm",
+            "extractor": "docling",
             "contract_version": 3,
         },
         "draft_blocks": [
@@ -191,7 +186,7 @@ def _fake_extract_skip_vlm(
     warnings_file.write_text("[]", encoding="utf-8")
 
     return Stage3ExtractionResult(
-        mode="skip_vlm",
+        mode="docling",
         unit_files=[unit_file],
         audit_notes_path=audit_file,
         book_memory_path=book_memory,
@@ -208,19 +203,19 @@ def _fake_extract_skip_vlm(
 # ---------------------------------------------------------------------------
 
 
-def test_skip_vlm_e2e_no_api_key(
+def test_docling_e2e_no_api_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Simulate: run --skip-vlm reaches Stage 4, produces valid Book output.
+    Simulate: docling extraction reaches Stage 4, produces valid Book output.
 
     This test does NOT call actual Docling/VLM.  It creates a minimal workdir
     with fake parse/classify outputs and runs the pipeline from Stage 3 onward.
 
     Verifies:
-    1. run_extract() with skip_vlm=True succeeds without API keys
-    2. 05_semantic_raw.json contains Book.extraction.stage3_mode="skip_vlm"
+    1. run_extract() succeeds without API keys
+    2. 05_semantic_raw.json contains Book.extraction.stage3_mode="docling"
        and a non-empty stage3_manifest_sha256
     3. editor init can initialize from the raw semantic output
     4. build_epub() can produce output from the editor book
@@ -240,12 +235,12 @@ def test_skip_vlm_e2e_no_api_key(
     # Guard: require_vlm / require_llm must never be called on this path
     def _fail_require_vlm(self: Any) -> None:
         raise AssertionError(
-            "require_vlm called in skip-VLM E2E test — no API key available"
+            "require_vlm called in docling E2E test - no API key available"
         )
 
     def _fail_require_llm(self: Any) -> None:
         raise AssertionError(
-            "require_llm called in skip-VLM E2E test — no API key available"
+            "require_llm called in docling E2E test - no API key available"
         )
 
     monkeypatch.setattr(Config, "require_vlm", _fail_require_vlm)
@@ -262,12 +257,12 @@ def test_skip_vlm_e2e_no_api_key(
     from epubforge.stage3_artifacts import load_active_stage3_manifest
 
     pointer, manifest = load_active_stage3_manifest(work)
-    assert manifest.mode == "skip_vlm"
+    assert manifest.mode == "docling"
     assert len(manifest.artifact_id) == 16
     assert "warnings" in manifest.sidecars, "manifest must register warnings sidecar"
 
     # -----------------------------------------------------------------------
-    # Stage 4: assemble → 05_semantic_raw.json
+    # Stage 4: assemble -> 05_semantic_raw.json
     # -----------------------------------------------------------------------
     from epubforge.pipeline import run_assemble
 
@@ -279,8 +274,8 @@ def test_skip_vlm_e2e_no_api_key(
     book = Book.model_validate_json(semantic_raw.read_text(encoding="utf-8"))
 
     # Verify extraction metadata
-    assert book.extraction.stage3_mode == "skip_vlm", (
-        f"Expected stage3_mode='skip_vlm', got {book.extraction.stage3_mode!r}"
+    assert book.extraction.stage3_mode == "docling", (
+        f"Expected stage3_mode='docling', got {book.extraction.stage3_mode!r}"
     )
     assert book.extraction.artifact_id == manifest.artifact_id
     assert book.extraction.stage3_manifest_sha256 == pointer.manifest_sha256, (
@@ -309,7 +304,7 @@ def test_skip_vlm_e2e_no_api_key(
     # -----------------------------------------------------------------------
     from epubforge.editor.tool_surface import run_init
 
-    # run_init uses emit_json → capture stdout output
+    # run_init uses emit_json -> capture stdout output
     import io
     import sys
 
@@ -326,7 +321,7 @@ def test_skip_vlm_e2e_no_api_key(
     init_output = captured.getvalue().strip()
     init_payload = json.loads(init_output)
     assert "stage3" in init_payload, "editor init output must include stage3 metadata"
-    assert init_payload["stage3"]["mode"] == "skip_vlm"
+    assert init_payload["stage3"]["mode"] == "docling"
     assert init_payload["stage3"]["artifact_id"] == manifest.artifact_id
 
     # edit_state/book.json must exist

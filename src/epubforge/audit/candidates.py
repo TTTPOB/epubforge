@@ -1,4 +1,4 @@
-"""Audit detector for Docling candidate roles (skip-VLM draft evidence)."""
+"""Audit detector for Docling candidate roles (mechanical parse draft evidence)."""
 
 from __future__ import annotations
 

@@ -72,8 +72,7 @@ def _make_book(page: int = 5) -> Book:
 def _make_stage3_meta(work_dir: Path, source_pdf: Path) -> Stage3EditorMeta:
     """Minimal Stage3EditorMeta for testing."""
     return Stage3EditorMeta(
-        mode="vlm",
-        skipped_vlm=False,
+        mode="docling",
         manifest_path="stage3_manifest.json",
         manifest_sha256="a" * 64,
         artifact_id="art-001",

@@ -236,8 +236,7 @@ def load_editable_book(paths: EditorPaths) -> Book:
 class Stage3EditorMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["vlm", "skip_vlm", "docling", "unknown"]
-    skipped_vlm: bool  # DEPRECATED: always True for new workdirs
+    mode: Literal["docling", "unknown"]
     manifest_path: str
     manifest_sha256: str
     artifact_id: str

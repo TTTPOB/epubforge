@@ -340,7 +340,7 @@ class TestExtractionMetadata:
 
     def test_extraction_metadata_round_trip(self) -> None:
         em = ExtractionMetadata(
-            stage3_mode="skip_vlm",
+            stage3_mode="docling",
             stage3_manifest_path="/books/manifest.json",
             stage3_manifest_sha256="abc123def456",
             artifact_id="art-999",
@@ -350,7 +350,7 @@ class TestExtractionMetadata:
             evidence_index_path="/books/evidence/index.json",
         )
         restored = ExtractionMetadata.model_validate_json(em.model_dump_json())
-        assert restored.stage3_mode == "skip_vlm"
+        assert restored.stage3_mode == "docling"
         assert restored.stage3_manifest_path == "/books/manifest.json"
         assert restored.stage3_manifest_sha256 == "abc123def456"
         assert restored.artifact_id == "art-999"
@@ -363,27 +363,32 @@ class TestExtractionMetadata:
         b = Book(
             title="My Book",
             extraction=ExtractionMetadata(
-                stage3_mode="vlm",
+                stage3_mode="docling",
                 selected_pages=[5, 6, 7],
             ),
         )
         data = b.model_dump()
         assert "extraction" in data
-        assert data["extraction"]["stage3_mode"] == "vlm"
+        assert data["extraction"]["stage3_mode"] == "docling"
         assert data["extraction"]["selected_pages"] == [5, 6, 7]
 
     def test_invalid_stage3_mode_raises(self) -> None:
         with pytest.raises(ValidationError):
             ExtractionMetadata(stage3_mode="bad_mode")  # type: ignore[arg-type]
+        # "vlm" and "skip_vlm" are also no longer valid
+        with pytest.raises(ValidationError):
+            ExtractionMetadata(stage3_mode="vlm")  # type: ignore[arg-type]
+        with pytest.raises(ValidationError):
+            ExtractionMetadata(stage3_mode="skip_vlm")  # type: ignore[arg-type]
 
     def test_book_json_round_trip_with_extraction(self) -> None:
         b = Book(
             title="JSON Book",
             extraction=ExtractionMetadata(
-                stage3_mode="skip_vlm",
+                stage3_mode="docling",
                 source_pdf="/tmp/book.pdf",
             ),
         )
         restored = Book.model_validate_json(b.model_dump_json())
-        assert restored.extraction.stage3_mode == "skip_vlm"
+        assert restored.extraction.stage3_mode == "docling"
         assert restored.extraction.source_pdf == "/tmp/book.pdf"

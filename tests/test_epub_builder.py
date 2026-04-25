@@ -207,7 +207,7 @@ def _write_active_pointer(work_dir: Path, manifest_sha256: str) -> None:
     from epubforge.stage3_artifacts import Stage3Manifest
 
     manifest = Stage3Manifest(
-        mode="skip_vlm",
+        mode="docling",
         artifact_id=artifact_id,
         artifact_dir=f"03_extract/artifacts/{artifact_id}",
         created_at="2026-01-01T00:00:00Z",
@@ -221,7 +221,7 @@ def _write_active_pointer(work_dir: Path, manifest_sha256: str) -> None:
         page_filter=None,
         unit_files=[],
         sidecars={},
-        settings={"skip_vlm": True},
+        settings={"contract_version": 3},
     )
     manifest_text = manifest.model_dump_json(indent=2)
     actual_sha = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()

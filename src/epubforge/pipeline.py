@@ -182,13 +182,8 @@ def _parse_pages_json(pages_json: Path) -> tuple[list[int], list[int], list[int]
 def _settings_for_artifact(cfg: Config) -> dict[str, Any]:
     """Build the settings snapshot used for artifact_id computation."""
     return {
-        "skip_vlm": True,
         "contract_version": 3,
-        "vlm_dpi": None,
-        "max_vlm_batch_pages": None,
         "enable_book_memory": False,
-        "vlm_model": None,
-        "vlm_base_url": None,
     }
 
 

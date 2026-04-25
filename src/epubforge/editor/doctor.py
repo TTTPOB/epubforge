@@ -265,8 +265,8 @@ def _detector_hints(bundle: AuditBundle) -> list[Hint]:
     return [*_style_inconsistency_hints(bundle), *_unusual_density_hints(bundle)]
 
 
-def _skip_vlm_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
-    """Emit info-level hints when the book was produced by the skip-VLM path.
+def _docling_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
+    """Emit info-level hints for books produced by the docling extraction path.
 
     These are never errors — they guide scanner/fixer agents toward work that
     remains after mechanical evidence-draft extraction.
@@ -293,7 +293,7 @@ def _skip_vlm_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
                 severity="info",
                 message=(
                     f"{chapter_uid} 包含复杂页面（如第 {page} 页），"
-                    "skip-VLM 未做 VLM 语义提取，建议开 scanner subagent 仔细核查。"
+                    "docling 未做 VLM 语义提取，建议开 scanner subagent 仔细核查。"
                 ),
                 scope="chapter",
                 chapter_uid=chapter_uid,
@@ -659,21 +659,21 @@ def build_doctor_report(
 ) -> DoctorReport:
     resolved_chapter_uids = _resolve_chapter_uids(book=book, chapter_uids=chapter_uids)
     auto_detector_hints: list[Hint] = []
-    skip_vlm_hint_list: list[Hint] = []
+    docling_hint_list: list[Hint] = []
     if book is not None:
         bundle = run_all_detectors(book)
         auto_detector_hints = _detector_hints(bundle)
         if issues is None:
             issues = bundle.to_audit_notes()
-        # Emit skip-VLM guidance hints when extraction was done without VLM
-        if book.extraction.stage3_mode in ("skip_vlm", "docling"):
-            skip_vlm_hint_list = _skip_vlm_hints(book, book.extraction.complex_pages)
+        # Emit Docling-mode guidance hints when extraction used mechanical parsing
+        if book.extraction.stage3_mode == "docling":
+            docling_hint_list = _docling_hints(book, book.extraction.complex_pages)
     if issues is None:
         raise ValueError("issues or book must be provided")
     hints = [
         *(detector_hints or []),
         *auto_detector_hints,
-        *skip_vlm_hint_list,
+        *docling_hint_list,
         *_core_hints(memory, resolved_chapter_uids),
     ]
     delta = compute_doctor_delta(

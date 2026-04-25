@@ -28,12 +28,11 @@ from epubforge.stage3_artifacts import (
 def _make_cfg(
     tmp_path: Path,
     *,
-    skip_vlm: bool = False,
     api_key: str | None = None,
 ) -> Config:
     return Config(
         runtime=RuntimeSettings(work_dir=tmp_path / "work"),
-        extract=ExtractSettings(skip_vlm=skip_vlm),
+        extract=ExtractSettings(),
         llm={"api_key": api_key} if api_key else {},
         vlm={"api_key": api_key, "model": "google/gemini-flash-3", "max_tokens": 16384}
         if api_key
@@ -110,11 +109,8 @@ def _setup_work_dir(
     return source_pdf, raw, pages_json
 
 
-def _build_desired_id(work: Path, skip_vlm: bool = False) -> str:
-    """Compute the expected artifact_id for the standard setup.
-
-    skip_vlm is ignored — pipeline always uses docling mode now.
-    """
+def _build_desired_id(work: Path) -> str:
+    """Compute the expected artifact_id for the standard setup."""
     import hashlib
 
     source_pdf = work / "source" / "source.pdf"
@@ -129,13 +125,8 @@ def _build_desired_id(work: Path, skip_vlm: bool = False) -> str:
         return h.hexdigest()
 
     settings: dict[str, Any] = {
-        "skip_vlm": True,
         "contract_version": 3,
-        "vlm_dpi": None,
-        "max_vlm_batch_pages": None,
         "enable_book_memory": False,
-        "vlm_model": None,
-        "vlm_base_url": None,
     }
 
     return build_desired_stage3_manifest(
@@ -192,13 +183,8 @@ def _create_valid_active_artifact(
             "evidence_index": f"{art_dir_rel}/evidence_index.json",
         },
         settings={
-            "skip_vlm": mode == "skip_vlm",
             "contract_version": 3,
-            "vlm_dpi": None,
-            "max_vlm_batch_pages": None,
             "enable_book_memory": False,
-            "vlm_model": None,
-            "vlm_base_url": None,
         },
     )
     write_artifact_manifest_atomic(work, manifest)
@@ -218,12 +204,12 @@ class TestReuseActiveArtifact:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """When the active artifact matches desired, neither extractor nor require_vlm is called."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        desired_id = _build_desired_id(work, skip_vlm=True)
-        _create_valid_active_artifact(work, desired_id, mode="skip_vlm")
+        desired_id = _build_desired_id(work)
+        _create_valid_active_artifact(work, desired_id, mode="docling")
 
         extract_calls: list[str] = []
 
@@ -258,12 +244,12 @@ class TestReuseActiveArtifact:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        desired_id = _build_desired_id(work, skip_vlm=True)
-        _create_valid_active_artifact(work, desired_id, mode="skip_vlm")
+        desired_id = _build_desired_id(work)
+        _create_valid_active_artifact(work, desired_id, mode="docling")
 
         from epubforge.pipeline import run_extract
 
@@ -278,12 +264,12 @@ class TestReuseActiveArtifact:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """force=True should bypass reuse even if the active artifact matches."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        desired_id = _build_desired_id(work, skip_vlm=True)
-        _create_valid_active_artifact(work, desired_id, mode="skip_vlm")
+        desired_id = _build_desired_id(work)
+        _create_valid_active_artifact(work, desired_id, mode="docling")
 
         extract_calls: list[str] = []
 
@@ -333,14 +319,14 @@ class TestReuseActiveArtifact:
 
 
 class TestSkipVlmNoProviderRequired:
-    def test_skip_vlm_extraction_does_not_call_require_vlm(
+    def test_docling_extraction_does_not_call_require_vlm(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """skip_vlm=True must not invoke require_llm or require_vlm."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        """Docling extraction must not invoke require_llm or require_vlm."""
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -394,13 +380,13 @@ class TestSkipVlmNoProviderRequired:
         assert provider_calls == [], f"Unexpected provider calls: {provider_calls}"
         assert "provider_required=False" in caplog.text
 
-    def test_skip_vlm_logs_correct_mode_message(
+    def test_docling_logs_correct_mode_message(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -571,13 +557,13 @@ class TestFailedExtractionPreservesOldPointer:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If the extractor raises, the old active_manifest.json must not be replaced."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
         # Set up old active artifact with a different (wrong) desired_id
         old_artifact_id = "aaaa0000aaaa0000"
-        _create_valid_active_artifact(work, old_artifact_id, mode="skip_vlm")
+        _create_valid_active_artifact(work, old_artifact_id, mode="docling")
 
         # Verify old pointer is active
         pointer, _ = load_active_stage3_manifest(work)
@@ -614,11 +600,11 @@ class TestFailedExtractionPreservesOldPointer:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """manifest.json for new artifact must NOT exist if extraction failed."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        desired_id = _build_desired_id(work, skip_vlm=True)
+        desired_id = _build_desired_id(work)
 
         def exploding_extract_skip_vlm(
             raw_path: Path,
@@ -656,7 +642,7 @@ class TestReuseOnlyMismatch:
         tmp_path: Path,
     ) -> None:
         """reuse_only=True with no active artifact must raise RuntimeError."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -671,15 +657,15 @@ class TestReuseOnlyMismatch:
     ) -> None:
         """reuse_only=True when active artifact is for a different mode must fail."""
         # Set up active artifact with an arbitrary id (won't match VLM desired)
-        cfg_skip = _make_cfg(tmp_path, skip_vlm=True)
+        cfg_skip = _make_cfg(tmp_path)
         work = cfg_skip.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
         old_artifact_id = "aaaa1111aaaa1111"
-        _create_valid_active_artifact(work, old_artifact_id, mode="skip_vlm")
+        _create_valid_active_artifact(work, old_artifact_id, mode="docling")
 
         # Now ask for VLM (no api_key set, but reuse_only should fail before that)
-        cfg_vlm = _make_cfg(tmp_path, skip_vlm=False)
+        cfg_vlm = _make_cfg(tmp_path)
 
         from epubforge.pipeline import run_extract
 
@@ -691,7 +677,7 @@ class TestReuseOnlyMismatch:
         tmp_path: Path,
     ) -> None:
         """The error message must include guidance for the user."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -710,12 +696,12 @@ class TestReuseOnlyMismatch:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """reuse_only=True with a matching active artifact must succeed silently."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
-        desired_id = _build_desired_id(work, skip_vlm=True)
-        _create_valid_active_artifact(work, desired_id, mode="skip_vlm")
+        desired_id = _build_desired_id(work)
+        _create_valid_active_artifact(work, desired_id, mode="docling")
 
         def fail_if_called(*args: Any, **kwargs: Any) -> None:
             raise AssertionError("Extractor should NOT be called in reuse_only mode")
@@ -736,12 +722,12 @@ class TestReuseOnlyMismatch:
 
 
 class TestManifestActivationAfterExtraction:
-    def test_active_manifest_written_after_skip_vlm_extraction(
+    def test_active_manifest_written_after_docling_extraction(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -795,7 +781,7 @@ class TestManifestActivationAfterExtraction:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -851,7 +837,7 @@ class TestRunAllReuseOnly:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """run_all(from_stage=4) must call run_extract with reuse_only=True."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         pdf = tmp_path / "book.pdf"
         pdf.write_bytes(b"%PDF-1.7\n")
 
@@ -894,7 +880,7 @@ class TestRunAllReuseOnly:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """run_all(from_stage=3) must NOT use reuse_only."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         pdf = tmp_path / "book.pdf"
         pdf.write_bytes(b"%PDF-1.7\n")
 
@@ -935,7 +921,7 @@ class TestPagesFilter:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Passing pages={1} vs pages=None produces different artifact_ids."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
@@ -994,7 +980,7 @@ class TestPagesFilter:
     ) -> None:
         """When --pages filter is applied, manifest.selected_pages, toc_pages,
         and complex_pages must only contain pages within the filter set."""
-        cfg = _make_cfg(tmp_path, skip_vlm=True)
+        cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         # Set up pages data with pages 1 (simple), 2 (complex), 3 (toc)
         _setup_work_dir(work)

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
-
 import pytest
 
 from epubforge.stage3_artifacts import (
@@ -31,29 +29,13 @@ from epubforge.stage3_artifacts import (
 # ---------------------------------------------------------------------------
 
 
-_BASE_SETTINGS_VLM: dict = {
-    "skip_vlm": False,
+_BASE_SETTINGS_DOCLING: dict = {
     "contract_version": 3,
-    "vlm_dpi": 150,
-    "max_vlm_batch_pages": 4,
-    "enable_book_memory": True,
-    "vlm_model": "gpt-4o",
-    "vlm_base_url": None,
-}
-
-_BASE_SETTINGS_SKIP: dict = {
-    "skip_vlm": True,
-    "contract_version": 3,
-    "vlm_dpi": None,
-    "max_vlm_batch_pages": None,
     "enable_book_memory": False,
-    "vlm_model": None,
-    "vlm_base_url": None,
 }
 
 
 def _make_artifact_id(
-    mode: Literal["vlm", "skip_vlm"] = "skip_vlm",
     source_pdf_sha256="aabbcc",
     raw_sha256="ddeeff",
     pages_sha256="112233",
@@ -64,7 +46,7 @@ def _make_artifact_id(
     settings=None,
 ) -> str:
     return build_desired_stage3_manifest(
-        mode=mode,
+        mode="docling",
         source_pdf_rel="source/source.pdf",
         source_pdf_sha256=source_pdf_sha256,
         raw_sha256=raw_sha256,
@@ -73,14 +55,13 @@ def _make_artifact_id(
         toc_pages=toc_pages or [],
         complex_pages=complex_pages or [],
         page_filter=page_filter,
-        settings=settings or _BASE_SETTINGS_SKIP,
+        settings=settings or _BASE_SETTINGS_DOCLING,
     )
 
 
 def _make_manifest(
     tmp_path: Path,
     artifact_id: str = "abcd1234abcd1234",
-    mode: Literal["vlm", "skip_vlm"] = "skip_vlm",
     unit_files: list[str] | None = None,
     sidecars: dict | None = None,
 ) -> Stage3Manifest:
@@ -94,7 +75,7 @@ def _make_manifest(
             "evidence_index": f"{art_dir}/evidence_index.json",
         }
     return Stage3Manifest(
-        mode=mode,
+        mode="docling",
         artifact_id=artifact_id,
         artifact_dir=art_dir,
         created_at="2026-04-24T00:00:00Z",
@@ -108,7 +89,7 @@ def _make_manifest(
         page_filter=None,
         unit_files=unit_files,
         sidecars=sidecars,
-        settings=_BASE_SETTINGS_SKIP,
+        settings=_BASE_SETTINGS_DOCLING,
     )
 
 
@@ -142,10 +123,10 @@ class TestBuildDesiredArtifactId:
         assert len(aid) == 16
         assert all(c in "0123456789abcdef" for c in aid)
 
-    def test_different_modes_produce_different_ids(self) -> None:
-        vlm_id = _make_artifact_id(mode="vlm", settings=_BASE_SETTINGS_VLM)
-        skip_id = _make_artifact_id(mode="skip_vlm", settings=_BASE_SETTINGS_SKIP)
-        assert vlm_id != skip_id
+    def test_different_settings_produce_different_ids_contract_version(self) -> None:
+        id_a = _make_artifact_id(settings={"contract_version": 3, "enable_book_memory": False})
+        id_b = _make_artifact_id(settings={"contract_version": 4, "enable_book_memory": False})
+        assert id_a != id_b
 
     def test_different_page_filter_produce_different_ids(self) -> None:
         no_filter = _make_artifact_id(page_filter=None)
@@ -194,39 +175,17 @@ class TestBuildDesiredArtifactId:
         assert id1 != id2
 
     def test_different_settings_produce_different_ids(self) -> None:
-        settings_a = dict(_BASE_SETTINGS_SKIP)
-        settings_b = dict(_BASE_SETTINGS_SKIP, contract_version=99)
+        settings_a = dict(_BASE_SETTINGS_DOCLING)
+        settings_b = dict(_BASE_SETTINGS_DOCLING, contract_version=99)
         id1 = _make_artifact_id(settings=settings_a)
         id2 = _make_artifact_id(settings=settings_b)
         assert id1 != id2
 
-    def test_vlm_model_change_produces_different_id(self) -> None:
-        s1 = dict(_BASE_SETTINGS_VLM, vlm_model="gpt-4o")
-        s2 = dict(_BASE_SETTINGS_VLM, vlm_model="gemini-pro")
-        id1 = build_desired_stage3_manifest(
-            mode="vlm",
-            source_pdf_rel="source/source.pdf",
-            source_pdf_sha256="aa",
-            raw_sha256="bb",
-            pages_sha256="cc",
-            selected_pages=[1],
-            toc_pages=[],
-            complex_pages=[],
-            page_filter=None,
-            settings=s1,
-        )
-        id2 = build_desired_stage3_manifest(
-            mode="vlm",
-            source_pdf_rel="source/source.pdf",
-            source_pdf_sha256="aa",
-            raw_sha256="bb",
-            pages_sha256="cc",
-            selected_pages=[1],
-            toc_pages=[],
-            complex_pages=[],
-            page_filter=None,
-            settings=s2,
-        )
+    def test_enable_book_memory_change_produces_different_id(self) -> None:
+        s1 = dict(_BASE_SETTINGS_DOCLING, enable_book_memory=True)
+        s2 = dict(_BASE_SETTINGS_DOCLING, enable_book_memory=False)
+        id1 = _make_artifact_id(settings=s1)
+        id2 = _make_artifact_id(settings=s2)
         assert id1 != id2
 
 
@@ -266,7 +225,7 @@ class TestManifestRoundtrip:
         pointer, loaded = load_active_stage3_manifest(tmp_path)
         assert pointer.active_artifact_id == manifest.artifact_id
         assert loaded.artifact_id == manifest.artifact_id
-        assert loaded.mode == "skip_vlm"
+        assert loaded.mode == "docling"
         assert loaded.selected_pages == [1, 2, 3]
 
     def test_load_verifies_sha_matches(self, tmp_path: Path) -> None:
@@ -519,7 +478,7 @@ class TestModelConstruction:
     def test_evidence_index_defaults(self) -> None:
         ei = EvidenceIndex(
             artifact_id="abc",
-            mode="skip_vlm",
+            mode="docling",
             source_pdf="source/source.pdf",
         )
         assert ei.schema_version == 3
@@ -528,7 +487,7 @@ class TestModelConstruction:
 
     def test_stage3_extraction_result(self, tmp_path: Path) -> None:
         result = Stage3ExtractionResult(
-            mode="skip_vlm",
+            mode="docling",
             unit_files=[tmp_path / "unit_0000.json"],
             audit_notes_path=tmp_path / "audit_notes.json",
             book_memory_path=tmp_path / "book_memory.json",
@@ -538,14 +497,14 @@ class TestModelConstruction:
             complex_pages=[2],
         )
         assert result.warnings == []
-        assert result.mode == "skip_vlm"
+        assert result.mode == "docling"
 
     def test_stage3_manifest_roundtrip(self, tmp_path: Path) -> None:
         manifest = _make_manifest(tmp_path)
         serialised = manifest.model_dump_json()
         loaded = Stage3Manifest.model_validate_json(serialised)
         assert loaded.artifact_id == manifest.artifact_id
-        assert loaded.settings["skip_vlm"] is True
+        assert loaded.settings["contract_version"] == 3
 
     def test_stage3_active_pointer_schema_version(self) -> None:
         p = Stage3ActivePointer(

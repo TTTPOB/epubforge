@@ -183,7 +183,7 @@ class Chapter(BaseModel):
 
 
 class ExtractionMetadata(BaseModel):
-    stage3_mode: Literal["vlm", "skip_vlm", "docling", "unknown"] = "unknown"
+    stage3_mode: Literal["docling", "unknown"] = "unknown"
     stage3_manifest_path: str | None = None
     stage3_manifest_sha256: str | None = None
     artifact_id: str | None = None

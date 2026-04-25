@@ -153,12 +153,6 @@ def run(
     pages: str | None = typer.Option(
         None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
     ),
-    skip_vlm: bool | None = typer.Option(
-        None,
-        "--skip-vlm/--no-skip-vlm",
-        help="[DEPRECATED] Ignored — pipeline always uses Docling-derived extraction. "
-        "VLM is available as an editor tool (epubforge editor vlm-page/vlm-range).",
-    ),
 ) -> None:
     """Run the ingestion pipeline (parse → classify → extract → assemble)."""
     cfg = _get_config(ctx)
@@ -214,12 +208,6 @@ def extract(
     force: bool = typer.Option(False, "--force-rerun", "-f"),
     pages: str | None = typer.Option(
         None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
-    ),
-    skip_vlm: bool | None = typer.Option(
-        None,
-        "--skip-vlm/--no-skip-vlm",
-        help="[DEPRECATED] Ignored — pipeline always uses Docling-derived extraction. "
-        "VLM is available as an editor tool (epubforge editor vlm-page/vlm-range).",
     ),
 ) -> None:
     """Stage 3 — Docling extraction → work/<name>/03_extract/."""

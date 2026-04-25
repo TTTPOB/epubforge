@@ -33,9 +33,6 @@ compact_threshold           = 50     # compact after N audit events
 max_loops                   = 50     # max agent loop iterations
 
 [extract]
-vlm_dpi              = 200   # DPI for page rendering sent to VLM
-skip_vlm             = false # skip Stage 3 VLM; use Docling-derived evidence draft
-max_vlm_batch_pages  = 4     # max pages per mechanical VLM batch
 enable_book_memory   = true  # maintain rolling BookMemory across extraction units
 
 [extract.ocr]

@@ -59,8 +59,7 @@ def _make_stage3_meta(
     selected_pages: list[int],
 ) -> Stage3EditorMeta:
     return Stage3EditorMeta(
-        mode="vlm",
-        skipped_vlm=False,
+        mode="docling",
         manifest_path="stage3_manifest.json",
         manifest_sha256="a" * 64,
         artifact_id="art-001",

@@ -61,9 +61,6 @@ class OcrSettings(BaseModel):
 class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    vlm_dpi: int = 200
-    skip_vlm: bool = False  # DEPRECATED: pipeline always uses docling mode. Kept for config file compatibility.
-    max_vlm_batch_pages: int = 4
     enable_book_memory: bool = True
     ocr: OcrSettings = Field(default_factory=OcrSettings)
 
@@ -168,9 +165,6 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_RUNTIME_LOG_LEVEL", "runtime", "log_level", str),
     ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
-    ("EPUBFORGE_EXTRACT_VLM_DPI", "extract", "vlm_dpi", int),
-    ("EPUBFORGE_EXTRACT_SKIP_VLM", "extract", "skip_vlm", _bool_env),
-    ("EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES", "extract", "max_vlm_batch_pages", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
     ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
 ]

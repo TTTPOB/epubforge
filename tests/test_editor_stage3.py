@@ -45,7 +45,7 @@ def _minimal_book(
     *,
     artifact_id: str | None = None,
     manifest_sha256: str | None = None,
-    mode: str = "skip_vlm",
+    mode: str = "docling",
     pages: list[int] | None = None,
 ) -> Book:
     """Create a minimal book with optional extraction metadata."""
@@ -70,13 +70,8 @@ def _minimal_book(
 
 
 _BASE_SETTINGS: dict = {
-    "skip_vlm": True,
     "contract_version": 3,
-    "vlm_dpi": None,
-    "max_vlm_batch_pages": None,
     "enable_book_memory": False,
-    "vlm_model": None,
-    "vlm_base_url": None,
 }
 
 
@@ -84,7 +79,7 @@ def _make_manifest(
     tmp_path: Path,
     *,
     artifact_id: str = "aaaa1111bbbb2222",
-    mode: str = "skip_vlm",
+    mode: str = "docling",
     selected_pages: list[int] | None = None,
     complex_pages: list[int] | None = None,
 ) -> Stage3Manifest:
@@ -146,10 +141,9 @@ def _invoke(args: list[str]) -> Result:
 
 
 class TestStage3EditorMetaValidation:
-    def test_valid_model_skip_vlm(self) -> None:
+    def test_valid_model_docling(self) -> None:
         m = Stage3EditorMeta(
-            mode="skip_vlm",
-            skipped_vlm=True,
+            mode="docling",
             manifest_path="/work/03_extract/artifacts/abc/manifest.json",
             manifest_sha256="abcdef1234",
             artifact_id="abc",
@@ -159,29 +153,11 @@ class TestStage3EditorMetaValidation:
             evidence_index_path="/work/03_extract/artifacts/abc/evidence_index.json",
             extraction_warnings_path="/work/03_extract/artifacts/abc/warnings.json",
         )
-        assert m.mode == "skip_vlm"
-        assert m.skipped_vlm is True
-
-    def test_valid_model_vlm(self) -> None:
-        m = Stage3EditorMeta(
-            mode="vlm",
-            skipped_vlm=False,
-            manifest_path="/work/manifest.json",
-            manifest_sha256="sha",
-            artifact_id="xyz",
-            selected_pages=[1],
-            complex_pages=[],
-            source_pdf="source/source.pdf",
-            evidence_index_path="",
-            extraction_warnings_path="",
-        )
-        assert m.mode == "vlm"
-        assert m.skipped_vlm is False
+        assert m.mode == "docling"
 
     def test_unknown_mode(self) -> None:
         m = Stage3EditorMeta(
             mode="unknown",
-            skipped_vlm=False,
             manifest_path="",
             manifest_sha256="",
             artifact_id="",
@@ -195,8 +171,7 @@ class TestStage3EditorMetaValidation:
 
     def test_editor_meta_with_stage3(self) -> None:
         s3 = Stage3EditorMeta(
-            mode="skip_vlm",
-            skipped_vlm=True,
+            mode="docling",
             manifest_path="",
             manifest_sha256="",
             artifact_id="abc",
@@ -218,8 +193,7 @@ class TestStage3EditorMetaValidation:
 
     def test_roundtrip_json(self) -> None:
         s3 = Stage3EditorMeta(
-            mode="skip_vlm",
-            skipped_vlm=True,
+            mode="docling",
             manifest_path="/tmp/manifest.json",
             manifest_sha256="abcd",
             artifact_id="efgh",
@@ -269,8 +243,7 @@ class TestEditorInitStage3:
         payload = json.loads(result.output)
         assert "stage3" in payload
         assert payload["stage3"]["artifact_id"] == manifest.artifact_id
-        assert payload["stage3"]["mode"] == "skip_vlm"
-        assert payload["stage3"]["skipped_vlm"] is True
+        assert payload["stage3"]["mode"] == "docling"
         assert payload["stage3"]["selected_pages"] == [1, 2]
 
         paths = resolve_editor_paths(work_dir)
@@ -541,7 +514,7 @@ class TestVLMPage:
         evidence_index = {
             "schema_version": 3,
             "artifact_id": manifest.artifact_id,
-            "mode": "skip_vlm",
+            "mode": "docling",
             "source_pdf": "source/source.pdf",
             "pages": {
                 "1": {"items": [{"ref": "p1e1", "kind": "paragraph", "text": "hello"}]},
@@ -740,8 +713,8 @@ class TestRenderPromptExtractionContext:
         assert "vlm-range" in prompt
         assert "--chapter" in prompt
         assert "VLMObservation" in prompt or "observation_id" in prompt
-        assert "skipped_vlm:" not in prompt
-        assert "skipped_vlm " not in prompt
+        # skipped_vlm field no longer exists
+        assert "skipped_vlm" not in prompt
 
     def test_render_prompt_contains_candidate_role_guidance(
         self, tmp_path: Path

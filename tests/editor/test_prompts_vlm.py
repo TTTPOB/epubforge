@@ -29,13 +29,12 @@ def _make_chapter(pages: list[int] | None = None) -> Chapter:
 
 def _make_stage3(
     *,
-    mode: str = "skip_vlm",
+    mode: str = "docling",
     selected_pages: list[int] | None = None,
     complex_pages: list[int] | None = None,
 ) -> Stage3EditorMeta:
     return Stage3EditorMeta(
         mode=mode,  # type: ignore[arg-type]
-        skipped_vlm=(mode == "skip_vlm"),
         manifest_path="/work/03_extract/artifacts/abc/manifest.json",
         manifest_sha256="abcdef1234567890",
         artifact_id="abc",
@@ -75,16 +74,12 @@ class TestExtractionContextVLMTools:
         result = _extraction_context_block(stage3, chapter, tmp_path)
         assert "VLMObservation" in result or "observation_id" in result
 
-    def test_skipped_vlm_not_in_output(self, tmp_path: Path) -> None:
-        """Deprecated skipped_vlm field must not appear as a key in the prompt output."""
+    def test_deprecated_field_not_in_output(self, tmp_path: Path) -> None:
+        """Removed skipped_vlm field must not appear in the prompt output."""
         chapter = _make_chapter(pages=[1, 2])
         stage3 = _make_stage3()
         result = _extraction_context_block(stage3, chapter, tmp_path)
-        # Check that "skipped_vlm" does not appear as a field key (e.g. "skipped_vlm:").
-        # We cannot do a bare substring check because the tmp_path name may contain the
-        # test function name which itself includes "skipped_vlm".
-        assert "skipped_vlm:" not in result
-        assert "skipped_vlm " not in result
+        assert "skipped_vlm" not in result
 
     def test_vlm_range_uses_chapter_page_bounds(self, tmp_path: Path) -> None:
         """vlm-range command must use the chapter's first and last pages."""
@@ -102,16 +97,14 @@ class TestExtractionContextVLMTools:
         assert "--start-page 5" in result
         assert "--end-page 5" in result
 
-    def test_mode_appears_without_skipped_vlm(self, tmp_path: Path) -> None:
-        """Mode field must appear but without the deprecated skipped_vlm suffix."""
+    def test_mode_appears_in_output(self, tmp_path: Path) -> None:
+        """Mode field must appear in the output."""
         chapter = _make_chapter()
-        stage3 = _make_stage3(mode="skip_vlm")
+        stage3 = _make_stage3(mode="docling")
         result = _extraction_context_block(stage3, chapter, tmp_path)
         # mode value should appear
         assert "mode:" in result
-        # deprecated field key must be absent (bare substr check excluded due to tmp_path name)
-        assert "skipped_vlm:" not in result
-        assert "skipped_vlm " not in result
+        assert "docling" in result
 
 
 def test_prompts_mention_doctor_tasks():

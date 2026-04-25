@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-LLM/VLM-assisted PDF → EPUB pipeline for books and academic theses.
-The system has two main subsystems: a **5-stage ingestion pipeline** that converts a PDF
-into a Semantic IR `Book`, and an **editor subsystem** that applies agent-driven operations
+Docling-based PDF → EPUB pipeline for books and academic theses.
+The system has two main subsystems: a **5-stage Docling-based ingestion pipeline** that converts a PDF
+into a Semantic IR `Book`, and an **agent-driven editor subsystem** that applies structured operations
 to a `Book` stored in `edit_state/`.
 
 Each pipeline stage writes to `work/<book_name>/0N_*.json` and is independently
@@ -21,10 +21,9 @@ prompt + image).
 | 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
 | 5 | build | `build` | `edit_state/book.json` or `05_semantic.json` | `out/<name>.epub` |
 
-Stage 3 supports two modes:
-
-- **VLM mode** (default): calls VLM to analyze page images; requires `[vlm]` provider key
-- **skip-VLM mode** (`--skip-vlm`): uses Docling mechanical parse only; no VLM key needed; produces evidence draft with `Provenance.source="docling"` and `docling_*_candidate` roles
+The pipeline uses Docling mechanical parsing exclusively. VLM analysis is available as an
+**editor evidence tool** (`vlm-page` / `vlm-range`) for on-demand page inspection — it is
+not part of the ingestion pipeline.
 
 Stage 3 artifacts are **manifest-addressed**: the `artifact_id` is derived from a SHA-256 of
 `(source_pdf_sha256, mode, selected_pages)`. A new mode or page selection produces a new
@@ -66,9 +65,14 @@ edit_state/
   edit_log.jsonl     # append-only audit log for AgentOutput submissions/staging
   memory.json        # BookMemory (rolling per-book facts)
   meta.json          # init metadata
+  vlm_observation_index.json  # index of VLM observations
   audit/             # doctor report + context JSON
   agent_outputs/     # in-progress AgentOutput JSON plus archives/
   scratch/           # temporary scripts allocated by run-script
+  projections/       # read-only Markdown-ish projection files for agent context
+    index.md
+    chapters/<chapter_uid>.md
+  vlm_observations/  # VLM observation evidence files (one JSON per observation)
 ```
 
 ### AgentOutput / BookPatch workflow
@@ -106,7 +110,15 @@ effective config from `ctx.find_root().obj.config` (injected by the root Typer c
 | `compact` | Compact accepted edit log into an archive record |
 | `render-prompt` | Render a subagent prompt with current memory and patch workflow instructions |
 | `render-page` | Render a page from `source/source.pdf` to JPEG; **no LLM/VLM calls** |
-| `vlm-page` | Re-analyze a selected page via VLM; writes to `edit_state/audit/vlm_pages/`; never mutates `book.json` |
+| `vlm-page` | Re-analyze a selected page via VLM; writes observation to `edit_state/vlm_observations/`; never mutates `book.json` |
+| `vlm-range` | Analyze a range of pages with VLM, creating one observation per page |
+| `diff-books` | Diff two Book JSON files and print a schema-valid BookPatch JSON |
+| `projection export` | Export book IR to Markdown-ish read-only projection files |
+| `workspace create` | Create a new Git worktree for agent use |
+| `workspace list` | List all Git worktrees (optionally filtered to agent/* branches) |
+| `workspace merge` | Merge an agent branch and validate semantically |
+| `workspace remove` | Remove a Git worktree and optionally its branch |
+| `workspace gc` | Garbage-collect orphaned agent worktrees older than max-age-days |
 
 Example usage:
 ```bash
@@ -118,9 +130,37 @@ epubforge --config config.example.toml editor agent-output submit work/mybook <o
 
 # Render page 5 of source PDF (no VLM):
 epubforge --config config.example.toml editor render-page work/mybook --page 5
-# Re-analyze page 5 with VLM (result in audit/vlm_pages/page_0005.json):
+# Re-analyze page 5 with VLM (result in vlm_observations/):
 epubforge --config config.example.toml editor vlm-page work/mybook --page 5
+# Analyze pages 5-10 with VLM:
+epubforge --config config.example.toml editor vlm-range work/mybook --start-page 5 --end-page 10
+
+# Export projections for agent context:
+epubforge --config config.example.toml editor projection export work/mybook
+
+# Workspace management:
+epubforge --config config.example.toml editor workspace create work/mybook --branch agent/fixer-1
+epubforge --config config.example.toml editor workspace merge work/mybook --branch agent/fixer-1
 ```
+
+### Agent Workspace Workflow
+
+Agents work concurrently using Git worktrees for isolation:
+
+1. **Create**: `workspace create --branch agent/<kind>-<id>` creates a new worktree
+   branched from HEAD (or `--base-ref`). Each agent gets its own branch and working
+   directory.
+2. **Work**: The agent reads projections for context, edits `book.json` via
+   `agent-output` commands, and commits changes to its branch.
+3. **Merge**: The supervisor calls `workspace merge --branch agent/<kind>-<id>` to
+   merge the agent branch back. This performs a Git merge and validates the result
+   semantically by diffing the merged Book against the base and verifying the generated
+   patch applies cleanly.
+4. **Cleanup**: `workspace remove` deletes the worktree and branch after merge.
+   `workspace gc` removes stale agent worktrees older than `--max-age-days`.
+
+Projections (`projection export`) provide read-only Markdown-ish views of the Book IR,
+giving agents efficient context without loading the full JSON.
 
 ### Stage 3 context in `edit_state/meta.json`
 
@@ -129,8 +169,7 @@ After `editor init`, `meta.json` includes a `stage3` object:
 ```json
 {
   "stage3": {
-    "mode": "vlm | skip_vlm | unknown",
-    "skipped_vlm": true,
+    "mode": "docling | unknown",
     "artifact_id": "...",
     "manifest_sha256": "...",
     "selected_pages": [1, 2, ...],
@@ -145,13 +184,13 @@ After `editor init`, `meta.json` includes a `stage3` object:
 `mode` can be used by agents to determine whether `docling_*_candidate` roles need
 semantic repair before the book is considered complete.
 
-### skip-VLM evidence draft and candidate repair ops
+### Docling evidence draft and candidate repair ops
 
-When `stage3.skipped_vlm == true`, blocks have `Provenance.source="docling"` and
+When extraction uses Docling mechanical parsing, blocks have `Provenance.source="docling"` and
 `docling_*_candidate` roles. These are mechanical Docling labels — **not semantic decisions**.
 
-skip-VLM does not decide: chapter boundaries, footnote pairing, cross-page continuations,
-caption attribution, list hierarchy, or cross-page table merges.
+The Docling pipeline does not decide: chapter boundaries, footnote pairing, cross-page
+continuations, caption attribution, list hierarchy, or cross-page table merges.
 
 Agent repair primitives for semantic repair:
 
@@ -161,7 +200,7 @@ Agent repair primitives for semantic repair:
 | `BookPatch.set_field` | Mark paragraph cross-page state; repair table title/caption/metadata fields |
 | `PatchCommand` macros | Perform topology changes such as split/merge/relocate safely |
 
-`vlm-page` can be used to gather VLM evidence for specific pages before issuing repair ops.
+`vlm-page` / `vlm-range` can be used to gather VLM evidence for specific pages before issuing repair ops.
 `render-page` can be used to inspect a page visually without consuming VLM tokens.
 
 ## Audit Subsystem
@@ -191,12 +230,40 @@ Core classes are in `src/epubforge/ir/semantic.py` (and `ir/book_memory.py`):
   cross-page continuations); `merge_record: TableMergeRecord | None`
 - `TableMergeRecord` — provenance for merged tables: `segment_html`, `segment_pages`,
   `segment_order`, `column_widths` (recorded at assemble time before uid init)
-- `Provenance` — `{page, bbox, source: "llm"|"vlm"|"docling"|"passthrough"}`; `source="docling"` indicates skip-VLM mechanical parse output
+- `Provenance` — `{page, bbox, source: "llm"|"vlm"|"docling"|"passthrough"}`; `source="docling"` indicates mechanical parse output; `source="vlm"` is set by VLM pipeline (legacy); `source="llm"` is retained for backward compatibility
 - `BookMemory` — rolling per-book facts: `footnote_callouts`, `attribution_templates`,
   `epigraph_chapters`, `punctuation_quirks`, `running_headers`, `chapter_heading_style`,
   `notes` (in `ir/book_memory.py`)
 - `VLMPageOutput` — VLM response per page; `VLMGroupOutput.updated_book_memory` carries
   accumulated `BookMemory` increments from a multi-page VLM batch
+
+### VLM Evidence Models
+
+VLM observations from `vlm-page` / `vlm-range` are defined in `editor/vlm_evidence.py`:
+
+- `VLMFinding` — single structured finding: `finding_type` (one of `missing_block`, `extra_block`,
+  `text_mismatch`, `role_mismatch`, `layout_issue`, `table_error`, `footnote_error`, `figure_issue`,
+  `heading_issue`, `quality_ok`, `other`), `severity` (`info|warning|error`), `block_uids`, `description`,
+  optional `suggested_fix`
+- `VLMObservation` — stored evidence unit with full provenance: `observation_id` (UUID4), `page`,
+  `chapter_uid`, `related_block_uids`, `model`, `image_sha256`, `prompt_sha256`, `findings: list[VLMFinding]`,
+  `created_at`, `dpi`, `source_pdf`
+- `VLMObservationIndex` — index at `edit_state/vlm_observation_index.json` mapping `observation_id` to
+  summary metadata for quick lookup
+
+Observations are referenced by `AgentOutput.evidence_refs` and `BookPatch.evidence_refs`.
+
+### Doctor Tasks
+
+`DoctorTask` (in `editor/doctor.py`) is a machine-schedulable work item derived from a doctor
+hint or audit issue. Supervisors use these to dispatch subagents without interpreting raw hints:
+
+- `task_id` (UUID4), `kind` (`scan|fix|review`), `chapter_uid`, `block_uid`
+- `source_issue_key` / `source_hint_key` — traceability to the originating audit issue or hint
+- `priority` (0=highest, 3=lowest): issues get 0-1, warn hints get 2, info hints get 3
+- `recommended_agent` (`scanner|fixer|reviewer`), `message` (human-readable description)
+
+`DoctorReport.tasks` is populated by `generate_doctor_tasks()` after each doctor run.
 
 ## Config
 
@@ -220,7 +287,7 @@ mirrors the Python model structure exactly.
 | `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
 | `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
 | `EditorSettings` | `[editor]` | Compact threshold, max loops |
-| `ExtractSettings` | `[extract]` | VLM DPI, skip-VLM toggle, VLM batch size, book memory toggle |
+| `ExtractSettings` | `[extract]` | VLM DPI, VLM batch size, book memory toggle |
 
 Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
 
@@ -266,9 +333,6 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 
 **`[extract]` submodel:**
 ```
-EPUBFORGE_EXTRACT_VLM_DPI                   extract.vlm_dpi
-EPUBFORGE_EXTRACT_SKIP_VLM                  extract.skip_vlm  (1/true/yes/on = True)
-EPUBFORGE_EXTRACT_MAX_VLM_BATCH_PAGES       extract.max_vlm_batch_pages
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
 EPUBFORGE_EXTRACT_OCR_ENABLED              extract.ocr.enabled  (1/true/yes/on = True)
 ```
@@ -283,20 +347,6 @@ EPUBFORGE_EDITOR_NOW       Override current timestamp (scratch.py)
 EPUBFORGE_PROJECT_ROOT     Injected into scratch subprocess env
 EPUBFORGE_WORK_DIR         Injected into scratch subprocess env
 EPUBFORGE_EDIT_STATE_DIR   Injected into scratch subprocess env
-```
-
-# Agent Instructions
-
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
-
-## Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
 ```
 
 ## Non-Interactive Shell Commands

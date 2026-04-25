@@ -166,7 +166,6 @@ def _build_stage3_meta(work_dir: Path, book) -> Stage3EditorMeta | None:
 
     return Stage3EditorMeta(
         mode=manifest.mode,
-        skipped_vlm=(manifest.mode != "vlm"),
         manifest_path=str(work_dir / manifest.artifact_dir / "manifest.json"),
         manifest_sha256=pointer.manifest_sha256,
         artifact_id=pointer.active_artifact_id,

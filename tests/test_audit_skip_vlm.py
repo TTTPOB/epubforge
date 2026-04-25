@@ -218,30 +218,30 @@ def test_footnote_non_empty_callout_not_reported_as_empty(prov) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_skip_vlm_complex_page_gets_needs_scan_hint(prov) -> None:
+def test_docling_complex_page_gets_needs_scan_hint(prov) -> None:
     blocks = [_para(prov, "p-1", "text on complex page", 3, role="body")]
     book = _book(
         [_chapter("ch-1", "Chapter One", blocks)],
-        stage3_mode="skip_vlm",
+        stage3_mode="docling",
         complex_pages=[3],
     )
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
 
-    skip_vlm_scan_hints = [
+    docling_scan_hints = [
         h
         for h in report.hints
         if h.kind == "needs_scan"
         and h.chapter_uid == "ch-1"
         and h.suggested_subagent_type == "scanner"
     ]
-    assert len(skip_vlm_scan_hints) >= 1
+    assert len(docling_scan_hints) >= 1
 
 
-def test_non_skip_vlm_complex_page_no_candidate_hints(prov) -> None:
-    # stage3_mode="vlm" should produce no candidate_review or table_merge_pending hints
+def test_non_docling_complex_page_no_candidate_hints(prov) -> None:
+    # stage3_mode="unknown" should produce no candidate_review or table_merge_pending hints
     blocks = [_para(prov, "p-1", "body", 1, role="body")]
-    book = _book([_chapter("ch-1", "Chapter", blocks)], stage3_mode="vlm")
+    book = _book([_chapter("ch-1", "Chapter", blocks)], stage3_mode="unknown")
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
 
@@ -386,13 +386,13 @@ def test_is_single_draft_chapter_helper(prov) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_skip_vlm_continuation_table_no_merge_gets_hint(prov) -> None:
+def test_docling_continuation_table_no_merge_gets_hint(prov) -> None:
     html = "<table><tbody><tr><td>continuation data</td></tr></tbody></table>"
     tbl = _table(prov, "tbl-cont", html, 8, continuation=True, multi_page=False)
     tbl = tbl.model_copy(update={"uid": "tbl-cont"})
     book = _book(
         [_chapter("ch-1", "Chapter One", [tbl])],
-        stage3_mode="skip_vlm",
+        stage3_mode="docling",
     )
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
@@ -403,25 +403,25 @@ def test_skip_vlm_continuation_table_no_merge_gets_hint(prov) -> None:
     assert merge_hints[0].chapter_uid == "ch-1"
 
 
-def test_vlm_mode_continuation_table_no_merge_hint(prov) -> None:
-    """With stage3_mode='vlm', no table_merge_pending hints should be generated."""
+def test_unknown_mode_continuation_table_no_merge_hint(prov) -> None:
+    """With stage3_mode='unknown', no table_merge_pending hints should be generated."""
     html = "<table><tbody><tr><td>data</td></tr></tbody></table>"
     tbl = _table(prov, "tbl-v", html, 4, continuation=True, multi_page=False)
-    book = _book([_chapter("ch-1", "Chapter", [tbl])], stage3_mode="vlm")
+    book = _book([_chapter("ch-1", "Chapter", [tbl])], stage3_mode="unknown")
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
 
     assert not any(h.kind == "table_merge_pending" for h in report.hints)
 
 
-def test_skip_vlm_candidate_blocks_get_candidate_review_hints(prov) -> None:
+def test_docling_candidate_blocks_get_candidate_review_hints(prov) -> None:
     blocks = [
         _para(prov, "p-cand", "heading draft", 1, role="docling_heading_candidate"),
         _para(prov, "p-body", "body text", 1, role="body"),
     ]
     book = _book(
         [_chapter("ch-1", "Draft extraction", blocks)],
-        stage3_mode="skip_vlm",
+        stage3_mode="docling",
     )
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
@@ -436,7 +436,7 @@ def test_skip_vlm_candidate_blocks_get_candidate_review_hints(prov) -> None:
 def test_candidate_review_hints_are_not_errors(prov) -> None:
     """candidate_review hints must have severity='info', not 'warn' or 'error'."""
     blocks = [_para(prov, "p-cand", "title draft", 1, role="docling_title_candidate")]
-    book = _book([_chapter("ch-1", "Chapter", blocks)], stage3_mode="skip_vlm")
+    book = _book([_chapter("ch-1", "Chapter", blocks)], stage3_mode="docling")
     memory = _memory(["ch-1"], scanned={"ch-1"})
     report = build_doctor_report(memory=memory, book=book, previous_memory=memory)
 
