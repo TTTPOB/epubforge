@@ -55,6 +55,8 @@ class EditorPaths:
     current_log_path: Path
     agent_outputs_dir: Path
     agent_outputs_archives_dir: Path
+    vlm_observations_dir: Path        # edit_state / "vlm_observations"
+    vlm_observation_index_path: Path  # edit_state / "vlm_observation_index.json"
 
 
 def resolve_editor_paths(path: str | Path) -> EditorPaths:
@@ -81,6 +83,8 @@ def resolve_editor_paths(path: str | Path) -> EditorPaths:
         agent_outputs_archives_dir=edit_state_dir
         / AGENT_OUTPUTS_DIRNAME
         / AGENT_OUTPUTS_ARCHIVES_DIRNAME,
+        vlm_observations_dir=edit_state_dir / "vlm_observations",
+        vlm_observation_index_path=edit_state_dir / "vlm_observation_index.json",
     )
 
 

@@ -52,6 +52,17 @@ from epubforge.editor.projection import (
     render_chapter_projection,
     render_index,
 )
+from epubforge.editor.vlm_evidence import (
+    VLMFinding,
+    VLMObservation,
+    VLMObservationIndex,
+    VLMObservationIndexEntry,
+    VLMPageAnalysis,
+    load_vlm_observation,
+    load_vlm_observation_index,
+    save_vlm_observation,
+    validate_evidence_refs,
+)
 from epubforge.editor.workspace import (
     GCResult,
     GitError,
@@ -131,4 +142,13 @@ __all__ = [
     "WorktreeCreateResult",
     "WorktreeInfo",
     "WorktreeRemoveResult",
+    "VLMFinding",
+    "VLMObservation",
+    "VLMObservationIndex",
+    "VLMObservationIndexEntry",
+    "VLMPageAnalysis",
+    "load_vlm_observation",
+    "load_vlm_observation_index",
+    "save_vlm_observation",
+    "validate_evidence_refs",
 ]
