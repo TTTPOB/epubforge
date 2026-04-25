@@ -1406,6 +1406,238 @@ def run_agent_output_submit(
     return 0
 
 
+def run_workspace_create(work: Path, branch: str, base_ref: str = "HEAD") -> int:
+    """Create a new Git worktree for agent use."""
+    from epubforge.editor.workspace import GitError, create_worktree, find_repo_root
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+
+    try:
+        repo_root = find_repo_root(work.resolve())
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "not_a_repo"},
+        ) from exc
+
+    work_dir_rel = str(work.resolve().relative_to(repo_root))
+
+    try:
+        _validate_branch_name_for_cli(branch)
+    except ValueError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=2,
+            payload={"error": str(exc), "kind": "invalid_branch"},
+        ) from exc
+
+    try:
+        result = create_worktree(repo_root, branch, base_ref=base_ref)
+    except ValueError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=2,
+            payload={"error": str(exc), "kind": "invalid_branch"},
+        ) from exc
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "git_error"},
+        ) from exc
+
+    work_dir = result.worktree_path / work_dir_rel
+    emit_json({
+        "created": True,
+        "worktree_path": str(result.worktree_path),
+        "branch": result.branch,
+        "work_dir": str(work_dir),
+        "commit": result.commit,
+        "base_ref": base_ref,
+    })
+    return 0
+
+
+def _validate_branch_name_for_cli(branch: str) -> None:
+    """Thin wrapper so we can call _validate_branch_name without importing workspace at module level."""
+    from epubforge.editor.workspace import _validate_branch_name
+
+    _validate_branch_name(branch)
+
+
+def run_workspace_list(work: Path, agent_only: bool = False) -> int:
+    """List Git worktrees, optionally filtered to agent/* branches."""
+    from epubforge.editor.workspace import GitError, find_repo_root, list_worktrees
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+
+    try:
+        repo_root = find_repo_root(work.resolve())
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "not_a_repo"},
+        ) from exc
+
+    try:
+        worktrees = list_worktrees(repo_root, agent_only=agent_only)
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "git_error"},
+        ) from exc
+
+    items = [
+        {
+            "path": str(wt.path),
+            "branch": wt.branch,
+            "commit": wt.commit,
+            "is_main": wt.is_main,
+            "is_bare": wt.is_bare,
+            "prunable": wt.prunable,
+        }
+        for wt in worktrees
+    ]
+    emit_json({"worktrees": items, "count": len(items)})
+    return 0
+
+
+def run_workspace_merge(work: Path, branch: str, timeout: int = 60) -> int:
+    """Merge an agent branch and validate the result semantically."""
+    from epubforge.editor.workspace import GitError, find_repo_root, merge_and_validate
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+
+    try:
+        repo_root = find_repo_root(work.resolve())
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "not_a_repo"},
+        ) from exc
+
+    work_dir_rel = str(work.resolve().relative_to(repo_root))
+
+    try:
+        result = merge_and_validate(repo_root, work_dir_rel, branch, timeout=timeout)
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "git_error"},
+        ) from exc
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome.status,
+        "message": result.outcome.message,
+        "branch": result.branch,
+        "merge_commit": result.merge_commit,
+        "pre_merge_sha": result.pre_merge_sha,
+        "base_sha256": result.base_sha256,
+        "merged_sha256": result.merged_sha256,
+        "change_count": result.change_count,
+        "patch": result.patch_json,
+        "conflict_files": result.conflict_files,
+    }
+
+    status = result.outcome.status
+    if status == "accepted":
+        emit_json(payload)
+        return 0
+    elif status == "git_conflict":
+        emit_json(payload)
+        return 1
+    else:
+        # semantic_conflict or parse_error
+        emit_json(payload)
+        return 2
+
+
+def run_workspace_remove(work: Path, branch: str, force: bool = False) -> int:
+    """Remove a Git worktree and optionally its branch."""
+    from epubforge.editor.workspace import GitError, find_repo_root, remove_worktree
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+
+    try:
+        repo_root = find_repo_root(work.resolve())
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "not_a_repo"},
+        ) from exc
+
+    try:
+        result = remove_worktree(repo_root, branch, force=force)
+    except GitError as exc:
+        exit_code = 2 if "main worktree" in str(exc) else 1
+        raise CommandError(
+            str(exc),
+            exit_code=exit_code,
+            payload={"error": str(exc), "kind": "git_error"},
+        ) from exc
+
+    emit_json({
+        "removed": True,
+        "worktree_path": str(result.worktree_path),
+        "branch": result.branch,
+        "branch_deleted": result.branch_deleted,
+        "force_used": result.force_used,
+    })
+    return 0
+
+
+def run_workspace_gc(work: Path, max_age_days: int = 7, dry_run: bool = False) -> int:
+    """Garbage-collect orphaned agent worktrees older than max_age_days."""
+    from epubforge.editor.workspace import GitError, find_repo_root, gc_worktrees
+
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+
+    try:
+        repo_root = find_repo_root(work.resolve())
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "not_a_repo"},
+        ) from exc
+
+    try:
+        result = gc_worktrees(repo_root, max_age_days=max_age_days, dry_run=dry_run)
+    except GitError as exc:
+        raise CommandError(
+            str(exc),
+            exit_code=1,
+            payload={"error": str(exc), "kind": "git_error"},
+        ) from exc
+
+    emit_json({
+        "removed": [
+            {
+                "worktree_path": str(r.worktree_path),
+                "branch": r.branch,
+                "branch_deleted": r.branch_deleted,
+                "force_used": r.force_used,
+            }
+            for r in result.removed
+        ],
+        "skipped": result.skipped,
+        "pruned": result.pruned,
+        "dry_run": dry_run,
+    })
+    return 0
+
+
 __all__ = [
     "run_agent_output_add_command",
     "run_agent_output_add_memory_patch",
@@ -1423,4 +1655,9 @@ __all__ = [
     "run_render_prompt",
     "run_run_script",
     "run_vlm_page",
+    "run_workspace_create",
+    "run_workspace_gc",
+    "run_workspace_list",
+    "run_workspace_merge",
+    "run_workspace_remove",
 ]
