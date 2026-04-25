@@ -200,6 +200,14 @@ def _vlm_page_cmd(
             help="Output JSON path (default: edit_state/audit/vlm_pages/page_NNNN.json)",
         ),
     ] = None,
+    chapter: Annotated[
+        Optional[str],
+        typer.Option("--chapter", help="Chapter UID scope (analyze only blocks from this chapter)"),
+    ] = None,
+    blocks: Annotated[
+        Optional[str],
+        typer.Option("--blocks", help="Comma-separated block UIDs to analyze"),
+    ] = None,
 ) -> None:
     """Render a page, load evidence, call VLM, write result — never mutates book.json."""
     from epubforge.editor.tool_surface import run_vlm_page
@@ -209,8 +217,18 @@ def _vlm_page_cmd(
         raise typer.Exit(2)
     app_ctx = ctx.find_root().obj
     cfg = app_ctx.config
+    blocks_list = blocks.split(",") if blocks else None
     raise typer.Exit(
-        _run(run_vlm_page, work=work, page=page, dpi=dpi, out=out, cfg=cfg)
+        _run(
+            run_vlm_page,
+            work=work,
+            page=page,
+            dpi=dpi,
+            out=out,
+            cfg=cfg,
+            chapter=chapter,
+            blocks=blocks_list,
+        )
     )
 
 

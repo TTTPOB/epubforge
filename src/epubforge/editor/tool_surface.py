@@ -703,36 +703,86 @@ def run_render_page(
     return 0
 
 
-def run_vlm_page(
-    work: Path,
+def _run_vlm_page_core(
+    *,
+    paths,
     page: int,
     dpi: int,
-    out: Path | None,
     cfg: Config,
-) -> int:
-    """Render a page, load its evidence, call VLM, and write result — never mutates book.json."""
+    chapter: str | None = None,
+    blocks: list[str] | None = None,
+) -> "tuple[VLMObservation, str | None]":
+    """Core VLM page analysis logic — returns (VLMObservation, evidence_warning).
+
+    Importable by vlm-range (phase 8C) which calls this in a loop.
+    Never mutates book.json or produces CLI output.
+    """
     import base64
+    import tempfile
 
-    paths = resolve_editor_paths(work)
-    ensure_work_dir(paths)
-    ensure_initialized(paths)
+    from epubforge.editor.vlm_evidence import (
+        VLMObservation,
+        VLMPageAnalysis,
+        _compute_sha256_bytes,
+        _compute_sha256_str,
+        _generate_observation_id,
+        save_vlm_observation,
+    )
 
+    # Step 1: Load meta and validate page
     meta = load_editor_meta(paths)
     if meta.stage3 is None:
         raise CommandError(
             "edit_state/meta.json has no stage3 section. "
             "Re-initialize with `epubforge editor init` after running Stage 3."
         )
-
     stage3 = meta.stage3
 
-    # Validate page is in selected_pages
     if page not in stage3.selected_pages:
         raise CommandError(
             f"page {page} is not in selected pages {stage3.selected_pages}. "
             "Only selected pages have evidence and are eligible for VLM re-analysis."
         )
 
+    # Step 2: Load Book IR and scope validation
+    book = load_editable_book(paths)
+
+    if chapter is not None:
+        # Validate chapter exists
+        matching_chapters = [ch for ch in book.chapters if ch.uid == chapter]
+        if not matching_chapters:
+            raise CommandError(f"chapter not found: {chapter}")
+        # Scope to blocks from that chapter on this page
+        scope_blocks = [
+            b
+            for ch in matching_chapters
+            for b in ch.blocks
+            if b.provenance.page == page
+        ]
+    elif blocks is not None:
+        # Validate each block_uid exists in the book
+        all_blocks_by_uid = {
+            b.uid: b
+            for ch in book.chapters
+            for b in ch.blocks
+            if b.uid is not None
+        }
+        missing = [uid for uid in blocks if uid not in all_blocks_by_uid]
+        if missing:
+            raise CommandError(f"block UIDs not found in book: {missing}")
+        scope_blocks = [all_blocks_by_uid[uid] for uid in blocks]
+    else:
+        # Default: all blocks on this page
+        scope_blocks = [
+            b
+            for ch in book.chapters
+            for b in ch.blocks
+            if b.provenance.page == page
+        ]
+
+    scope_block_uids: set[str] = {b.uid for b in scope_blocks if b.uid is not None}
+
+    # Step 3: Render PDF page
     source_pdf = paths.work_dir / stage3.source_pdf
     if not source_pdf.exists():
         raise CommandError(
@@ -740,115 +790,193 @@ def run_vlm_page(
             "Rerun parse with --force-rerun to restore source/source.pdf."
         )
 
-    # Render page to a temp image
-    import tempfile
-
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_f:
         tmp_img_path = Path(tmp_f.name)
 
     try:
         _render_pdf_page_image(source_pdf, page, dpi, tmp_img_path)
-
-        # Load evidence for this page
-        evidence_items: list[object] = []
-        evidence_warning: str | None = None
-        if stage3.evidence_index_path:
-            ev_path = Path(stage3.evidence_index_path)
-            if ev_path.exists():
-                from epubforge.stage3_artifacts import EvidenceIndex
-
-                ev_index = EvidenceIndex.model_validate_json(
-                    ev_path.read_text(encoding="utf-8")
-                )
-                page_evidence = ev_index.pages.get(str(page), {})
-                evidence_items = (
-                    page_evidence.get("items", [])
-                    if isinstance(page_evidence, dict)
-                    else []
-                )
-            else:
-                evidence_warning = f"evidence_index not found: {ev_path}"
-        else:
-            evidence_warning = "no evidence_index_path in stage3 meta"
-
-        if not evidence_items:
-            evidence_warning = (
-                evidence_warning or ""
-            ) + f" (no evidence items for page {page})"
-
-        # Build VLM messages
         img_bytes = tmp_img_path.read_bytes()
+        image_sha256 = _compute_sha256_bytes(img_bytes)
         img_b64 = base64.b64encode(img_bytes).decode("ascii")
-
-        evidence_text = (
-            json.dumps(evidence_items, ensure_ascii=False, indent=2)
-            if evidence_items
-            else "[]"
-        )
-        system_prompt = (
-            "You are a PDF extraction quality reviewer. "
-            "Analyze the provided page image and the extracted evidence items for accuracy."
-        )
-        user_content: list[object] = [
-            {
-                "type": "text",
-                "text": (
-                    f"Page {page} evidence extracted by Stage 3 ({stage3.mode}):\n\n"
-                    f"{evidence_text}\n\n"
-                    "Review the image and identify any extraction issues, missing elements, "
-                    "or items requiring semantic correction."
-                ),
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
-            },
-        ]
-
-        from epubforge.llm.client import LLMClient
-        from pydantic import BaseModel as _BaseModel
-
-        class _VLMPageResult(_BaseModel):
-            page: int
-            issues: list[str]
-            suggestions: list[str]
-            notes: str = ""
-
-        vlm_client = LLMClient(cfg, use_vlm=True)
-        from typing import cast as _cast
-        from openai.types.chat import ChatCompletionMessageParam as _Msg
-
-        messages = _cast(
-            "list[_Msg]",
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        )
-        vlm_result = vlm_client.chat_parsed(messages, response_format=_VLMPageResult)
-
-        resolved_out = out or (paths.audit_dir / "vlm_pages" / f"page_{page:04d}.json")
-        resolved_out.parent.mkdir(parents=True, exist_ok=True)
-
-        output: dict[str, object] = {
-            "page": page,
-            "dpi": dpi,
-            "source_pdf": str(source_pdf),
-            "vlm_result": vlm_result.model_dump(mode="json"),
-        }
-        if evidence_warning:
-            output["evidence_warning"] = evidence_warning
-
-        resolved_out.write_text(
-            json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        emit_json({"output_path": str(resolved_out), "page": page})
     finally:
         try:
             tmp_img_path.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             pass
 
+    # Step 4: Load evidence
+    evidence_items: list[object] = []
+    evidence_warning: str | None = None
+    if stage3.evidence_index_path:
+        ev_path = Path(stage3.evidence_index_path)
+        if ev_path.exists():
+            from epubforge.stage3_artifacts import EvidenceIndex
+
+            ev_index = EvidenceIndex.model_validate_json(
+                ev_path.read_text(encoding="utf-8")
+            )
+            page_evidence = ev_index.pages.get(str(page), {})
+            evidence_items = (
+                page_evidence.get("items", [])
+                if isinstance(page_evidence, dict)
+                else []
+            )
+        else:
+            evidence_warning = f"evidence_index not found: {ev_path}"
+    else:
+        evidence_warning = "no evidence_index_path in stage3 meta"
+
+    if not evidence_items:
+        evidence_warning = (
+            evidence_warning or ""
+        ) + f" (no evidence items for page {page})"
+
+    # Step 5: Build blocks context
+    blocks_context = [
+        {
+            "uid": b.uid,
+            "kind": b.kind,
+            "text": (b.text[:200] if hasattr(b, "text") else ""),
+            "role": getattr(b, "role", None),
+            "page": b.provenance.page,
+        }
+        for b in scope_blocks
+    ]
+
+    # Step 6: Build VLM prompt and compute hash
+    evidence_text = (
+        json.dumps(evidence_items, ensure_ascii=False, indent=2)
+        if evidence_items
+        else "[]"
+    )
+    system_prompt = (
+        "You are a PDF extraction quality reviewer. "
+        "Analyze the provided page image and the extracted evidence items for accuracy."
+    )
+    user_content: list[object] = [
+        {
+            "type": "text",
+            "text": (
+                f"Page {page} evidence extracted by Stage 3 ({stage3.mode}):\n\n"
+                f"{evidence_text}\n\n"
+                "Blocks in scope (from book IR):\n\n"
+                f"{json.dumps(blocks_context, ensure_ascii=False, indent=2)}\n\n"
+                "Review the image and identify any extraction issues, missing elements, "
+                "or items requiring semantic correction."
+            ),
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+        },
+    ]
+
+    from typing import cast as _cast
+
+    from openai.types.chat import ChatCompletionMessageParam as _Msg
+
+    messages = _cast(
+        "list[_Msg]",
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    prompt_sha256 = _compute_sha256_str(json.dumps(messages, ensure_ascii=False))
+
+    # Step 7: Call VLM
+    from epubforge.llm.client import LLMClient
+
+    vlm_client = LLMClient(cfg, use_vlm=True)
+    vlm_result: VLMPageAnalysis = vlm_client.chat_parsed(
+        messages, response_format=VLMPageAnalysis
+    )
+
+    # Step 8: Build VLMObservation — filter hallucinated block_uids
+    filtered_findings = []
+    for finding in vlm_result.findings:
+        filtered_uids = [
+            uid for uid in finding.block_uids if uid in scope_block_uids
+        ]
+        filtered_findings.append(finding.model_copy(update={"block_uids": filtered_uids}))
+
+    obs = VLMObservation(
+        observation_id=_generate_observation_id(),
+        page=page,
+        chapter_uid=chapter,
+        related_block_uids=sorted(scope_block_uids),
+        model=vlm_client.model,
+        image_sha256=image_sha256,
+        prompt_sha256=prompt_sha256,
+        findings=filtered_findings,
+        raw_text=vlm_result.summary or None,
+        created_at=_timestamp(),
+        dpi=dpi,
+        source_pdf=str(source_pdf.relative_to(paths.work_dir)),
+    )
+
+    # Step 9: Save
+    save_vlm_observation(paths, obs)
+
+    # Step 10: Return
+    return obs, evidence_warning
+
+
+def run_vlm_page(
+    work: Path,
+    page: int,
+    dpi: int,
+    out: Path | None,
+    cfg: Config,
+    *,
+    chapter: str | None = None,
+    blocks: list[str] | None = None,
+) -> int:
+    """Render a page, load its evidence, call VLM, and write result — never mutates book.json."""
+    paths = resolve_editor_paths(work)
+    ensure_work_dir(paths)
+    ensure_initialized(paths)
+
+    obs, evidence_warning = _run_vlm_page_core(
+        paths=paths,
+        page=page,
+        dpi=dpi,
+        cfg=cfg,
+        chapter=chapter,
+        blocks=blocks,
+    )
+
+    # Backward compat: if out provided, also write legacy-format file
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        legacy_output: dict[str, object] = {
+            "page": obs.page,
+            "dpi": obs.dpi,
+            "source_pdf": obs.source_pdf,
+            "observation_id": obs.observation_id,
+            "findings": [f.model_dump(mode="json") for f in obs.findings],
+        }
+        if evidence_warning:
+            legacy_output["evidence_warning"] = evidence_warning
+        out.write_text(
+            json.dumps(legacy_output, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    findings_summary = [
+        {"type": f.finding_type, "severity": f.severity}
+        for f in obs.findings
+    ]
+    json_payload: dict[str, object] = {
+        "observation_id": obs.observation_id,
+        "page": obs.page,
+        "output_path": str(out) if out is not None else None,
+        "findings_count": len(obs.findings),
+        "findings_summary": findings_summary,
+        "model": obs.model,
+    }
+    if evidence_warning:
+        json_payload["evidence_warning"] = evidence_warning
+    emit_json(json_payload)
     return 0
 
 
