@@ -136,6 +136,33 @@ def test_cli_invalid_book_json(tmp_path: Path) -> None:
     assert payload["path"] == str(proposed_path)
 
 
+def test_cli_invalid_book_schema(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    base_path = tmp_path / "base.json"
+    proposed_path = tmp_path / "proposed.json"
+    _write_book(base_path, _book())
+    proposed_path.write_text(json.dumps({"chapters": []}), encoding="utf-8")
+
+    result = _invoke(
+        [
+            "editor",
+            "diff-books",
+            str(work_dir),
+            "--base-file",
+            str(base_path),
+            "--proposed-file",
+            str(proposed_path),
+        ]
+    )
+
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["kind"] == "invalid_book_schema"
+    assert "invalid Book schema" in payload["error"]
+    assert payload["path"] == str(proposed_path)
+
+
 def test_cli_duplicate_uid_reports_diagnostic(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()

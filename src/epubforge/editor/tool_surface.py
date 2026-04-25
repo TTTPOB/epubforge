@@ -412,6 +412,11 @@ def build_diff_books_result(
     ``<work>/edit_state/book.json``. This helper is read-only: it validates and
     applies the generated patch in memory for round-trip verification, but never
     writes to ``edit_state/book.json`` or any other editor state file.
+
+    Phase 7 integration should resolve Git refs/worktrees outside this helper,
+    pass the resulting ``edit_state/book.json`` paths here (or parse them and call
+    ``diff_books`` directly), and keep all Git operations out of the Phase 6
+    semantic diff bridge.
     """
 
     paths = resolve_editor_paths(work)

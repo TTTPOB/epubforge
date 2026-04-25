@@ -1,6 +1,14 @@
-"""Tests for the Phase 6C Book diff field and replacement semantics."""
+"""Tests for the Phase 6 Book diff bridge.
+
+The integration-style readiness test near the end models the Phase 7 boundary:
+Phase 7 owns Git refs/worktree resolution and parses ``edit_state/book.json``
+snapshots into ``Book`` objects; Phase 6 remains a pure semantic bridge via
+``diff_books`` / ``diff-books`` and never shells out to Git.
+"""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +25,7 @@ from epubforge.editor.patches import (
     apply_book_patch,
     validate_book_patch,
 )
+from epubforge.editor.tool_surface import build_diff_books_result
 from epubforge.ir.semantic import (
     Block,
     Book,
@@ -102,6 +111,83 @@ def _assert_round_trip(base: Book, proposed: Book) -> BookPatch:
     result = apply_book_patch(base, patch)
     assert result.model_dump(mode="json") == proposed.model_dump(mode="json")
     return patch
+
+
+def _write_book(path: Path, book: Book) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(book.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _phase7_base_book_snapshot() -> Book:
+    """Return a stable base snapshot like Phase 7 would read from a Git ref."""
+
+    return _book(
+        chapters=[
+            _chapter(
+                uid="ch-front",
+                title="Front Matter",
+                blocks=[
+                    _heading(uid="blk-front-heading", text="Preface", level=1),
+                    _paragraph(uid="blk-preface", text="This preface opens the book."),
+                ],
+            ),
+            _chapter(
+                uid="ch-main",
+                title="Chapter 1",
+                blocks=[
+                    _paragraph(uid="blk-opening", text="The opening paragraph."),
+                    _paragraph(uid="blk-promote", text="A candidate subheading."),
+                    _footnote(uid="blk-note", paired=True, orphan=False),
+                ],
+            ),
+            _chapter(
+                uid="ch-appendix",
+                title="Appendix",
+                blocks=[
+                    _paragraph(uid="blk-appendix-keep", text="An appendix note."),
+                    _paragraph(uid="blk-delete", text="Outdated appendix note."),
+                ],
+            ),
+        ]
+    )
+
+
+def _phase7_proposed_book_snapshot() -> Book:
+    """Return a realistic merged worktree snapshot with combined semantic edits."""
+
+    return _book(
+        chapters=[
+            _chapter(
+                uid="ch-front",
+                title="Front Matter",
+                blocks=[
+                    _heading(uid="blk-front-heading", text="Preface", level=1),
+                ],
+            ),
+            _chapter(
+                uid="ch-interlude",
+                title="Interlude",
+                blocks=[
+                    _paragraph(uid="blk-preface", text="This preface opens the book."),
+                    _paragraph(uid="blk-new", text="A newly merged transition."),
+                ],
+            ),
+            _chapter(
+                uid="ch-main",
+                title="Chapter 1: Revised Opening",
+                blocks=[
+                    _paragraph(uid="blk-opening", text="The opening paragraph, revised."),
+                    _heading(uid="blk-promote", text="A promoted subheading", level=2),
+                    _footnote(uid="blk-note", paired=False, orphan=True),
+                    _paragraph(uid="blk-appendix-keep", text="An appendix note, integrated."),
+                ],
+            ),
+        ]
+    )
+
+
+def _change_kinds(patch: BookPatch) -> set[str]:
+    return {change.op for change in patch.changes}
 
 
 def test_identity_diff_returns_empty_patch_and_applies() -> None:
@@ -626,6 +712,91 @@ def test_combined_topology_field_and_replace_round_trips() -> None:
         and change.field == "text"
         for change in patch.changes
     )
+
+
+def test_phase7_git_merge_snapshot_bridge_round_trips(tmp_path: Path) -> None:
+    """Verify Phase 7 can use file snapshots without Phase 6 touching Git.
+
+    Phase 7 will resolve Git refs/worktrees to ``edit_state/book.json`` files,
+    parse them as ``Book`` snapshots, and call ``diff_books`` or the read-only
+    ``diff-books`` tool surface. This fixture simulates the post-merge proposed
+    snapshot and combines topology, field, and replace semantics in one patch.
+    """
+
+    base = _phase7_base_book_snapshot()
+    proposed = _phase7_proposed_book_snapshot()
+
+    patch = _assert_round_trip(base, proposed)
+
+    assert _change_kinds(patch) >= {
+        "insert_node",
+        "move_node",
+        "delete_node",
+        "replace_node",
+        "set_field",
+    }
+    chapter_inserts = [
+        change
+        for change in patch.changes
+        if isinstance(change, InsertNodeChange) and change.parent_uid is None
+    ]
+    assert [change.node["uid"] for change in chapter_inserts] == ["ch-interlude"]
+    assert chapter_inserts[0].node["blocks"] == []
+    assert any(
+        isinstance(change, MoveNodeChange)
+        and change.target_uid == "blk-preface"
+        and change.to_parent_uid == "ch-interlude"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, MoveNodeChange)
+        and change.target_uid == "blk-appendix-keep"
+        and change.to_parent_uid == "ch-main"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, DeleteNodeChange) and change.target_uid == "blk-delete"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, DeleteNodeChange) and change.target_uid == "ch-appendix"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, ReplaceNodeChange) and change.target_uid == "blk-promote"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, ReplaceNodeChange) and change.target_uid == "blk-note"
+        for change in patch.changes
+    )
+    assert any(
+        isinstance(change, SetFieldChange)
+        and change.target_uid == "blk-opening"
+        and change.field == "text"
+        for change in patch.changes
+    )
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    base_path = tmp_path / "git-base" / "edit_state" / "book.json"
+    proposed_path = tmp_path / "merged-worktree" / "edit_state" / "book.json"
+    _write_book(base_path, base)
+    _write_book(proposed_path, proposed)
+
+    result = build_diff_books_result(
+        work_dir,
+        base_file=base_path,
+        proposed_file=proposed_path,
+    )
+
+    assert result.diff_applies is True
+    assert result.round_trip_verified is True
+    assert result.change_count == len(patch.changes)
+    bridged_patch = BookPatch.model_validate(result.patch)
+    validate_book_patch(base, bridged_patch)
+    bridged_book = apply_book_patch(base, bridged_patch)
+    assert bridged_book.model_dump(mode="json") == proposed.model_dump(mode="json")
 
 
 def test_public_imports_work() -> None:
