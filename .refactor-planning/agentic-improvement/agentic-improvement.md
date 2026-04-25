@@ -882,10 +882,247 @@ Status: **completed**. The old edit operation, apply queue, staging, and lease/l
 
 ### Phase 5: Projection export (read-only)
 
-- Add `projection export` CLI command: chapter-scoped Markdown-ish view with UID/display handles, kind, page, role, text.
-- 只读输出，不需要 parser 或 round-trip。
-- 读取当前 `book.json`，因此 agent 提交 patch 后再次 export 会反映修改。
-- Tests: export 输出包含所有 block UID 和关键元数据。
+#### 5.1 概述
+
+Projection export 提供 Book IR 当前状态的**只读 Markdown-ish 渲染**。它是 agent prompt 上下文的阅读材料，不是可编辑的中间格式。Agent 不直接修改 projection 文件，所有编辑通过 CLI 命令（`agent-output add-command/add-patch`）提交。
+
+设计原则：
+- **只读**：不 parser、不 import、不 round-trip、不 apply。
+- **严格读取当前 `edit_state/book.json`**：不回退到 `05_semantic*.json`。未初始化的 workdir 报错退出。
+- **文件级别输出**：写入 `edit_state/projections/` 目录，不输出到 stdout（Phase 5 暂不实现 `--stdout`）。
+- **增量友好**：agent 提交 patch 后，再次 export 反映已应用的修改。
+
+#### 5.2 命令设计
+
+```
+epubforge editor projection export <work>                      # 全量导出
+epubforge editor projection export <work> --chapter <uid>      # 单个 chapter 导出
+```
+
+**命令树**：Projection 是 editor 子命令组下的一个子命令组。
+
+```
+epubforge editor projection export <work>
+                                ↑
+                              子命令组
+```
+
+**stdout 输出**：Phase 5 中，export 命令在 stdout 仅输出 JSON 摘要：
+```json
+{"exported_at": "2026-04-25T12:00:00", "chapters": 3, "out_dir": "edit_state/projections", "files": ["index.md", "chapters/ch-001-a3f.md", "chapters/ch-002-b7c.md", "chapters/ch-003-d9e.md"]}
+```
+
+实际内容写入文件，不输出到 stdout（Phase 5 不实现 `--stdout` 标志）。
+
+**错误处理**：
+- workdir 未初始化（`edit_state/book.json` 不存在）→ 报错退出，exit code 1，提示运行 `editor init`。
+- `--chapter <uid>` 指定的 chapter 不存在 → 报错退出，exit code 1，列出可用 chapter UID。
+- `book.json` 有 schema 错误 → 报错退出，exit code 1，提示 schema 校验失败。
+
+#### 5.3 输出路径
+
+```
+edit_state/projections/
+  index.md                                    # 全书索引
+  chapters/
+    <chapter_uid>.md                          # 每个 chapter 一个文件
+```
+
+**index.md** 内容：
+
+```markdown
+[[book]] {"title":"The Book Title","authors":["Author Name"],"exported_at":"2026-04-25T12:00:00","source":"edit_state/book.json","chapters":3}
+
+## Chapters
+
+| # | UID | Title | Blocks | Pages |
+|---|-----|-------|--------|-------|
+| 1 | ch-001-a3f | Introduction     | 42 | 1-12 |
+| 2 | ch-002-b7c | Chapter 1        | 87 | 13-45 |
+| 3 | ch-003-d9e | Chapter 2        | 65 | 46-78 |
+```
+
+索引也列出每个 chapter 中的 block 数量和页码范围。
+
+**chapters/\<chapter_uid\>.md** 内容格式：
+
+```markdown
+# Chapter: Introduction [ch-001-a3f]
+
+[[chapter ch-001-a3f]] {"title":"Introduction","blocks":42,"page_range":[1,12]}
+
+---
+
+[[block p001-b01-c7e]] {"uid":"p001-b01-c7e","kind":"heading","page":1,"level":1}
+Introduction
+
+[[block p001-b02-f91]] {"uid":"p001-b02-f91","kind":"paragraph","page":1,"role":"body"}
+This is the first paragraph of the introduction...
+
+[[block p002-fn1-8ab]] {"uid":"p002-fn1-8ab","kind":"footnote","page":2,"callout":"1","paired":false}
+1. Footnote text for the first callout.
+
+[[block p003-fig-1b3]] {"uid":"p003-fig-1b3","kind":"figure","page":3,"provenance":{"source":"docling"}}
+![Figure caption: Architecture diagram](image_ref_or_placeholder)
+Caption: Architecture diagram
+
+[[block p004-tbl-7d2]] {"uid":"p004-tbl-7d2","kind":"table","page":4,"multi_page":false,"num_rows":2,"num_cols":2}
+<table>
+  <thead><tr><th>Name</th><th>Value</th></tr></thead>
+  <tbody><tr><td>foo</td><td>bar</td></tr></tbody>
+</table>
+**Table title:** Sample Table
+**Caption:** A sample table with data
+
+[[block p005-eq-9f4]] {"uid":"p005-eq-9f4","kind":"equation","page":5}
+E = mc²
+```
+
+**格式说明**：
+
+Projection 使用 JSON metadata marker 行标记每个结构化元素。每行语法为：
+
+```
+[[<element-type> <identifier>]] {<json-object>}
+```
+
+- `<element-type>` 是元素种类：`book`、`chapter`、`block`。
+- `<identifier>` 是元素的 UID（block UID 或 chapter UID）。
+- `{<json-object>}` 是元素的元数据 JSON，包含当前状态的关键字段快照。
+
+**设计理由**：选择内联 JSON 而非 key=value 格式，是为了避免转义歧义。Block content 中可能天然包含 `|`、`]`、换行符等字符（尤其是表格 HTML、LaTeX 公式、脚注文本），key=value 格式在这些场景下需要复杂转义规则才能保证唯一分割。JSON 有标准化的转义（`\"`、`\n`、`\\` 等），任何 JSON parser 都能正确解析，同时 `[[ ]]` 包装在文本 grep 时也保持可识别。
+
+输出结构：
+
+- 每个 chapter 文件以 Markdown 标题 `# Chapter: <title> [<uid>]` 开头。
+- 紧接着一行 `[[chapter <uid>]] {json}` 提供章节的元数据快照。
+- 分隔线 `---` 后依次排列该章节的所有 block。
+- 每个 block 输出至少两行：
+  - **metadata marker 行**：`[[block <uid>]] {json}`，包含 UID 和该 block 的关键字段 JSON。
+  - **content**：block 的主体文本内容（可能跨多行）。Table block 的 content 是多行的原始 HTML。
+- marker 行**不是**可反序列化回完整 Book IR 的格式（只读，不做 round-trip）。JSON 中的字段是当前状态的快照摘录，用于 agent 阅读和 grep 定位，不是 book.json 的精确子集。
+
+#### 5.4 各 Block 类型字段覆盖
+
+Marker 行 JSON 中的字段按 block 类型不同。以下列出每种类型的必含字段和条件字段：
+
+| Block 类型 | JSON 中的字段 | content 行 |
+|-----------|--------------|-----------|
+| **Paragraph** | `uid`, `kind`, `page`, `role`, `cross_page` (if true), `provenance` | `text` raw |
+| **Heading** | `uid`, `kind`, `page`, `level`, `heading_id` (if present), `provenance` | `text` raw |
+| **Footnote** | `uid`, `kind`, `page`, `callout`, `paired`, `orphan` (if true) | `text` raw |
+| **Figure** | `uid`, `kind`, `page`, `provenance` | `![caption](image_ref)` 格式；如果 image_ref 不存在则只输 caption text |
+| **Table** | `uid`, `kind`, `page`, `multi_page`, `num_rows`, `num_cols`, `num_segments` (if multi_page), `segment_pages` (if multi_page), `provenance` | raw HTML（`<table>...</table>`）；下方附加 `**Table title:**` 和 `**Caption:**` |
+| **Equation** | `uid`, `kind`, `page`, `provenance` | `text` raw（LaTeX 公式文本） |
+
+**输出规则**：
+- 所有 block 类型**都输出**，无遗漏。
+- 全部字段从当前 `book.json`（即 Book IR）读取，不调用 PDF source 或 VLM。
+- 不需要 round-trip 能力——agent 如需修改，应使用 `agent-output add-patch/add-command`，而非直接编辑 projection 文件。
+
+#### 5.5 Table 设计特殊处理
+
+Table block 在 projection 中的处理需要特别注意，因为 table HTML 可能很长且有复杂结构。
+
+**规则**：
+- **原始 HTML 完整输出**：`<table>...</table>` 直接写入 projection 文件，不做截断、缩略或摘要。
+- **保留 colspan/rowspan/merged cell**：HTML 包含的 `colspan`、`rowspan`、`th`/`td` 标签结构原样保留。
+- **`merge_record` 字段**：当 `multi_page == true` 时，在 HTML 下方输出 `**Merge record:**` 摘要，包含 `segment_order`、`segment_pages` 和被合并的 `num_segments`。**不**输出 `segment_html` 字段（避免重复 HTML）。
+  ```markdown
+  [[block p010-tbl-3a1]] {"uid":"p010-tbl-3a1","kind":"table","page":10,"multi_page":true,"num_segments":3,"segment_pages":[10,11,12]}
+  <table>
+    ...full merged HTML...
+  </table>
+  **Table title:** Comparative Data
+  **Caption:** Table comparing metrics across three groups
+  **Merge record:** segments: 3, pages: [10, 11, 12], order: [0, 1, 2]
+  ```
+- 对于 `multi_page == false` 的 table，不输出 merge_record。
+
+#### 5.6 CLI 详细设计
+
+**命令注册**：在 `editor/tool_surface.py`（或对应的 CLI 注册文件）中新增 `projection` 子命令组：
+
+```python
+@app.group()
+def projection():
+    """Read-only projection export commands."""
+
+@projection.command()
+@click.argument("work")
+@click.option("--chapter", default=None, help="Chapter UID to export")
+def export(work, chapter):
+    """Export book IR to Markdown-ish projection files."""
+    ...
+```
+
+**导出流程**：
+
+1. 解析工作目录路径，验证 `edit_state/book.json` 存在且合法。
+2. 加载 `Book` IR（Pydantic parse）。失败则报错退出。
+3. 如果指定了 `--chapter`，验证 UID 存在。不存在则报错退出。
+4. 确定输出文件列表：
+   - 无 `--chapter`：所有 chapter → index.md + 每个 chapter 一个文件。
+   - 有 `--chapter`：单个 chapter → index.md + 该 chapter 文件（覆盖 index.md，只列出该 chapter）。
+5. 确保 `edit_state/projections/chapters/` 目录存在（`mkdir -p`）。
+6. 对每个 chapter，生成 Markdown-ish 内容并写入对应文件。
+7. 写入 `index.md`。
+8. stdout 输出 JSON 摘要。
+
+**不实现的功能（Phase 5 明确排除）**：
+- `--stdout` 标志（将整体或单个 chapter 内容输出到 stdout）。
+- `--format json` 或 `--format md` 选项。
+- 增量/差异导出。
+- projection diff（跨版本比较 projection 文件）。
+
+#### 5.7 与其他 Phases 的关系
+
+- **Phase 3 (PatchCommand macros)**：Projection 显示的是 patch 应用后的结果，不涉及 command 编译逻辑。
+- **Phase 6 (Book diff engine)**：Projection 是纯输出，不参与 diff 或 patch apply。
+- **Phase 7 (Git workspace workflow)**：Projection 存放在 `edit_state/projections/`，属于 worktree 内的文件，默认由 Git 跟踪。agent 提交 patch 后重新 export 会覆盖旧文件。Git 可以追踪 projection 文件本身的变更历史。
+- **Phase 9 (VLM evidence)**：Projection 可以引用 VLM observation 的 observation_id（defer 至 Phase 9 讨论）。
+
+#### 5.8 测试计划
+
+**Renderer 单元测试**（`tests/editor/test_projection.py`）：
+| 测试用例 | 描述 |
+|---------|------|
+| `test_full_book_export` | 导入一个最小 Book IR（含所有 6 种 block 类型各一个），验证 export 输出文件、index.md 格式、每个 chapter 文件 header 存在、每个 block 的 metadata marker 行和 content 行存在 |
+| `test_single_chapter_export` | 使用 `--chapter <uid>` 导出，验证只生成该 chapter 文件和 index.md |
+| `test_table_html_preserved` | Book 包含一个带复杂 `<table>` 的 block（含 colspan/rowspan）。验证 export 输出的 HTML 与原始 HTML 完全一致（字符串对比），未被截断或修改 |
+| `test_table_merge_record` | Book 包含一个 `multi_page=True` 的 table，带 `merge_record`。验证 export 输出包含 merge_record 摘要行但不包含 `segment_html` |
+| `test_paragraph_cross_page` | Paragraph 有 `cross_page=True`。验证 metadata 行包含 `cross_page` |
+| `test_footnote_orphan` | Footnote 有 `orphan=True`。验证 metadata 行包含 `orphan=true` |
+| `test_heading_with_id` | Heading 有 `heading_id`。验证 metadata 行包含 `heading_id` |
+| `test_index_format` | 验证 index.md 包含标题、作者、导出时间、chapter 列表和 block 计数 |
+| `test_provenance_source` | 验证 block 的 `provenance.source` 被包含在 metadata 行中 |
+| `test_empty_chapter` | 验证空 chapter（无 blocks）正确输出无 block 的 chapter 文件 |
+
+**CLI 集成测试**（`tests/editor/test_projection_cli.py`）：
+| 测试用例 | 描述 |
+|---------|------|
+| `test_cli_export_from_book_json` | 初始化完整的 `edit_state/`（包含 `book.json`），运行 `epubforge editor projection export`，验证文件被写入且内容正确 |
+| `test_cli_export_chapter` | 同上，但使用 `--chapter <uid>`，验证只导出指定 chapter |
+| `test_cli_invalid_chapter` | 使用不存在的 chapter UID，验证 CLI 报错、exit code 1 |
+| `test_cli_uninitialized_workdir` | 在无 `edit_state/book.json` 的目录上运行，验证 CLI 报错、exit code 1 |
+| `test_cli_repeat_overwrite` | 连续运行两次 export，验证第二次成功覆盖且 content 一致 |
+| `test_cli_stdout_summary` | 验证 stdout 输出 JSON 摘要，包含 `exported_at`、`chapters`、`files` |
+
+**测试数据**：
+- 测试 fixture 提供完整的最小 Book IR（含全部 block 类型），供 renderer 测试使用。
+- CLI 集成测试使用 `pytest` + `CliRunner`（click.testing）或 `subprocess` 运行 CLI，取决于项目现有测试模式。
+
+#### 5.9 Deferred / Uncertain Items
+
+以下事项在 Phase 5 **不实现、不决策**，列为未来考察项：
+
+| 事项 | 原因 |
+|------|------|
+| **display_handle** | Phase 5 直接使用 UID。display_handle（UID + 短随机后缀）的设计决策放至 Phase 12 或 UID 重设计时处理 |
+| **snapshot / projection 关系** | snapshot（`book.json` 的纯 JSON 备份）和 projection（可读渲染）是否需要统一的版本管理，目前不明确，留待 Phase 7（Git workflow）积累实际使用经验后决定 |
+| **`--stdout` 输出模式** | Phase 5 只写文件。`--stdout` 需求（piping、agent 直接读取、vlm-page caller 输出）推迟到有实际用例时再实现 |
+| **Table 摘要/截断策略** | Phase 5 完整输出 table HTML。如果实测中大 table 导致 prompt 超限，再考虑截断/摘要策略，并增加配置项 `projection.max_table_rows` |
+| **Projection diff** | 比较两个 projection 版本的差异，属于 Phase 7（Git workflow）和 Phase 6（Book diff）的增量功能，Phase 5 不做 |
 
 ### Phase 6: Book diff engine
 
