@@ -10,6 +10,7 @@ from epubforge.editor.doctor import (
     compute_doctor_delta,
     evaluate_convergence,
 )
+from epubforge.editor.diff import DiffError, diff_books
 from epubforge.editor.log import (
     AuditLogEntry,
     append_audit_event,
@@ -59,6 +60,7 @@ __all__ = [
     "ChapterStatus",
     "ConventionNote",
     "DeleteNodeChange",
+    "DiffError",
     "DoctorDelta",
     "DoctorReport",
     "EditMemory",
@@ -89,6 +91,7 @@ __all__ = [
     "compile_patch_commands",
     "compute_doctor_delta",
     "evaluate_convergence",
+    "diff_books",
     "merge_edit_memory",
     "read_current_log",
     "render_chapter_projection",
