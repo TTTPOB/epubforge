@@ -38,3 +38,7 @@ packages = ["src/epubforge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "granite_server: requires a running llama-server with Granite-Docling-258M (see docs/explorations/granite-llama-server-spike.md)",
+]
+addopts = "-m 'not granite_server'"
