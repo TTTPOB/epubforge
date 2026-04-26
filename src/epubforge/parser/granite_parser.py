@@ -330,9 +330,10 @@ def parse_pdf_granite(
     else:
         log.warning("granite: health check skipped (settings.health_check=False)")
 
-    log.info("granite: building converter (model=%s, scale=%.1f, concurrency=%d)",
-             settings.api_model, settings.scale, settings.concurrency)
-    converter = _build_converter(settings)
+    log.info(
+        "granite: per-page converter mode (model=%s, scale=%.1f, concurrency=%d)",
+        settings.api_model, settings.scale, settings.concurrency,
+    )
 
     started_at = datetime.now(tz=timezone.utc)
     t0 = time.monotonic()
@@ -344,6 +345,10 @@ def parse_pdf_granite(
 
     for page_no in range(1, page_count + 1):
         page_t0 = time.monotonic()
+        # Build a fresh converter per page so docling-internal caches do not
+        # accumulate across pages. Combined with del + gc.collect() below
+        # this keeps RSS bounded on 8GB WSL2 (review-agent finding).
+        converter = _build_converter(settings)
         try:
             result = converter.convert(
                 str(pdf_path), page_range=(page_no, page_no)
@@ -363,10 +368,12 @@ def parse_pdf_granite(
             successful_pages.append(page_no)
 
             del result, doc
-            gc.collect()
         except Exception as exc:  # noqa: BLE001 — per-page isolation is the contract
             log.error("granite: [page %d/%d] ERROR: %s", page_no, page_count, exc)
             failed_pages.append(page_no)
+        finally:
+            del converter
+            gc.collect()
 
         page_elapsed = time.monotonic() - page_t0
         if on_progress is not None:

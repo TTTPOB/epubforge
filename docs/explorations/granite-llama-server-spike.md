@@ -164,10 +164,14 @@ llama-server \
   -m /path/to/granite-docling-258M-BF16.gguf \
   --mmproj /path/to/mmproj-model-f16.gguf \
   -ngl 99 \
-  -c 8192 \
+  -c 2048 \
   -np 1 \
   -ub 2048 \
   -b 4096 \
+  --cache-ram 0 \
+  -fa \
+  -ctk q8_0 \
+  -ctv q8_0 \
   --temp 0.0 \
   --top-p 0.95 \
   --top-k 10 \
@@ -180,6 +184,16 @@ llama-server \
 ```
 
 调用端 prompt 必须为 `Convert this page to docling.`
+
+**内存控制 flags 说明**（追加于 OOM 调查后）：
+
+- `--cache-ram 0` — 关闭 host-memory prompt cache。granite-docling 单图请求 prompt
+  几乎不重复，缓存零命中却会持续累积；30 页跑下来 host RAM 多吃 800+ MiB
+  （参见 llama.cpp issue #22127）。
+- `-c 2048` — 从 8192 降到 2048。granite-docling 单图请求 prompt+output 远低于
+  2048 token，更大的 ctx 只会浪费 KV cache 空间。
+- `-fa -ctk q8_0 -ctv q8_0` — flash-attention + KV cache 量化到 q8_0，
+  额外把 KV cache 内存压到约 1/4。
 
 ### 7.3 GraniteRunner 设计要点
 
