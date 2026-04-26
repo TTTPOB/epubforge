@@ -172,9 +172,64 @@ def parse(
     ctx: typer.Context,
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
+    with_granite: bool = typer.Option(
+        False,
+        "--with-granite",
+        "-g",
+        help="Enable Granite VLM secondary pipeline for this run (overrides config).",
+    ),
+    no_granite: bool = typer.Option(
+        False,
+        "--no-granite",
+        help="Disable Granite for this run, even if config has it enabled.",
+    ),
+    force_granite: bool = typer.Option(
+        False,
+        "--force-granite",
+        help=(
+            "Re-run Granite even if 01_raw_granite.json exists. "
+            "Implies --with-granite. Note: simplified implementation — "
+            "equivalent to -f (re-runs all of stage 1)."
+        ),
+    ),
 ) -> None:
     """Stage 1 — Docling parse → work/<name>/01_raw.json."""
+    # Mutual-exclusion guard
+    if with_granite and no_granite:
+        raise typer.BadParameter("--with-granite and --no-granite are mutually exclusive")
+
     cfg = _get_config(ctx)
+
+    # Granite override resolution (immutable update via model_copy)
+    if no_granite:
+        cfg = cfg.model_copy(
+            update={
+                "extract": cfg.extract.model_copy(
+                    update={
+                        "granite": cfg.extract.granite.model_copy(
+                            update={"enabled": False}
+                        )
+                    }
+                )
+            }
+        )
+    elif with_granite or force_granite:
+        cfg = cfg.model_copy(
+            update={
+                "extract": cfg.extract.model_copy(
+                    update={
+                        "granite": cfg.extract.granite.model_copy(
+                            update={"enabled": True}
+                        )
+                    }
+                )
+            }
+        )
+
+    # Simplified: --force-granite is equivalent to -f (re-runs all of stage 1)
+    if force_granite:
+        force = True
+
     app_ctx = ctx.find_root().obj
     log_file_override = (
         app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None

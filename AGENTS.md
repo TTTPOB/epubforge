@@ -15,7 +15,7 @@ prompt + image).
 
 | Stage | Name | CLI / `--from` | Input | Output |
 |-------|------|----------------|-------|--------|
-| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied) |
+| 1 | parse | `parse` / `--from 1` / `-g` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied) |
 | 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
 | 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` + `source/source.pdf` | `03_extract/artifacts/<id>/` + `03_extract/active_manifest.json` |
 | 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
