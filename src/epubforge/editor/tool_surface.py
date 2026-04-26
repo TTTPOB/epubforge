@@ -7,7 +7,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -40,6 +40,9 @@ from epubforge.editor.state import (
 from epubforge.editor.workspace import GitError, find_repo_root, resolve_book_path_at_ref
 from epubforge.io import load_book, save_book
 from epubforge.ir.semantic import Book
+
+if TYPE_CHECKING:
+    from epubforge.editor.vlm_evidence import VLMObservation
 
 
 class DoctorContext(BaseModel):
