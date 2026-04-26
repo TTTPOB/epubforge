@@ -20,6 +20,20 @@ absolute page number and ``prov[].page_no`` set to the absolute page number.
 We therefore never offset page numbers when merging — only the per-batch
 ``self_ref`` indices (``#/texts/N``, ``#/groups/N``, etc.) are reindexed to
 keep them globally unique.
+
+PDF backend selection strategy
+-------------------------------
+The backend is chosen by the following priority:
+
+1. **Env override** — if ``EPUBFORGE_EXTRACT_PDF_BACKEND`` is set, that value
+   is used unconditionally (``"docling_parse"`` or ``"pypdfium2"``).
+2. **OCR auto** — when OCR is enabled the ``pypdfium2`` backend is selected,
+   saving ~500 MiB of baseline memory; native text-unit quality does not matter
+   because all text comes from RapidOCR in this mode.
+3. **No-OCR auto** — when OCR is disabled ``docling_parse`` (V1) is kept for
+   its superior native text extraction quality.
+
+See ``docs/explorations/stage1-pdf-parser-memory.md`` for measurements.
 """
 
 from __future__ import annotations
@@ -27,6 +41,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -175,12 +190,34 @@ def _build_pipeline_options(ocr_settings: Any) -> PdfPipelineOptions:
     )
 
 
-def _build_converter(pipeline_opts: PdfPipelineOptions) -> DocumentConverter:
-    return DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
-        }
-    )
+def _build_converter(
+    pipeline_opts: PdfPipelineOptions, *, ocr_enabled: bool
+) -> DocumentConverter:
+    backend_env = os.environ.get("EPUBFORGE_EXTRACT_PDF_BACKEND")
+
+    if backend_env is not None:
+        # Explicit env override — honour it regardless of OCR mode.
+        backend_name = backend_env
+        decision = "env override"
+    else:
+        # Auto-select based on OCR mode.
+        backend_name = "pypdfium2" if ocr_enabled else "docling_parse"
+        decision = f"auto: ocr_enabled={ocr_enabled}"
+
+    log.info("parse: pdf_backend=%s (%s)", backend_name, decision)
+
+    if backend_name == "docling_parse":
+        fmt_option = PdfFormatOption(pipeline_options=pipeline_opts)
+    elif backend_name == "pypdfium2":
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+
+        fmt_option = PdfFormatOption(
+            pipeline_options=pipeline_opts,
+            backend=PyPdfiumDocumentBackend,
+        )
+    else:
+        raise ValueError(f"unknown EPUBFORGE_EXTRACT_PDF_BACKEND: {backend_name!r}")
+    return DocumentConverter(format_options={InputFormat.PDF: fmt_option})
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +262,17 @@ def parse_pdf(
     if page_batch_size <= 0:
         raise ValueError(f"page_batch_size must be > 0, got {page_batch_size}")
 
+    inner_batch_env = os.environ.get("EPUBFORGE_EXTRACT_DOCLING_INNER_BATCH")
+    if inner_batch_env is not None:
+        from docling.datamodel.settings import settings as _docling_settings
+
+        _docling_settings.perf.page_batch_size = int(inner_batch_env)
+        log.info(
+            "docling inner page_batch_size override: %d",
+            _docling_settings.perf.page_batch_size,
+        )
+
+    ocr_enabled = bool(ocr_settings is not None and ocr_settings.enabled)
     pipeline_opts = _build_pipeline_options(ocr_settings)
     images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -247,7 +295,7 @@ def parse_pdf(
     # rebuilding each batch causes onnxruntime mmap accumulation (~200 MiB/batch).
     # DocumentConverter does not retain ConversionResult; BasePipeline._unload
     # releases per-page backends after each convert call.
-    converter = _build_converter(pipeline_opts)
+    converter = _build_converter(pipeline_opts, ocr_enabled=ocr_enabled)
     try:
         for batch_start in range(1, total_pages + 1, page_batch_size):
             batch_end = min(batch_start + page_batch_size - 1, total_pages)

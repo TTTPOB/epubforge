@@ -367,6 +367,8 @@ EPUBFORGE_EXTRACT_GRANITE_ENABLED          extract.granite.enabled  (1/true/yes/
 EPUBFORGE_EXTRACT_GRANITE_API_URL          extract.granite.api_url
 EPUBFORGE_EXTRACT_GRANITE_API_MODEL        extract.granite.api_model
 EPUBFORGE_EXTRACT_GRANITE_TIMEOUT          extract.granite.timeout_seconds
+EPUBFORGE_EXTRACT_PDF_BACKEND              traditional pipeline PDF backend; "docling_parse" | "pypdfium2"; default auto-selects pypdfium2 when OCR is enabled, docling_parse otherwise. See docs/explorations/stage1-pdf-parser-memory.md
+EPUBFORGE_EXTRACT_DOCLING_INNER_BATCH      override docling internal page_batch_size (default 4). Lower values force more frequent unloads but increase peak RSS in our tests; provided for debugging only.
 ```
 
 #### `[extract.granite]` — Granite secondary VLM parser
