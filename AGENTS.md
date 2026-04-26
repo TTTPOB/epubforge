@@ -15,15 +15,22 @@ prompt + image).
 
 | Stage | Name | CLI / `--from` | Input | Output |
 |-------|------|----------------|-------|--------|
-| 1 | parse | `parse` / `--from 1` / `-g` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied) |
+| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied); `01_raw_granite.json` + `01_raw_granite.manifest.json` (when Granite is enabled) |
 | 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
 | 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` + `source/source.pdf` | `03_extract/artifacts/<id>/` + `03_extract/active_manifest.json` |
 | 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
 | 5 | build | `build` | `edit_state/book.json` or `05_semantic.json` | `out/<name>.epub` |
 
-The pipeline uses Docling mechanical parsing exclusively. VLM analysis is available as an
-**editor evidence tool** (`vlm-page` / `vlm-range`) for on-demand page inspection — it is
-not part of the ingestion pipeline.
+Stage 1 uses Docling mechanical parsing as the **primary pipeline** (source of truth for BookIR).
+When `extract.granite.enabled = true`, Stage 1 also runs a **secondary Granite-Docling VLM
+pipeline** via a local llama-server (OpenAI-compatible) endpoint and writes
+`01_raw_granite.json` alongside `01_raw.json`. Granite failures are caught as warnings and
+never abort Stage 1 — the secondary result is cross-validation evidence only, never the
+BookIR source. See [Granite CLI flags](#granite-cli-flags) and
+`docs/rules/ocr-cross-validation.md`.
+
+VLM analysis via the **editor evidence tools** (`vlm-page` / `vlm-range`) remains available
+for on-demand page inspection independent of the Granite secondary pipeline.
 
 Stage 3 artifacts are **manifest-addressed**: the `artifact_id` is derived from a SHA-256 of
 `(source_pdf_sha256, mode, selected_pages)`. A new mode or page selection produces a new
@@ -36,6 +43,20 @@ Stage 3 artifacts are **manifest-addressed**: the `artifact_id` is derived from 
 > CLI `--from` accepts `max=4` (build is not re-runnable via `--from`).
 
 All stages accept `--force-rerun` (`-f`) to re-run even when output exists.
+
+### Granite CLI flags
+
+The `parse` subcommand has three flags that override `extract.granite.enabled` at runtime:
+
+| Flag | Short | Effect |
+|------|-------|--------|
+| `--with-granite` | `-g` | Enable Granite secondary pipeline (sets `extract.granite.enabled = true`) |
+| `--no-granite` | — | Force-disable Granite (overrides config `enabled = true`) |
+| `--force-granite` | — | Re-run Granite even if `01_raw_granite.json` already exists; implies `--with-granite` |
+
+`--with-granite` and `--no-granite` are mutually exclusive (raises an error if both are given).
+Overrides are applied via `model_copy(update=...)` — the config file on disk is not modified.
+When Granite is enabled (config or flag), progress is logged every 10 pages or on the last page.
 
 ## Observability
 
@@ -160,7 +181,13 @@ Agents work concurrently using Git worktrees for isolation:
    `workspace gc` removes stale agent worktrees older than `--max-age-days`.
 
 Projections (`projection export`) provide read-only Markdown-ish views of the Book IR,
-giving agents efficient context without loading the full JSON.
+giving agents efficient context without loading the full JSON. When `01_raw_granite.json`
+exists in the workdir, each chapter projection automatically appends a
+`<!-- granite cross-reference for pages N, ... -->` block containing per-page Granite
+markdown tagged with `[[granite-ref page=N]]` markers. These are **secondary evidence
+only** (per `docs/rules/ocr-cross-validation.md`); the Standard pipeline text above the
+block remains the primary source. The Granite block is omitted when `01_raw_granite.json`
+is absent (fully backward-compatible).
 
 ### Stage 3 context in `edit_state/meta.json`
 
@@ -340,6 +367,27 @@ EPUBFORGE_EXTRACT_GRANITE_API_URL          extract.granite.api_url
 EPUBFORGE_EXTRACT_GRANITE_API_MODEL        extract.granite.api_model
 EPUBFORGE_EXTRACT_GRANITE_TIMEOUT          extract.granite.timeout_seconds
 ```
+
+#### `[extract.granite]` — Granite secondary VLM parser
+
+`GraniteSettings` controls the Granite-Docling-258M secondary pipeline in Stage 1. It is
+distinct from `[vlm]`, which governs the editor evidence tools (`vlm-page` / `vlm-range`).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the secondary pipeline; also toggled at runtime by `--with-granite` / `--no-granite` / `--force-granite` |
+| `api_url` | `http://localhost:8080/v1/chat/completions` | llama-server OpenAI-compatible chat-completions endpoint |
+| `api_model` | `granite-docling` | Model name sent in the API request |
+| `prompt` | `"Convert this page to docling."` | Per-page instruction prepended to each VLM request |
+| `scale` | `2.0` | Rasterisation scale factor for page images sent to the VLM |
+| `timeout_seconds` | `180` | Per-page HTTP timeout (int) |
+| `max_tokens` | `4096` | Max tokens per page completion |
+| `health_check` | `true` | Verify llama-server `/v1/models` is reachable before starting; fails fast on unreachable server |
+| `concurrency` | `1` | Parallelism for llama-server requests; must match llama-server `-np` setting |
+
+Output files written by the secondary pipeline:
+- `01_raw_granite.json` — standalone `DoclingDocument` (never used as BookIR source)
+- `01_raw_granite.manifest.json` — sidecar recording llama-server flags and version
 
 ### Test-only / scratch subprocess injection
 
