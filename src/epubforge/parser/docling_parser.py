@@ -248,6 +248,7 @@ def parse_pdf(
     images_dir: Path,
     ocr_settings: Any = None,
     page_batch_size: int = 20,
+    segment_size: int | None = None,
 ) -> None:
     """Parse *pdf_path* with Docling and write DoclingDocument JSON to *out_path*.
 
@@ -258,10 +259,75 @@ def parse_pdf(
 
     Requires ``generate_picture_images=True`` so ``PictureItem.get_image()``
     works during ``_save_figure_crops``.
+
+    Memory-boundedness:
+        Even with the per-batch ``gc.collect()`` cycle below, onnxruntime
+        InferenceSession objects retain shape-cache mmap regions across
+        ``convert()`` calls (no public release API exists). On long PDFs
+        (300+ pages, OCR enabled) this accumulates past 5 GiB and OOMs an
+        8 GiB WSL2 box. Setting ``segment_size`` reroutes through
+        ``_parse_pdf_segmented`` which restarts the worker process every
+        ``segment_size`` pages — process exit is the only reliable way to
+        force the OS to reclaim those mmaps.
+
+    Args:
+        segment_size: when set and ``segment_size < total_pages``, run the
+            parse in subprocess-isolated segments of N pages each. Each
+            segment writes a partial DoclingDocument JSON, then the parent
+            merges them into ``out_path``. None (default) preserves the
+            single-process path for backward compatibility.
     """
     if page_batch_size <= 0:
         raise ValueError(f"page_batch_size must be > 0, got {page_batch_size}")
+    if segment_size is not None and segment_size <= 0:
+        raise ValueError(
+            f"segment_size must be > 0 when set, got {segment_size}"
+        )
 
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    total_pages = _count_pdf_pages(pdf_path)
+    if total_pages <= 0:
+        raise RuntimeError(f"Could not determine page count for {pdf_path}")
+
+    if segment_size is not None and segment_size < total_pages:
+        _parse_pdf_segmented(
+            pdf_path,
+            out_path,
+            images_dir=images_dir,
+            ocr_settings=ocr_settings,
+            page_batch_size=page_batch_size,
+            segment_size=segment_size,
+            total_pages=total_pages,
+        )
+        return
+
+    _apply_inner_batch_env_override()
+
+    log.info(
+        "parse: pdf=%s total_pages=%d batch_size=%d (single-process)",
+        pdf_path.name,
+        total_pages,
+        page_batch_size,
+    )
+
+    merged_data, n_pictures_total = _parse_pdf_range(
+        pdf_path,
+        page_range=(1, total_pages),
+        images_dir=images_dir,
+        ocr_settings=ocr_settings,
+        page_batch_size=page_batch_size,
+    )
+
+    if merged_data is None:
+        raise RuntimeError(
+            f"Parse produced no batches for {pdf_path} (total_pages={total_pages})"
+        )
+
+    _save_merged_doc(merged_data, out_path, n_pictures_total=n_pictures_total)
+
+
+def _apply_inner_batch_env_override() -> None:
     inner_batch_env = os.environ.get("EPUBFORGE_EXTRACT_DOCLING_INNER_BATCH")
     if inner_batch_env is not None:
         from docling.datamodel.settings import settings as _docling_settings
@@ -272,74 +338,19 @@ def parse_pdf(
             _docling_settings.perf.page_batch_size,
         )
 
-    ocr_enabled = bool(ocr_settings is not None and ocr_settings.enabled)
-    pipeline_opts = _build_pipeline_options(ocr_settings)
-    images_dir.mkdir(parents=True, exist_ok=True)
 
-    total_pages = _count_pdf_pages(pdf_path)
-    if total_pages <= 0:
-        raise RuntimeError(f"Could not determine page count for {pdf_path}")
+def _save_merged_doc(
+    merged_data: dict[str, Any],
+    out_path: Path,
+    *,
+    n_pictures_total: int,
+) -> None:
+    """Round-trip through DoclingDocument and save to *out_path*.
 
-    log.info(
-        "parse: pdf=%s total_pages=%d batch_size=%d",
-        pdf_path.name,
-        total_pages,
-        page_batch_size,
-    )
-
-    merged_data: dict[str, Any] | None = None
-    n_pictures_total = 0
-
-    # Build the converter once outside the loop. StandardPdfPipeline holds
-    # OCR/layout/table model objects that should be reused across batches —
-    # rebuilding each batch causes onnxruntime mmap accumulation (~200 MiB/batch).
-    # DocumentConverter does not retain ConversionResult; BasePipeline._unload
-    # releases per-page backends after each convert call.
-    converter = _build_converter(pipeline_opts, ocr_enabled=ocr_enabled)
-    try:
-        for batch_start in range(1, total_pages + 1, page_batch_size):
-            batch_end = min(batch_start + page_batch_size - 1, total_pages)
-            log.info(
-                "parse: batch pages=[%d..%d] of %d",
-                batch_start,
-                batch_end,
-                total_pages,
-            )
-
-            try:
-                result = converter.convert(
-                    str(pdf_path), page_range=(batch_start, batch_end)
-                )
-                doc = result.document
-
-                # Save figure crops immediately while ``doc`` still owns the
-                # in-memory PIL images, so we can free the doc before the next
-                # batch. Page numbers in ``prov`` are already absolute.
-                n_pictures_total += _save_figure_crops(doc, images_dir)
-
-                batch_data = doc.export_to_dict()
-                merged_data = _merge_batch_into(merged_data, batch_data)
-            finally:
-                # Drop heavy per-batch refs and force a collection cycle.
-                # This is the crucial step for memory boundedness — without it,
-                # OCR intermediates from prior batches stay pinned.
-                try:
-                    del result, doc, batch_data  # noqa: F821
-                except NameError:
-                    pass
-                gc.collect()
-    finally:
-        del converter
-        gc.collect()
-
-    if merged_data is None:
-        raise RuntimeError(
-            f"Parse produced no batches for {pdf_path} (total_pages={total_pages})"
-        )
-
-    # Round-trip through DoclingDocument so the on-disk JSON uses the same
-    # serializer as the single-shot path (custom serializer drops empty
-    # field_regions/field_items, etc.).
+    The round-trip is required so the on-disk JSON uses the same serializer
+    as the single-shot path (custom serializer drops empty
+    field_regions/field_items, etc.).
+    """
     from docling_core.types.doc import DoclingDocument
 
     merged_doc = DoclingDocument.model_validate(merged_data)
@@ -352,6 +363,213 @@ def parse_pdf(
         n_pictures_total,
         out_path.name,
     )
+
+
+def _parse_pdf_range(
+    pdf_path: Path,
+    *,
+    page_range: tuple[int, int],
+    images_dir: Path,
+    ocr_settings: Any,
+    page_batch_size: int,
+) -> tuple[dict[str, Any] | None, int]:
+    """Run the page-batched docling loop over ``[start, end]``.
+
+    Returns ``(merged_data | None, n_pictures_saved)``. Used by both the
+    single-process ``parse_pdf`` path and by the subprocess worker behind
+    ``_parse_pdf_segmented``. The converter is rebuilt fresh on every
+    call so this function is safe to invoke as the entire body of a
+    short-lived worker process.
+    """
+    start, end = page_range
+    if start < 1 or end < start:
+        raise ValueError(f"Invalid page_range: {page_range!r}")
+
+    ocr_enabled = bool(ocr_settings is not None and ocr_settings.enabled)
+    pipeline_opts = _build_pipeline_options(ocr_settings)
+
+    merged_data: dict[str, Any] | None = None
+    n_pictures_total = 0
+
+    converter = _build_converter(pipeline_opts, ocr_enabled=ocr_enabled)
+    try:
+        for batch_start in range(start, end + 1, page_batch_size):
+            batch_end = min(batch_start + page_batch_size - 1, end)
+            log.info(
+                "parse: batch pages=[%d..%d] of [%d..%d]",
+                batch_start,
+                batch_end,
+                start,
+                end,
+            )
+
+            try:
+                result = converter.convert(
+                    str(pdf_path), page_range=(batch_start, batch_end)
+                )
+                doc = result.document
+
+                # Save figure crops immediately while ``doc`` still owns the
+                # in-memory PIL images, so we can free the doc before the
+                # next batch. Page numbers in ``prov`` are already absolute.
+                n_pictures_total += _save_figure_crops(doc, images_dir)
+
+                batch_data = doc.export_to_dict()
+                merged_data = _merge_batch_into(merged_data, batch_data)
+            finally:
+                # Drop heavy per-batch refs and force a collection cycle.
+                try:
+                    del result, doc, batch_data  # noqa: F821
+                except NameError:
+                    pass
+                gc.collect()
+    finally:
+        del converter
+        gc.collect()
+
+    return merged_data, n_pictures_total
+
+
+def _segment_ranges(total_pages: int, segment_size: int) -> list[tuple[int, int]]:
+    """Compute 1-based inclusive ``(start, end)`` pairs for segmented parse.
+
+    >>> _segment_ranges(95, 40)
+    [(1, 40), (41, 80), (81, 95)]
+    >>> _segment_ranges(40, 40)
+    [(1, 40)]
+    >>> _segment_ranges(50, 20)
+    [(1, 20), (21, 40), (41, 50)]
+    """
+    if total_pages <= 0:
+        raise ValueError(f"total_pages must be > 0, got {total_pages}")
+    if segment_size <= 0:
+        raise ValueError(f"segment_size must be > 0, got {segment_size}")
+    ranges: list[tuple[int, int]] = []
+    for start in range(1, total_pages + 1, segment_size):
+        end = min(start + segment_size - 1, total_pages)
+        ranges.append((start, end))
+    return ranges
+
+
+def _parse_pdf_segmented(
+    pdf_path: Path,
+    out_path: Path,
+    *,
+    images_dir: Path,
+    ocr_settings: Any,
+    page_batch_size: int,
+    segment_size: int,
+    total_pages: int,
+) -> None:
+    """Run the page-batched parse in subprocess-isolated segments.
+
+    Each segment is processed by ``epubforge.parser._segment_worker`` which
+    invokes ``_parse_pdf_range`` on ``[seg_start, seg_end]`` and writes a
+    partial DoclingDocument JSON. After every segment subprocess exits the
+    OS reclaims that worker's mmap pages (onnxruntime / torch shape cache
+    accumulation), bounding peak RSS at one segment's worth.
+
+    We **do not** clean up segment files on failure so a hung run can be
+    resumed by inspecting them.
+    """
+    import subprocess
+    import sys
+
+    segments = _segment_ranges(total_pages, segment_size)
+    segments_dir = out_path.with_suffix(out_path.suffix + ".segments")
+    segments_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(
+        "parse: pdf=%s total_pages=%d segment_size=%d page_batch_size=%d "
+        "segments=%d (subprocess-isolated)",
+        pdf_path.name,
+        total_pages,
+        segment_size,
+        page_batch_size,
+        len(segments),
+    )
+
+    # Serialise OCR settings for the worker. The segment worker reconstructs
+    # these via pydantic; if ocr_settings is None we send an empty payload.
+    ocr_json: str
+    if ocr_settings is None:
+        ocr_json = ""
+    else:
+        ocr_json = ocr_settings.model_dump_json()
+
+    segment_outs: list[Path] = []
+    for idx, (seg_start, seg_end) in enumerate(segments):
+        seg_out = segments_dir / f"segment_{idx:03d}.json"
+        segment_outs.append(seg_out)
+        log.info(
+            "parse: segment %d/%d pages=[%d..%d] → subprocess",
+            idx + 1,
+            len(segments),
+            seg_start,
+            seg_end,
+        )
+
+        cmd: list[str] = [
+            sys.executable,
+            "-m",
+            "epubforge.parser._segment_worker",
+            "docling",
+            "--pdf",
+            str(pdf_path),
+            "--out",
+            str(seg_out),
+            "--images-dir",
+            str(images_dir),
+            "--start",
+            str(seg_start),
+            "--end",
+            str(seg_end),
+            "--page-batch-size",
+            str(page_batch_size),
+        ]
+        if ocr_json:
+            cmd.extend(["--ocr-json", ocr_json])
+
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"parse: segment {idx + 1}/{len(segments)} pages=[{seg_start}..{seg_end}] "
+                f"failed with exit code {exc.returncode}; intermediate segment "
+                f"artefacts preserved under {segments_dir}"
+            ) from exc
+
+    # Merge all segment JSONs in order.
+    merged_data: dict[str, Any] | None = None
+    for seg_out in segment_outs:
+        seg_data = json.loads(seg_out.read_text(encoding="utf-8"))
+        merged_data = _merge_batch_into(merged_data, seg_data)
+        # Free the per-segment dict before reading the next one.
+        del seg_data
+        gc.collect()
+
+    if merged_data is None:
+        raise RuntimeError(
+            f"parse: segmented merge produced no data for {pdf_path}"
+        )
+
+    # Picture counter — we do not persist a per-segment count, so derive
+    # from the merged doc for the log line.
+    n_pictures_total = len(merged_data.get("pictures") or [])
+    _save_merged_doc(merged_data, out_path, n_pictures_total=n_pictures_total)
+
+    # Best-effort cleanup of segment files. We keep them on failure (handled
+    # via the early-raise above) but remove on success to avoid clutter.
+    for seg_out in segment_outs:
+        try:
+            seg_out.unlink()
+        except OSError as exc:
+            log.warning("parse: failed to remove segment file %s: %s", seg_out, exc)
+    try:
+        segments_dir.rmdir()
+    except OSError:
+        # Directory may be non-empty if cleanup failed above; non-fatal.
+        pass
 
 
 # ---------------------------------------------------------------------------

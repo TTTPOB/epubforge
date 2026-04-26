@@ -15,7 +15,7 @@ prompt + image).
 
 | Stage | Name | CLI / `--from` | Input | Output |
 |-------|------|----------------|-------|--------|
-| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON, internally batched by `extract.page_batch_size`, default 20 pages, to bound peak memory under OCR); `source/source.pdf` (hardlinked/copied); `01_raw_granite.json` + `01_raw_granite.manifest.json` (when Granite is enabled) |
+| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON, internally batched by `extract.page_batch_size`, default 20 pages, to bound peak memory under OCR; when `extract.segment_size` is set the parse additionally runs in subprocess-isolated segments — see below); `source/source.pdf` (hardlinked/copied); `01_raw_granite.json` + `01_raw_granite.manifest.json` (when Granite is enabled) |
 | 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
 | 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` + `source/source.pdf` | `03_extract/artifacts/<id>/` + `03_extract/active_manifest.json` |
 | 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
@@ -28,6 +28,17 @@ pipeline** via a local llama-server (OpenAI-compatible) endpoint and writes
 never abort Stage 1 — the secondary result is cross-validation evidence only, never the
 BookIR source. See [Granite CLI flags](#granite-cli-flags) and
 `docs/rules/ocr-cross-validation.md`.
+
+When `extract.segment_size` is set, the PDF is parsed in N-page segments dispatched to
+short-lived `python -m epubforge.parser._segment_worker` subprocesses (one per segment,
+serial). Process exit is the only reliable way to release onnxruntime/torch shape-cache
+mmap regions accumulated by the per-batch `convert()` loop, so segmented mode bounds peak
+RSS at one segment's worth. The parent process merges segment JSONs into `01_raw.json`
+via the same `_merge_batch_into` logic used by the in-process page-batch loop; the final
+output is byte-equivalent to a single-process run with the same `page_batch_size`. The
+secondary Granite pipeline applies the same segmentation when enabled. Backward
+compatibility: `segment_size = None` (the default) preserves the single-process path.
+See `docs/explorations/stage1-pdf-parser-memory.md`.
 
 VLM analysis via the **editor evidence tools** (`vlm-page` / `vlm-range`) remains available
 for on-demand page inspection independent of the Granite secondary pipeline.
@@ -362,6 +373,7 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 ```
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
 EPUBFORGE_EXTRACT_PAGE_BATCH_SIZE          extract.page_batch_size  (Stage 1 batch size; default 20)
+EPUBFORGE_EXTRACT_SEGMENT_SIZE             extract.segment_size  (int; empty string = None; when set, Stage 1 dispatches N-page segments to subprocess workers to bound peak RSS)
 EPUBFORGE_EXTRACT_OCR_ENABLED              extract.ocr.enabled  (1/true/yes/on = True)
 EPUBFORGE_EXTRACT_GRANITE_ENABLED          extract.granite.enabled  (1/true/yes/on = True)
 EPUBFORGE_EXTRACT_GRANITE_API_URL          extract.granite.api_url

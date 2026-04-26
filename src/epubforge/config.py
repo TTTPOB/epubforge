@@ -90,6 +90,19 @@ class ExtractSettings(BaseModel):
     # single 50-page convert peaks above 5 GiB RSS on 8 GiB WSL2; batching
     # keeps peak memory bounded by per-batch cost. Default 20 pages.
     page_batch_size: int = 20
+    # When set, parse the PDF in segments of this many pages each via a
+    # short-lived subprocess to bound peak memory. Process exit is the only
+    # reliable way to release onnxruntime/torch shape-cache mmap regions
+    # accumulated across ``convert()`` calls. None = single-process
+    # (default, backward-compatible). See
+    # docs/explorations/stage1-pdf-parser-memory.md.
+    segment_size: int | None = Field(
+        default=None,
+        description=(
+            "If set, parse PDF in segments of N pages each via subprocess "
+            "to bound peak memory. None = single-process (default)."
+        ),
+    )
     ocr: OcrSettings = Field(default_factory=OcrSettings)
     granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
@@ -196,6 +209,12 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
     ("EPUBFORGE_EXTRACT_PAGE_BATCH_SIZE", "extract", "page_batch_size", int),
+    (
+        "EPUBFORGE_EXTRACT_SEGMENT_SIZE",
+        "extract",
+        "segment_size",
+        lambda v: None if v == "" else int(v),
+    ),
     ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
     ("EPUBFORGE_EXTRACT_GRANITE_ENABLED", "extract.granite", "enabled", _bool_env),
     ("EPUBFORGE_EXTRACT_GRANITE_API_URL", "extract.granite", "api_url", str),

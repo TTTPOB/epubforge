@@ -13,7 +13,7 @@ from typing import Any
 
 from epubforge.config import Config
 from epubforge.observability import get_tracker, stage_timer
-from epubforge.parser import parse_pdf_granite
+from epubforge.parser import parse_pdf_granite, parse_pdf_granite_segmented
 
 log = logging.getLogger(__name__)
 
@@ -183,6 +183,7 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
                 images_dir=work / "images",
                 ocr_settings=cfg.extract.ocr,
                 page_batch_size=cfg.extract.page_batch_size,
+                segment_size=cfg.extract.segment_size,
             )
         log.info("  -> %s", out)
 
@@ -208,13 +209,23 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             page_count,
         )
         with stage_timer(log, "1 parse-granite"):
-            result = parse_pdf_granite(
-                pdf_path=source_pdf,
-                out_path=granite_out,
-                settings=cfg.extract.granite,
-                page_count=page_count,
-                on_progress=_log_granite_progress,
-            )
+            if cfg.extract.segment_size is not None and cfg.extract.segment_size < page_count:
+                result = parse_pdf_granite_segmented(
+                    pdf_path=source_pdf,
+                    out_path=granite_out,
+                    settings=cfg.extract.granite,
+                    page_count=page_count,
+                    segment_size=cfg.extract.segment_size,
+                    on_progress=_log_granite_progress,
+                )
+            else:
+                result = parse_pdf_granite(
+                    pdf_path=source_pdf,
+                    out_path=granite_out,
+                    settings=cfg.extract.granite,
+                    page_count=page_count,
+                    on_progress=_log_granite_progress,
+                )
         log.info(
             "Granite parse complete: %d/%d pages succeeded, %.1fs",
             len(result.successful_pages),
