@@ -287,7 +287,7 @@ mirrors the Python model structure exactly.
 | `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
 | `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
 | `EditorSettings` | `[editor]` | Compact threshold, max loops |
-| `ExtractSettings` | `[extract]` | VLM DPI, VLM batch size, book memory toggle |
+| `ExtractSettings` | `[extract]` | book memory toggle, OCR settings, Granite VLM settings |
 
 Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
 
@@ -335,6 +335,10 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 ```
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
 EPUBFORGE_EXTRACT_OCR_ENABLED              extract.ocr.enabled  (1/true/yes/on = True)
+EPUBFORGE_EXTRACT_GRANITE_ENABLED          extract.granite.enabled  (1/true/yes/on = True)
+EPUBFORGE_EXTRACT_GRANITE_API_URL          extract.granite.api_url
+EPUBFORGE_EXTRACT_GRANITE_API_MODEL        extract.granite.api_model
+EPUBFORGE_EXTRACT_GRANITE_TIMEOUT          extract.granite.timeout_seconds
 ```
 
 ### Test-only / scratch subprocess injection

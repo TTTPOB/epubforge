@@ -58,11 +58,35 @@ class OcrSettings(BaseModel):
     bitmap_area_threshold: float = 0.05
 
 
+class GraniteSettings(BaseModel):
+    """Granite-Docling-258M VLM via llama-server (OpenAI-compatible API).
+
+    Off by default. When `enabled=True`, parse stage runs Granite as a
+    secondary pipeline alongside the standard Docling+OCR primary; the
+    output is persisted as 01_raw_granite.json next to 01_raw.json.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    api_url: str = "http://localhost:8080/v1/chat/completions"
+    api_model: str = "granite-docling"
+    prompt: str = "Convert this page to docling."
+    scale: float = 2.0
+    timeout_seconds: int = 180
+    max_tokens: int = 4096
+    health_check: bool = True
+    # Concurrency MUST be 1 for default llama-server -np 1 config on 8GB WSL2.
+    # Increase only if llama-server -np N is configured to match.
+    concurrency: int = 1
+
+
 class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_book_memory: bool = True
     ocr: OcrSettings = Field(default_factory=OcrSettings)
+    granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +191,10 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
     ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
+    ("EPUBFORGE_EXTRACT_GRANITE_ENABLED", "extract.granite", "enabled", _bool_env),
+    ("EPUBFORGE_EXTRACT_GRANITE_API_URL", "extract.granite", "api_url", str),
+    ("EPUBFORGE_EXTRACT_GRANITE_API_MODEL", "extract.granite", "api_model", str),
+    ("EPUBFORGE_EXTRACT_GRANITE_TIMEOUT", "extract.granite", "timeout_seconds", int),
 ]
 
 _SECTION_MODELS = {
