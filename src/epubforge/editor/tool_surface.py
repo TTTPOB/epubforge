@@ -19,7 +19,7 @@ from epubforge.editor.log import compact_log, count_applied_log_events
 from epubforge.editor.memory import EditMemory
 from epubforge.editor.patches import PatchError, apply_book_patch, validate_book_patch
 from epubforge.editor.prompts import render_prompt
-from epubforge.editor.projection import render_chapter_projection, render_index
+from epubforge.editor.projection import _load_granite_per_page, render_chapter_projection, render_index
 from epubforge.editor.scratch import allocate_script_path, run_script, write_script_stub
 from epubforge.editor.state import (
     Stage3EditorMeta,
@@ -1136,10 +1136,11 @@ def run_projection_export(
                 stale_path.unlink()
 
     exported_at = _timestamp()
+    granite_pages = _load_granite_per_page(paths.work_dir)
     chapter_paths: list[str] = []
     blocks_written = 0
     for chapter, chapter_path in chapter_targets:
-        atomic_write_text(chapter_path, render_chapter_projection(chapter))
+        atomic_write_text(chapter_path, render_chapter_projection(chapter, granite_pages=granite_pages))
         chapter_paths.append(str(chapter_path))
         blocks_written += len(chapter.blocks)
 
