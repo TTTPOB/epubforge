@@ -13,6 +13,7 @@ from typing import Any
 
 from epubforge.config import Config
 from epubforge.observability import get_tracker, stage_timer
+from epubforge.parser import parse_pdf_granite
 
 log = logging.getLogger(__name__)
 
@@ -132,22 +133,101 @@ def run_all(
     log.info("pipeline total: %s", get_tracker().summary_line())
 
 
+def _peek_page_count(raw_json_path: Path) -> int:
+    """Read just the page count from a DoclingDocument JSON file.
+
+    The DoclingDocument JSON keeps a ``pages`` mapping keyed by stringified
+    1-based page numbers; counting its entries gives the page count without
+    a full pydantic deserialize.
+    """
+    data = json.loads(raw_json_path.read_text(encoding="utf-8"))
+    pages = data.get("pages", {})
+    if isinstance(pages, dict):
+        return len(pages)
+    if isinstance(pages, list):
+        return len(pages)
+    return 0
+
+
+def _log_granite_progress(page_no: int, total: int, page_elapsed: float) -> None:
+    """Granite per-page progress callback — log every 10 pages or on the last page."""
+    if page_no % 10 == 0 or page_no == total:
+        log.info(
+            "Granite progress: %d/%d (%.1fs/page)", page_no, total, page_elapsed
+        )
+
+
 def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     from epubforge.parser.docling_parser import parse_pdf
 
     work = cfg.book_work_dir(pdf_path)
     out = _stage_path(work, "01_raw.json")
-    if _skip(out, force, "parse"):
-        _ensure_existing_parse_source(work)
-        return
-    work.mkdir(parents=True, exist_ok=True)
-    source_pdf, _source_meta = _persist_source_pdf(pdf_path, work)
-    log.info("Stage 1: parsing %s...", pdf_path.name)
-    with stage_timer(log, "1 parse"):
-        parse_pdf(
-            source_pdf, out, images_dir=work / "images", ocr_settings=cfg.extract.ocr
+    granite_out = _stage_path(work, "01_raw_granite.json")
+    standard_already_done = out.exists() and not force
+
+    # ---- Standard primary pipeline (always required) ----
+    if standard_already_done:
+        log.info(
+            "skip parse — reusing %s (pass --force-rerun to re-run)", out
         )
-    log.info("  -> %s", out)
+        _ensure_existing_parse_source(work)
+        source_pdf = work / "source" / "source.pdf"
+    else:
+        work.mkdir(parents=True, exist_ok=True)
+        source_pdf, _source_meta = _persist_source_pdf(pdf_path, work)
+        log.info("Stage 1: parsing %s...", pdf_path.name)
+        with stage_timer(log, "1 parse"):
+            parse_pdf(
+                source_pdf,
+                out,
+                images_dir=work / "images",
+                ocr_settings=cfg.extract.ocr,
+            )
+        log.info("  -> %s", out)
+
+    # ---- Granite secondary pipeline (optional, never aborts Stage 1) ----
+    if not cfg.extract.granite.enabled:
+        return
+
+    if granite_out.exists() and not force:
+        log.info(
+            "Granite output exists; skipping (use --force-rerun to redo): %s",
+            granite_out,
+        )
+        return
+
+    try:
+        page_count = _peek_page_count(out)
+        if page_count <= 0:
+            raise RuntimeError(
+                f"Unable to determine page count from {out} (got {page_count})"
+            )
+        log.info(
+            "Stage 1 (granite): converting %d pages via llama-server...",
+            page_count,
+        )
+        with stage_timer(log, "1 parse-granite"):
+            result = parse_pdf_granite(
+                pdf_path=source_pdf,
+                out_path=granite_out,
+                settings=cfg.extract.granite,
+                page_count=page_count,
+                on_progress=_log_granite_progress,
+            )
+        log.info(
+            "Granite parse complete: %d/%d pages succeeded, %.1fs",
+            len(result.successful_pages),
+            page_count,
+            result.elapsed_seconds,
+        )
+        if result.failed_pages:
+            log.warning("Granite failed pages: %s", result.failed_pages)
+    except Exception as exc:  # noqa: BLE001 — secondary pipeline must never abort Stage 1
+        log.warning(
+            "Granite parse failed (secondary pipeline, continuing): %s",
+            exc,
+            exc_info=True,
+        )
 
 
 def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
