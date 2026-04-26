@@ -15,7 +15,7 @@ prompt + image).
 
 | Stage | Name | CLI / `--from` | Input | Output |
 |-------|------|----------------|-------|--------|
-| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON); `source/source.pdf` (hardlinked/copied); `01_raw_granite.json` + `01_raw_granite.manifest.json` (when Granite is enabled) |
+| 1 | parse | `parse` / `--from 1` | PDF | `01_raw.json` (Docling JSON, internally batched by `extract.page_batch_size`, default 20 pages, to bound peak memory under OCR); `source/source.pdf` (hardlinked/copied); `01_raw_granite.json` + `01_raw_granite.manifest.json` (when Granite is enabled) |
 | 2 | classify | `classify` / `--from 2` | `01_raw.json` | `02_pages.json` (simple/complex/toc labels) |
 | 3 | extract | `extract` / `--from 3` | `01_raw.json` + `02_pages.json` + `source/source.pdf` | `03_extract/artifacts/<id>/` + `03_extract/active_manifest.json` |
 | 4 | assemble | `assemble` / `--from 4` | `03_extract/active_manifest.json` | `05_semantic_raw.json` (Semantic IR) |
@@ -314,7 +314,7 @@ mirrors the Python model structure exactly.
 | `ProviderSettings` | `[llm]` / `[vlm]` | Endpoint, API key, model, timeouts, caching |
 | `RuntimeSettings` | `[runtime]` | Concurrency, cache/work/out dirs, log level |
 | `EditorSettings` | `[editor]` | Compact threshold, max loops |
-| `ExtractSettings` | `[extract]` | book memory toggle, OCR settings, Granite VLM settings |
+| `ExtractSettings` | `[extract]` | book memory toggle, Stage 1 page-batch size, OCR settings, Granite VLM settings |
 
 Default VLM model: `google/gemini-flash-3` (max_tokens default: 16384).
 
@@ -361,6 +361,7 @@ EPUBFORGE_EDITOR_MAX_LOOPS                  editor.max_loops
 **`[extract]` submodel:**
 ```
 EPUBFORGE_ENABLE_BOOK_MEMORY               extract.enable_book_memory
+EPUBFORGE_EXTRACT_PAGE_BATCH_SIZE          extract.page_batch_size  (Stage 1 batch size; default 20)
 EPUBFORGE_EXTRACT_OCR_ENABLED              extract.ocr.enabled  (1/true/yes/on = True)
 EPUBFORGE_EXTRACT_GRANITE_ENABLED          extract.granite.enabled  (1/true/yes/on = True)
 EPUBFORGE_EXTRACT_GRANITE_API_URL          extract.granite.api_url

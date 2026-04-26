@@ -182,6 +182,7 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
                 out,
                 images_dir=work / "images",
                 ocr_settings=cfg.extract.ocr,
+                page_batch_size=cfg.extract.page_batch_size,
             )
         log.info("  -> %s", out)
 

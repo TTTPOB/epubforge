@@ -85,6 +85,11 @@ class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_book_memory: bool = True
+    # Stage 1 traditional pipeline batches the PDF into chunks of this many
+    # pages before calling DocumentConverter.convert. With OCR enabled, a
+    # single 50-page convert peaks above 5 GiB RSS on 8 GiB WSL2; batching
+    # keeps peak memory bounded by per-batch cost. Default 20 pages.
+    page_batch_size: int = 20
     ocr: OcrSettings = Field(default_factory=OcrSettings)
     granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
@@ -190,6 +195,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
+    ("EPUBFORGE_EXTRACT_PAGE_BATCH_SIZE", "extract", "page_batch_size", int),
     ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
     ("EPUBFORGE_EXTRACT_GRANITE_ENABLED", "extract.granite", "enabled", _bool_env),
     ("EPUBFORGE_EXTRACT_GRANITE_API_URL", "extract.granite", "api_url", str),
