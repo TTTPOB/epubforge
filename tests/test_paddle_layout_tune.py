@@ -43,7 +43,8 @@ def _write_reuse_artifacts(
         {
             "res": {
                 "boxes": [
-                    {"label": "text", "score": 0.9, "coordinate": [10, 10, 90, 40]}
+                    {"label": "image", "score": 0.95, "coordinate": [10, 10, 90, 40]},
+                    {"label": "text", "score": 0.9, "coordinate": [10, 10, 90, 40]},
                 ]
             }
         },
@@ -113,7 +114,7 @@ def test_extracts_paddle_result_shapes_and_json_values() -> None:
     assert tune.json_ready(ArrayLike()) == [[[1, 2], [5, 2], [5, 4], [1, 4]]]
 
 
-def test_figure_internal_text_is_suppressed_from_body() -> None:
+def test_default_keeps_figure_internal_db_text() -> None:
     layout = [
         {"bbox": [10, 10, 90, 90], "type": "FIGURE", "label": "image", "score": 0.9}
     ]
@@ -133,8 +134,102 @@ def test_figure_internal_text_is_suppressed_from_body() -> None:
     )
     assert [box["type"] for box in boxes].count("FIGURE") == 1
     body_boxes = [box for box in boxes if box["type"] == "BODY"]
+    assert len(body_boxes) == 2
+    assert [box["y0"] for box in body_boxes] == [20.0, 100.0]
+
+
+def test_exclude_policy_removes_figure_internal_db_text() -> None:
+    layout = [
+        {"bbox": [10, 10, 90, 90], "type": "FIGURE", "label": "image", "score": 0.9}
+    ]
+    lines = [
+        {"bbox": [20, 20, 80, 30], "score": 0.9},
+        {"bbox": [10, 100, 90, 110], "score": 0.8},
+    ]
+
+    boxes = tune.build_candidate_boxes(
+        layout,
+        lines,
+        page_number=1,
+        page_height=200,
+        vertical_gap=0.02,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+        figure_text_policy="exclude",
+    )
+
+    body_boxes = [box for box in boxes if box["type"] == "BODY"]
     assert len(body_boxes) == 1
     assert body_boxes[0]["y0"] == 100
+
+
+def test_default_keeps_figure_internal_layout_text() -> None:
+    layout = [
+        {"bbox": [10, 10, 90, 90], "type": "FIGURE", "label": "image", "score": 0.9},
+        {"bbox": [20, 20, 80, 40], "type": "BODY", "label": "text", "score": 0.8},
+        {
+            "bbox": [10, 100, 90, 110],
+            "type": "CAPTION",
+            "label": "figure_caption",
+            "score": 0.8,
+        },
+        {
+            "bbox": [0, 80, 100, 120],
+            "type": "TITLE",
+            "label": "title",
+            "score": 0.7,
+        },
+        {
+            "bbox": [10, 130, 90, 140],
+            "type": "FOOTNOTE",
+            "label": "footnote",
+            "score": 0.8,
+        },
+    ]
+
+    boxes = tune.build_candidate_boxes(
+        layout,
+        [],
+        page_number=1,
+        page_height=200,
+        vertical_gap=0.02,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+    )
+
+    assert [(box["type"], box["y0"]) for box in boxes] == [
+        ("FIGURE", 10.0),
+        ("BODY", 20.0),
+        ("TITLE", 80.0),
+        ("CAPTION", 100.0),
+        ("FOOTNOTE", 130.0),
+    ]
+
+
+def test_exclude_policy_removes_only_figure_internal_layout_text() -> None:
+    layout = [
+        {"bbox": [10, 10, 90, 90], "type": "FIGURE", "label": "image", "score": 0.9},
+        {"bbox": [20, 20, 80, 40], "type": "BODY", "label": "text", "score": 0.8},
+        {"bbox": [0, 80, 100, 120], "type": "TITLE", "label": "title", "score": 0.7},
+    ]
+    boxes = tune.build_candidate_boxes(
+        layout,
+        [],
+        page_number=1,
+        page_height=200,
+        vertical_gap=0.02,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+        figure_text_policy="exclude",
+    )
+
+    assert [(box["type"], box["y0"]) for box in boxes] == [
+        ("FIGURE", 10.0),
+        ("TITLE", 80.0),
+    ]
 
 
 def test_vertical_gap_changes_text_line_aggregation() -> None:
@@ -188,6 +283,190 @@ def test_horizontal_overlap_changes_text_line_aggregation() -> None:
     )
 
 
+def test_figure_obstacle_separates_side_text_from_full_width_text_below() -> None:
+    lines = [
+        {"bbox": [70, 10, 100, 20], "score": 0.8, "type": "BODY"},
+        {"bbox": [70, 25, 100, 35], "score": 0.9, "type": "BODY"},
+        {"bbox": [0, 65, 100, 75], "score": 1.0, "type": "BODY"},
+        {"bbox": [0, 80, 100, 90], "score": 1.0, "type": "BODY"},
+    ]
+    figures = [{"bbox": [0, 0, 60, 60], "type": "FIGURE"}]
+
+    groups = tune.aggregate_text_lines(
+        lines,
+        page_height=1000,
+        vertical_gap=0.04,
+        horizontal_overlap_threshold=0.5,
+        obstacles=figures,
+        obstacle_overlap_threshold=0.5,
+    )
+
+    assert [group["bbox"] for group in groups] == [
+        [70, 10, 100, 35],
+        [0, 65, 100, 90],
+    ]
+    assert [group["line_count"] for group in groups] == [2, 2]
+
+
+def test_existing_small_figure_overlap_does_not_block_text_aggregation() -> None:
+    lines = [
+        {"bbox": [0, 10, 100, 20], "score": 0.8, "type": "BODY"},
+        {"bbox": [0, 25, 100, 35], "score": 0.9, "type": "BODY"},
+    ]
+    figures = [{"bbox": [95, 0, 105, 20], "type": "FIGURE"}]
+
+    groups = tune.aggregate_text_lines(
+        lines,
+        page_height=100,
+        vertical_gap=0.1,
+        horizontal_overlap_threshold=0.5,
+        obstacles=figures,
+        obstacle_overlap_threshold=0.5,
+    )
+
+    assert len(groups) == 1
+    assert groups[0]["bbox"] == [0, 10, 100, 35]
+
+
+def test_figure_obstacle_blocks_inside_to_outside_aggregation() -> None:
+    lines = [
+        {"bbox": [10, 10, 90, 20], "score": 0.8, "type": "BODY"},
+        {"bbox": [10, 110, 90, 120], "score": 0.9, "type": "BODY"},
+    ]
+    figures = [{"bbox": [0, 0, 100, 100], "type": "FIGURE"}]
+
+    groups = tune.aggregate_text_lines(
+        lines,
+        page_height=1000,
+        vertical_gap=0.1,
+        horizontal_overlap_threshold=0.5,
+        obstacles=figures,
+        obstacle_overlap_threshold=0.5,
+    )
+
+    assert [group["bbox"] for group in groups] == [
+        [10, 10, 90, 20],
+        [10, 110, 90, 120],
+    ]
+
+
+def test_figure_obstacle_allows_aggregation_inside_same_figure() -> None:
+    lines = [
+        {"bbox": [10, 10, 90, 20], "score": 0.8, "type": "BODY"},
+        {"bbox": [10, 30, 90, 40], "score": 0.9, "type": "BODY"},
+    ]
+    figures = [{"bbox": [0, 0, 100, 100], "type": "FIGURE"}]
+
+    groups = tune.aggregate_text_lines(
+        lines,
+        page_height=100,
+        vertical_gap=0.2,
+        horizontal_overlap_threshold=0.5,
+        obstacles=figures,
+        obstacle_overlap_threshold=0.5,
+    )
+
+    assert len(groups) == 1
+    assert groups[0]["bbox"] == [10, 10, 90, 40]
+
+
+def test_figure_obstacle_split_is_independent_from_text_policy() -> None:
+    layout = [
+        {"bbox": [0, 0, 60, 60], "type": "FIGURE", "label": "image", "score": 0.9}
+    ]
+    lines = [
+        {"bbox": [70, 10, 100, 20], "score": 0.8},
+        {"bbox": [70, 25, 100, 35], "score": 0.9},
+        {"bbox": [0, 65, 100, 75], "score": 1.0},
+        {"bbox": [0, 80, 100, 90], "score": 1.0},
+    ]
+    common = {
+        "page_number": 1,
+        "page_height": 1000,
+        "vertical_gap": 0.04,
+        "horizontal_overlap_threshold": 0.5,
+        "caption_gap": 0.0,
+        "figure_text_overlap": 0.5,
+        "figure_text_policy": "keep",
+        "candidate_source": "db-only",
+    }
+
+    unsplit = tune.build_candidate_boxes(layout, lines, **common)
+    split = tune.build_candidate_boxes(
+        layout, lines, **common, figure_obstacle_split=True
+    )
+
+    assert len(unsplit) == 1
+    assert len(split) == 2
+    assert all(box["source"] == "db_group" for box in split)
+
+
+@pytest.mark.parametrize(
+    ("candidate_source", "sources", "types"),
+    [
+        ("combined", ["layout", "db_group"], ["FIGURE", "BODY"]),
+        ("layout-only", ["layout", "layout"], ["FIGURE", "BODY"]),
+        ("db-only", ["db_group"], ["BODY"]),
+    ],
+)
+def test_candidate_source_modes(
+    candidate_source: str, sources: list[str], types: list[str]
+) -> None:
+    layout = [
+        {"bbox": [0, 0, 20, 20], "type": "FIGURE", "label": "image", "score": 0.9},
+        {"bbox": [30, 30, 90, 60], "type": "BODY", "label": "text", "score": 0.8},
+    ]
+    lines = [{"bbox": [30, 35, 90, 45], "score": 0.7}]
+
+    boxes = tune.build_candidate_boxes(
+        layout,
+        lines,
+        page_number=1,
+        page_height=100,
+        vertical_gap=0.02,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+        candidate_source=candidate_source,
+    )
+
+    assert [box["source"] for box in boxes] == sources
+    assert [box["type"] for box in boxes] == types
+
+
+def test_combined_db_candidate_retains_layout_and_db_evidence() -> None:
+    layout = [
+        {
+            "bbox": [10, 10, 90, 40],
+            "type": "BODY",
+            "label": "text",
+            "score": 0.9,
+            "evidence_id": "L001",
+        }
+    ]
+    lines = [
+        {"bbox": [12, 12, 88, 20], "score": 0.8, "evidence_id": "D002"},
+        {"bbox": [12, 22, 88, 30], "score": 0.8, "evidence_id": "D001"},
+    ]
+
+    boxes = tune.build_candidate_boxes(
+        layout,
+        lines,
+        page_number=1,
+        page_height=100,
+        vertical_gap=0.1,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+        figure_text_policy="keep",
+        candidate_source="combined",
+    )
+
+    assert len(boxes) == 1
+    assert boxes[0]["source"] == "db_group"
+    assert boxes[0]["source_evidence_ids"] == ["D001", "D002", "L001"]
+
+
 def test_reading_order_and_stable_ids() -> None:
     boxes = [
         {"id": "b", "type": "BODY", "x0": 50, "y0": 10, "x1": 90, "y1": 20, "score": 1},
@@ -218,6 +497,52 @@ def test_reading_order_and_stable_ids() -> None:
     assert [box["id"] for box in overridden] == ["c", "a", "b"]
     assert [box["reading_order"] for box in overridden] == [1, 2, 3]
     assert overridden[1]["x0"] == 10
+
+
+def test_stable_id_uses_full_float_precision_and_normalizes_negative_zero() -> None:
+    first = tune._stable_id(1, "BODY", [0.001, 1.0, 2.0, 3.0])
+    second = tune._stable_id(1, "BODY", [0.002, 1.0, 2.0, 3.0])
+
+    assert first != second
+    assert tune._stable_id(1, "BODY", [-0.0, 1.0, 2.0, 3.0]) == tune._stable_id(
+        1, "BODY", [0.0, 1.0, 2.0, 3.0]
+    )
+
+
+def test_build_candidates_deduplicates_equal_geometry_and_merges_evidence() -> None:
+    layout = [
+        {
+            "bbox": [10, 10, 90, 90],
+            "type": "FIGURE",
+            "label": "image",
+            "score": 0.8,
+            "evidence_id": "L001",
+        },
+        {
+            "bbox": [10, 10, 90, 90],
+            "type": "FIGURE",
+            "label": "image",
+            "score": 0.9,
+            "evidence_id": "L002",
+        },
+    ]
+
+    boxes = tune.build_candidate_boxes(
+        layout,
+        [],
+        page_number=1,
+        page_height=100,
+        vertical_gap=0.02,
+        horizontal_overlap_threshold=0.5,
+        caption_gap=0.02,
+        figure_text_overlap=0.5,
+        candidate_source="layout-only",
+    )
+
+    assert len(boxes) == 1
+    assert boxes[0]["source_evidence_ids"] == ["L001", "L002"]
+    assert boxes[0]["sources"] == ["layout"]
+    assert boxes[0]["score"] == 0.9
 
 
 def test_reading_order_override_requires_exact_ids() -> None:
@@ -368,6 +693,98 @@ def _model_args(tmp_path: Path):
     )
 
 
+def test_new_cli_defaults(tmp_path: Path) -> None:
+    args = _model_args(tmp_path)
+
+    assert args.figure_text_policy == "keep"
+    assert args.figure_obstacle_split is False
+    assert args.candidate_source == "combined"
+    assert args.page_patch == []
+
+
+def test_new_cli_explicit_values(tmp_path: Path) -> None:
+    args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(tmp_path / "book.pdf"),
+            "--pages",
+            "1",
+            "--output",
+            str(tmp_path),
+            "--figure-text-policy",
+            "exclude",
+            "--figure-obstacle-split",
+            "--candidate-source",
+            "db-only",
+        ]
+    )
+
+    assert args.figure_text_policy == "exclude"
+    assert args.figure_obstacle_split is True
+    assert args.candidate_source == "db-only"
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--caption-gap", "inf"),
+        ("--db-unclip-ratio", "nan"),
+        ("--layout-threshold", "nan"),
+        ("--figure-text-overlap", "inf"),
+    ],
+)
+def test_cli_rejects_nonfinite_float_parameters(
+    tmp_path: Path, option: str, value: str
+) -> None:
+    parser = tune.build_parser()
+    args = parser.parse_args(
+        [
+            "--pdf",
+            str(tmp_path / "book.pdf"),
+            "--pages",
+            "1",
+            "--output",
+            str(tmp_path),
+            option,
+            value,
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        tune._validate_args(parser, args)
+
+
+def test_page_patch_argument_parsing(tmp_path: Path) -> None:
+    patch = tmp_path / "page.py"
+    patch.write_text(
+        "def patch_page(context):\n    return context['candidate_boxes']\n"
+    )
+
+    assert tune.parse_page_patch(f"105={patch}") == (105, patch.resolve())
+    with pytest.raises(ValueError, match="PAGE=PATH"):
+        tune.parse_page_patch("105")
+    with pytest.raises(ValueError, match="does not exist"):
+        tune.parse_page_patch(f"105={tmp_path / 'missing.py'}")
+
+
+@pytest.mark.parametrize(
+    ("pages", "patch_pages", "message"),
+    [([1], [1, 1], "duplicate page patch"), ([1], [2], "unrequested page")],
+)
+def test_page_patch_rejects_duplicate_and_unrequested_pages(
+    tmp_path: Path, pages: list[int], patch_pages: list[int], message: str
+) -> None:
+    patch = tmp_path / "page.py"
+    patch.write_text(
+        "def patch_page(context):\n    return context['candidate_boxes']\n"
+    )
+
+    with pytest.raises(tune.TuneError, match=message):
+        tune._resolve_page_patches(
+            [(page_number, patch) for page_number in patch_pages], pages
+        )
+
+
 def test_model_construction_error_has_context_and_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -491,5 +908,370 @@ def test_execute_reuse_raw_does_not_load_models(
 
     assert run["pages"][0]["reused_raw"] is True
     candidate = json.loads((page_dir / "candidate.json").read_text(encoding="utf-8"))
-    assert candidate["boxes"][0]["type"] == "BODY"
+    body = next(box for box in candidate["boxes"] if box["type"] == "BODY")
+    assert body["source"] == "db_group"
+    assert body["source_evidence_ids"] == ["D001", "L002"]
+    assert body["figure_relations"] == [
+        {
+            "figure_evidence_id": "L001",
+            "overlap_ratio": 1.0,
+            "contained": True,
+            "meets_threshold": True,
+        }
+    ]
+    assert candidate["schema_version"] == tune.CANDIDATE_SCHEMA_VERSION
+    assert candidate["postprocess_params"] == {
+        "vertical_gap": 0.012,
+        "horizontal_overlap": 0.5,
+        "caption_gap": 0.025,
+        "figure_text_overlap": 0.5,
+        "figure_text_policy": "keep",
+        "figure_obstacle_split": False,
+        "candidate_source": "combined",
+    }
+    evidence = json.loads((page_dir / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["layout_boxes"][0]["evidence_id"] == "L001"
+    assert evidence["layout_boxes"][1]["evidence_id"] == "L002"
+    assert evidence["db_lines"][0]["evidence_id"] == "D001"
+    assert (
+        evidence["db_lines"][0]["figure_relations"][0]["figure_evidence_id"] == "L001"
+    )
+    assert (page_dir / "layout_raw.jpg").read_bytes().startswith(b"\xff\xd8")
+    assert (page_dir / "text_raw.jpg").read_bytes().startswith(b"\xff\xd8")
     assert (page_dir / "annotated.jpg").read_bytes().startswith(b"\xff\xd8")
+    assert candidate["artifacts"]["evidence"] == "evidence.json"
+    assert run["pages"][0]["artifacts"]["layout_evidence_image"] == (
+        "page-0001/layout_raw.jpg"
+    )
+
+
+def test_reuse_raw_page_patch_targets_one_page_and_records_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "two-pages.pdf"
+    pdf = fitz.open()
+    pdf.new_page(width=100, height=120)
+    pdf.new_page(width=100, height=120)
+    pdf.save(pdf_path)
+    pdf.close()
+    patch_path = tmp_path / "page-2-patch.py"
+    patch_path.write_text(
+        """def patch_page(context):
+    assert context["page"] == 2
+    assert context["image"] == {"width": 100, "height": 120}
+    assert context["layout_evidence"][0]["evidence_id"] == "L001"
+    assert context["db_evidence"][0]["evidence_id"] == "D001"
+    assert context["normalized_layout_boxes"][0]["evidence_id"] == "L001"
+    assert context["normalized_text_lines"][0]["evidence_id"] == "D001"
+    assert context["postprocess_params"]["candidate_source"] == "combined"
+    context["layout_evidence"][0]["label"] = "mutated-copy"
+    body = next(box for box in context["candidate_boxes"] if box["type"] == "BODY")
+    body["type"] = "TITLE"
+    return [body]
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "run"
+    args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(pdf_path),
+            "--pages",
+            "1,2",
+            "--output",
+            str(output),
+            "--reuse-raw",
+            "--page-patch",
+            f"2={patch_path}",
+        ]
+    )
+    inference_params = tune._inference_params(args, tune._file_sha256(pdf_path))
+    _write_reuse_artifacts(output / "page-0001", inference_params, page_number=1)
+    _write_reuse_artifacts(output / "page-0002", inference_params, page_number=2)
+
+    def fail_load_models(_args, _source_path, _page_number):
+        raise AssertionError("reuse path loaded Paddle models")
+
+    monkeypatch.setattr(tune, "load_models", fail_load_models)
+    run = tune.execute(args)
+
+    page_one = json.loads(
+        (output / "page-0001" / "candidate.json").read_text(encoding="utf-8")
+    )
+    page_two = json.loads(
+        (output / "page-0002" / "candidate.json").read_text(encoding="utf-8")
+    )
+    assert page_one["page_patch"] is None
+    assert all(box["source"] != "page_patch" for box in page_one["boxes"])
+    assert len(page_two["boxes"]) == 1
+    patched = page_two["boxes"][0]
+    assert patched["type"] == "TITLE"
+    assert patched["source"] == "page_patch"
+    assert patched["id"] == tune._stable_id(
+        2, "TITLE", [patched["x0"], patched["y0"], patched["x1"], patched["y1"]]
+    )
+    expected_record = {
+        "path": str(patch_path.resolve()),
+        "sha256": tune._file_sha256(patch_path),
+    }
+    assert page_two["page_patch"] == expected_record
+    assert run["pages"][1]["page_patch"] == expected_record
+    assert run["page_patches"] == [{"page": 2, **expected_record}]
+    evidence = json.loads(
+        (output / "page-0002" / "evidence.json").read_text(encoding="utf-8")
+    )
+    assert evidence["layout_boxes"][0]["label"] == "image"
+
+
+@pytest.mark.parametrize(
+    ("patch_source", "message"),
+    [
+        ("def patch_page(context):\n    return {'bad': True}\n", "expected a list"),
+        (
+            """def patch_page(context):
+    return [{'type': 'UNKNOWN', 'x0': 0, 'y0': 0, 'x1': 10, 'y1': 10}]
+""",
+            "unsupported type",
+        ),
+        (
+            """def patch_page(context):
+    return [{'type': 'BODY', 'x0': 0, 'y0': 0, 'x1': 101, 'y1': 10,
+             'source_evidence_ids': ['D001']}]
+""",
+            "outside the CropBox",
+        ),
+    ],
+)
+def test_page_patch_rejects_invalid_return_and_bounds(
+    tmp_path: Path, patch_source: str, message: str
+) -> None:
+    patch_path = tmp_path / "invalid-patch.py"
+    patch_path.write_text(patch_source, encoding="utf-8")
+
+    with pytest.raises(tune.TuneError, match=message):
+        tune.apply_page_patch(
+            patch_path,
+            page_number=1,
+            width=100,
+            height=120,
+            evidence={
+                "layout_boxes": [],
+                "db_lines": [{"evidence_id": "D001"}],
+            },
+            layout_boxes=[],
+            text_lines=[],
+            candidate_boxes=[],
+            postprocess_params={},
+        )
+
+
+def test_page_patch_exception_has_page_path_and_cause(tmp_path: Path) -> None:
+    patch_path = tmp_path / "failing-patch.py"
+    patch_path.write_text(
+        "def patch_page(context):\n    raise RuntimeError('private detail')\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(tune.TuneError) as caught:
+        tune.apply_page_patch(
+            patch_path,
+            page_number=7,
+            width=100,
+            height=120,
+            evidence={"layout_boxes": [], "db_lines": []},
+            layout_boxes=[],
+            text_lines=[],
+            candidate_boxes=[],
+            postprocess_params={},
+        )
+
+    assert "page=7" in str(caught.value)
+    assert str(patch_path) in str(caught.value)
+    assert "private detail" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+def test_page_patch_deduplicates_equal_geometry_and_merges_evidence(
+    tmp_path: Path,
+) -> None:
+    patch_path = tmp_path / "duplicate-patch.py"
+    patch_path.write_text(
+        """def patch_page(context):
+    return [
+        {'type': 'BODY', 'x0': 1, 'y0': 2, 'x1': 20, 'y1': 10,
+         'source_evidence_ids': ['D001']},
+        {'type': 'BODY', 'x0': 1, 'y0': 2, 'x1': 20, 'y1': 10,
+         'source_evidence_ids': ['D002']},
+    ]
+""",
+        encoding="utf-8",
+    )
+
+    boxes, _record = tune.apply_page_patch(
+        patch_path,
+        page_number=1,
+        width=100,
+        height=120,
+        evidence={
+            "layout_boxes": [],
+            "db_lines": [{"evidence_id": "D001"}, {"evidence_id": "D002"}],
+        },
+        layout_boxes=[],
+        text_lines=[],
+        candidate_boxes=[],
+        postprocess_params={},
+    )
+
+    assert len(boxes) == 1
+    assert boxes[0]["source_evidence_ids"] == ["D001", "D002"]
+    assert boxes[0]["source"] == "page_patch"
+    assert boxes[0]["sources"] == ["page_patch"]
+
+
+def test_page_patch_hashes_and_executes_the_same_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_path = tmp_path / "single-read-patch.py"
+    original_source = b"""def patch_page(context):
+    return [{'type': 'BODY', 'x0': 1, 'y0': 2, 'x1': 20, 'y1': 10,
+             'source_evidence_ids': ['D001']}]
+"""
+    replacement_source = b"""def patch_page(context):
+    raise RuntimeError('replacement executed')
+"""
+    patch_path.write_bytes(original_source)
+    real_read_bytes = Path.read_bytes
+    reads: list[Path] = []
+
+    def replace_after_read(path: Path) -> bytes:
+        source = real_read_bytes(path)
+        if path == patch_path:
+            reads.append(path)
+            path.write_bytes(replacement_source)
+        return source
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    boxes, record = tune.apply_page_patch(
+        patch_path,
+        page_number=1,
+        width=100,
+        height=120,
+        evidence={
+            "layout_boxes": [],
+            "db_lines": [{"evidence_id": "D001"}],
+        },
+        layout_boxes=[],
+        text_lines=[],
+        candidate_boxes=[],
+        postprocess_params={},
+    )
+
+    assert len(boxes) == 1
+    assert reads == [patch_path]
+    assert record == {
+        "path": str(patch_path),
+        "sha256": tune.hashlib.sha256(original_source).hexdigest(),
+    }
+    assert tune._file_sha256(patch_path) != record["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("provenance", "message"),
+    [
+        ("'sources': 'layout', 'source_evidence_ids': ['D001']", "sources must"),
+        (
+            "'sources': ['unknown'], 'source_evidence_ids': ['D001']",
+            "sources contain an unknown value",
+        ),
+        ("'source_evidence_ids': 'D001'", "non-empty list"),
+        ("'sources': []", "non-empty list"),
+        ("'source_evidence_ids': ['D999']", "unknown evidence IDs"),
+    ],
+)
+def test_page_patch_rejects_invalid_provenance(
+    tmp_path: Path, provenance: str, message: str
+) -> None:
+    patch_path = tmp_path / "invalid-provenance.py"
+    patch_path.write_text(
+        "def patch_page(context):\n"
+        "    return [{'type': 'BODY', 'x0': 1, 'y0': 2, 'x1': 20, 'y1': 10, "
+        f"{provenance}}}]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(tune.TuneError, match=message):
+        tune.apply_page_patch(
+            patch_path,
+            page_number=1,
+            width=100,
+            height=120,
+            evidence={
+                "layout_boxes": [],
+                "db_lines": [{"evidence_id": "D001"}],
+            },
+            layout_boxes=[],
+            text_lines=[],
+            candidate_boxes=[],
+            postprocess_params={},
+        )
+
+
+def test_page_patch_recomputes_figure_relations_from_evidence(tmp_path: Path) -> None:
+    patch_path = tmp_path / "relation-patch.py"
+    patch_path.write_text(
+        """def patch_page(context):
+    return [{'type': 'BODY', 'x0': 10, 'y0': 10, 'x1': 20, 'y1': 20,
+             'source_evidence_ids': ['D001'],
+             'figure_relations': [{'figure_evidence_id': 'fake'}]}]
+""",
+        encoding="utf-8",
+    )
+
+    boxes, _record = tune.apply_page_patch(
+        patch_path,
+        page_number=1,
+        width=100,
+        height=120,
+        evidence={
+            "layout_boxes": [
+                {
+                    "evidence_id": "L001",
+                    "type": "FIGURE",
+                    "bbox": [0, 0, 50, 50],
+                }
+            ],
+            "db_lines": [{"evidence_id": "D001"}],
+        },
+        layout_boxes=[],
+        text_lines=[],
+        candidate_boxes=[],
+        postprocess_params={"figure_text_overlap": 0.5},
+    )
+
+    assert boxes[0]["sources"] == ["page_patch"]
+    assert boxes[0]["source_evidence_ids"] == ["D001"]
+    assert boxes[0]["figure_relations"] == [
+        {
+            "figure_evidence_id": "L001",
+            "overlap_ratio": 1.0,
+            "contained": True,
+            "meets_threshold": True,
+        }
+    ]
+
+
+def test_candidate_deduplication_rejects_string_provenance() -> None:
+    box = {
+        "id": "candidate",
+        "type": "BODY",
+        "x0": 1,
+        "y0": 2,
+        "x1": 20,
+        "y1": 10,
+        "source": "layout",
+        "sources": "layout",
+        "source_evidence_ids": "L001",
+    }
+
+    with pytest.raises(tune.TuneError, match="sources must be a list"):
+        tune._deduplicate_candidate_boxes([box])
