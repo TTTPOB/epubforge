@@ -10,7 +10,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # ---------------------------------------------------------------------------
 # Submodels — extra="forbid" so unknown TOML keys fail fast
 # ---------------------------------------------------------------------------
@@ -28,6 +27,25 @@ class ProviderSettings(BaseModel):
     max_tokens: int | None = None
     prompt_caching: bool = True
     extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class MineruSettings(BaseModel):
+    """Settings for the MinerU official cloud API."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str | None = None
+    base_url: str = "https://mineru.net/api/v4"
+    model_version: Literal["pipeline", "vlm"] = "vlm"
+    timeout_seconds: float = Field(default=300.0, gt=0)
+    poll_interval_seconds: float = Field(default=2.0, gt=0)
+    max_polls: int = Field(default=300, gt=0)
+    max_download_bytes: int = Field(default=2 * 1024**3, gt=0)
+    max_uncompressed_bytes: int = Field(default=8 * 1024**3, gt=0)
+    is_ocr: bool = False
+    enable_formula: bool = True
+    enable_table: bool = True
+    language: Literal["ch", "en", "korean", "japan"] = "ch"
 
 
 class RuntimeSettings(BaseModel):
@@ -123,6 +141,7 @@ class Config(BaseSettings):
             model="google/gemini-flash-3", max_tokens=16384
         )
     )
+    mineru: MineruSettings = Field(default_factory=MineruSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     editor: EditorSettings = Field(default_factory=EditorSettings)
     extract: ExtractSettings = Field(default_factory=ExtractSettings)
@@ -138,6 +157,13 @@ class Config(BaseSettings):
         if not resolved.api_key:
             raise SystemExit(
                 "VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)"
+            )
+
+    def require_mineru(self) -> None:
+        if not self.mineru.api_key:
+            raise SystemExit(
+                "MinerU API key is required "
+                "(set [mineru].api_key or EPUBFORGE_MINERU_API_KEY)"
             )
 
     def resolved_vlm(self) -> ProviderSettings:
@@ -200,6 +226,28 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
         lambda v: None if v == "" else int(v),
     ),
     ("EPUBFORGE_VLM_PROMPT_CACHING", "vlm", "prompt_caching", _bool_env),
+    ("EPUBFORGE_MINERU_API_KEY", "mineru", "api_key", str),
+    ("EPUBFORGE_MINERU_BASE_URL", "mineru", "base_url", str),
+    ("EPUBFORGE_MINERU_MODEL_VERSION", "mineru", "model_version", str),
+    ("EPUBFORGE_MINERU_TIMEOUT", "mineru", "timeout_seconds", float),
+    (
+        "EPUBFORGE_MINERU_POLL_INTERVAL_SECONDS",
+        "mineru",
+        "poll_interval_seconds",
+        float,
+    ),
+    ("EPUBFORGE_MINERU_MAX_POLLS", "mineru", "max_polls", int),
+    ("EPUBFORGE_MINERU_MAX_DOWNLOAD_BYTES", "mineru", "max_download_bytes", int),
+    (
+        "EPUBFORGE_MINERU_MAX_UNCOMPRESSED_BYTES",
+        "mineru",
+        "max_uncompressed_bytes",
+        int,
+    ),
+    ("EPUBFORGE_MINERU_IS_OCR", "mineru", "is_ocr", _bool_env),
+    ("EPUBFORGE_MINERU_ENABLE_FORMULA", "mineru", "enable_formula", _bool_env),
+    ("EPUBFORGE_MINERU_ENABLE_TABLE", "mineru", "enable_table", _bool_env),
+    ("EPUBFORGE_MINERU_LANGUAGE", "mineru", "language", str),
     ("EPUBFORGE_RUNTIME_CONCURRENCY", "runtime", "concurrency", int),
     ("EPUBFORGE_RUNTIME_CACHE_DIR", "runtime", "cache_dir", Path),
     ("EPUBFORGE_RUNTIME_WORK_DIR", "runtime", "work_dir", Path),
@@ -225,6 +273,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
 _SECTION_MODELS = {
     "llm": ProviderSettings,
     "vlm": ProviderSettings,
+    "mineru": MineruSettings,
     "runtime": RuntimeSettings,
     "editor": EditorSettings,
     "extract": ExtractSettings,
@@ -268,7 +317,7 @@ def load_config(config_path: Path | None = None) -> Config:
             toml_data = tomllib.load(fh)
         # Accept only known top-level sections; unknown keys at the top level are silently
         # ignored (Config.model_config extra="ignore" handles this at parse time too).
-        for key in ("llm", "vlm", "runtime", "editor", "extract"):
+        for key in ("llm", "vlm", "mineru", "runtime", "editor", "extract"):
             if key in toml_data:
                 base[key] = dict(toml_data[key])
 

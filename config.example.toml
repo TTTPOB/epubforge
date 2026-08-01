@@ -21,6 +21,20 @@ timeout_seconds = 300   # VLM calls with images can be slow; keep >= 300
 max_tokens      = 16384  # default 16384; increase if complex pages are truncated
 # prompt_caching = true
 
+[mineru]
+api_key               = ""  # required for MinerU API calls; or set EPUBFORGE_MINERU_API_KEY
+base_url              = "https://mineru.net/api/v4"
+model_version         = "vlm"  # pipeline | vlm
+timeout_seconds       = 300
+poll_interval_seconds = 2
+max_polls             = 300
+max_download_bytes    = 2147483648  # 2 GiB compressed ZIP limit
+max_uncompressed_bytes = 8589934592 # 8 GiB extracted ZIP limit
+is_ocr                = false
+enable_formula        = true
+enable_table          = true
+language              = "ch"  # ch | en | korean | japan
+
 [runtime]
 concurrency = 4
 cache_dir   = "work/.cache"
