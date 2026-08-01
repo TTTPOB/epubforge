@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "epubforge"
 version = "0.1.0"
-description = "LLM/VLM-assisted PDF to EPUB converter for books and theses"
+description = "LLM-assisted PDF to EPUB converter for books and theses"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -41,7 +41,3 @@ packages = ["src/epubforge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "granite_server: requires a running llama-server with Granite-Docling-258M (see docs/explorations/granite-llama-server-spike.md)",
-]
-addopts = "-m 'not granite_server'"

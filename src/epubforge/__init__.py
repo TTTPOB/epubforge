@@ -1,1 +1,1 @@
-"""epubforge: LLM/VLM-assisted PDF to EPUB converter."""
+"""epubforge: MinerU-based PDF to EPUB converter."""

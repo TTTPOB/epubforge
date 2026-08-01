@@ -59,7 +59,7 @@ class AgentOutput(StrictModel):
     memory_patches: list[MemoryPatch] = Field(default_factory=list)
     open_questions: list[OpenQuestion] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-    # evidence_refs validated by _validate_agent_output_impl when paths is provided
+    # Evidence references remain opaque to the editor validator.
     evidence_refs: list[str] = Field(default_factory=list)
 
     @field_validator("output_id")
@@ -429,28 +429,6 @@ def _validate_agent_output_impl(
                 errors.append(
                     f"open_questions[{i}] (q_id={q.q_id}): context_uid not found: {uid}"
                 )
-
-    # Phase 8: evidence_refs validation
-    if paths is not None:
-        from epubforge.editor.vlm_evidence import validate_evidence_refs
-
-        # Output-level evidence_refs
-        ref_errors = validate_evidence_refs(output.evidence_refs, paths)
-        errors.extend(ref_errors)
-
-        # Per-patch evidence_refs
-        for i, patch in enumerate(output.patches):
-            if patch.evidence_refs:
-                patch_ref_errors = validate_evidence_refs(patch.evidence_refs, paths)
-                for err in patch_ref_errors:
-                    errors.append(f"patches[{i}]: {err}")
-
-        # Per-compiled-patch evidence_refs (from PatchCommand compilation)
-        for i, patch in enumerate(compiled_patches):
-            if patch.evidence_refs:
-                patch_ref_errors = validate_evidence_refs(patch.evidence_refs, paths)
-                for err in patch_ref_errors:
-                    errors.append(f"compiled_patches[{i}]: {err}")
 
     return AgentOutputValidationResult(
         errors=errors,

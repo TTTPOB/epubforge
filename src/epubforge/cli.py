@@ -14,7 +14,7 @@ from epubforge.observability import log_path_for, setup_logging
 
 app = typer.Typer(
     name="epubforge",
-    help="LLM/VLM-assisted PDF → EPUB converter for books and theses.",
+    help="LLM-assisted PDF → EPUB converter for books and theses.",
     no_args_is_help=True,
 )
 console = Console()
@@ -81,10 +81,8 @@ def _init_logging(
 
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
     log.info(
-        "epubforge startup: model=%s/%s cache_dir=%s editor=compact:%d/max_loops:%d"
-        " stage3_mode=docling log=%s",
+        "epubforge startup: model=%s cache_dir=%s editor=compact:%d/max_loops:%d log=%s",
         cfg.llm.model,
-        cfg.vlm.model,
         cfg.runtime.cache_dir,
         cfg.editor.compact_threshold,
         cfg.editor.max_loops,
@@ -172,63 +170,9 @@ def parse(
     ctx: typer.Context,
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
-    with_granite: bool = typer.Option(
-        False,
-        "--with-granite",
-        "-g",
-        help="Enable Granite VLM secondary pipeline for this run (overrides config).",
-    ),
-    no_granite: bool = typer.Option(
-        False,
-        "--no-granite",
-        help="Disable Granite for this run, even if config has it enabled.",
-    ),
-    force_granite: bool = typer.Option(
-        False,
-        "--force-granite",
-        help=(
-            "Re-run Granite even if 01_raw_granite.json exists. "
-            "Implies --with-granite. Note: simplified implementation — "
-            "equivalent to -f (re-runs all of stage 1)."
-        ),
-    ),
 ) -> None:
-    """Stage 1 — Docling parse → work/<name>/01_raw.json."""
-    # Mutual-exclusion guard
-    if with_granite and no_granite:
-        raise typer.BadParameter("--with-granite and --no-granite are mutually exclusive")
-
+    """Stage 1 — MinerU extraction → work/<name>/01_raw.zip."""
     cfg = _get_config(ctx)
-
-    # Granite override resolution (immutable update via model_copy)
-    if no_granite:
-        cfg = cfg.model_copy(
-            update={
-                "extract": cfg.extract.model_copy(
-                    update={
-                        "granite": cfg.extract.granite.model_copy(
-                            update={"enabled": False}
-                        )
-                    }
-                )
-            }
-        )
-    elif with_granite or force_granite:
-        cfg = cfg.model_copy(
-            update={
-                "extract": cfg.extract.model_copy(
-                    update={
-                        "granite": cfg.extract.granite.model_copy(
-                            update={"enabled": True}
-                        )
-                    }
-                )
-            }
-        )
-
-    # Simplified: --force-granite is equivalent to -f (re-runs all of stage 1)
-    if force_granite:
-        force = True
 
     app_ctx = ctx.find_root().obj
     log_file_override = (
@@ -265,7 +209,7 @@ def extract(
         None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
     ),
 ) -> None:
-    """Stage 3 — Docling extraction → work/<name>/03_extract/."""
+    """Stage 3 extraction → work/<name>/03_extract/."""
     cfg = _get_config(ctx)
     app_ctx = ctx.find_root().obj
     log_file_override = (

@@ -115,11 +115,11 @@ def _count_images(messages: list[ChatCompletionMessageParam]) -> int:
 class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
-    def __init__(self, cfg: Config, *, use_vlm: bool = False) -> None:
-        provider = cfg.resolved_vlm() if use_vlm else cfg.llm
+    def __init__(self, cfg: Config) -> None:
+        provider = cfg.llm
         self.base_url = provider.base_url.rstrip("/")
         self.model = provider.model
-        self._kind = "VLM" if use_vlm else "LLM"
+        self._kind = "LLM"
         self.timeout = provider.timeout_seconds
         self.max_tokens = provider.max_tokens
         self.extra_body: dict[str, Any] = provider.extra_body

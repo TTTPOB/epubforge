@@ -34,9 +34,6 @@ def _make_cfg(
         runtime=RuntimeSettings(work_dir=tmp_path / "work"),
         extract=ExtractSettings(),
         llm={"api_key": api_key} if api_key else {},
-        vlm={"api_key": api_key, "model": "google/gemini-flash-3", "max_tokens": 16384}
-        if api_key
-        else {"model": "google/gemini-flash-3", "max_tokens": 16384},
     )
 
 
@@ -203,7 +200,7 @@ class TestReuseActiveArtifact:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """When the active artifact matches desired, neither extractor nor require_vlm is called."""
+        """When the active artifact matches desired, the extractor is not called."""
         cfg = _make_cfg(tmp_path)
         work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
@@ -219,14 +216,10 @@ class TestReuseActiveArtifact:
         def fake_require_llm(self: Any) -> None:
             raise AssertionError("require_llm should NOT be called on reuse")
 
-        def fake_require_vlm(self: Any) -> None:
-            raise AssertionError("require_vlm should NOT be called on reuse")
-
         monkeypatch.setattr(
             "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
         )
         monkeypatch.setattr(Config, "require_llm", fake_require_llm)
-        monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
 
         from epubforge.pipeline import run_extract
 
@@ -314,186 +307,11 @@ class TestReuseActiveArtifact:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Skip-VLM does not require provider keys
-# ---------------------------------------------------------------------------
-
-
-class TestSkipVlmNoProviderRequired:
-    def test_docling_extraction_does_not_call_require_vlm(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Docling extraction must not invoke require_llm or require_vlm."""
-        cfg = _make_cfg(tmp_path)
-        work = cfg.book_work_dir(tmp_path / "book.pdf")
-        _setup_work_dir(work)
-
-        provider_calls: list[str] = []
-
-        def fake_require_llm(self: Any) -> None:
-            provider_calls.append("require_llm")
-
-        def fake_require_vlm(self: Any) -> None:
-            provider_calls.append("require_vlm")
-
-        def fake_extract_skip_vlm(
-            raw_path: Path,
-            pages_path: Path,
-            out_dir: Path,
-            *,
-            force: bool = False,
-            page_filter: Any = None,
-            **kwargs: Any,
-        ) -> Stage3ExtractionResult:
-            unit = out_dir / "unit_0000.json"
-            unit.write_text("{}", encoding="utf-8")
-            audit = out_dir / "audit_notes.json"
-            audit.write_text("[]", encoding="utf-8")
-            bm = out_dir / "book_memory.json"
-            bm.write_text("{}", encoding="utf-8")
-            ei = out_dir / "evidence_index.json"
-            ei.write_text("{}", encoding="utf-8")
-            return Stage3ExtractionResult(
-                mode="docling",
-                unit_files=[unit],
-                audit_notes_path=audit,
-                book_memory_path=bm,
-                evidence_index_path=ei,
-                selected_pages=[1, 2],
-                toc_pages=[3],
-                complex_pages=[2],
-            )
-
-        monkeypatch.setattr(Config, "require_llm", fake_require_llm)
-        monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
-        monkeypatch.setattr(
-            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
-        )
-
-        from epubforge.pipeline import run_extract
-
-        caplog.set_level(logging.INFO, logger="epubforge.pipeline")
-        run_extract(tmp_path / "book.pdf", cfg)
-
-        assert provider_calls == [], f"Unexpected provider calls: {provider_calls}"
-        assert "provider_required=False" in caplog.text
-
-    def test_docling_logs_correct_mode_message(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        cfg = _make_cfg(tmp_path)
-        work = cfg.book_work_dir(tmp_path / "book.pdf")
-        _setup_work_dir(work)
-
-        def fake_extract_skip_vlm(
-            raw_path: Path,
-            pages_path: Path,
-            out_dir: Path,
-            *,
-            force: bool = False,
-            page_filter: Any = None,
-            **kwargs: Any,
-        ) -> Stage3ExtractionResult:
-            unit = out_dir / "unit_0000.json"
-            unit.write_text("{}", encoding="utf-8")
-            audit = out_dir / "audit_notes.json"
-            audit.write_text("[]", encoding="utf-8")
-            bm = out_dir / "book_memory.json"
-            bm.write_text("{}", encoding="utf-8")
-            ei = out_dir / "evidence_index.json"
-            ei.write_text("{}", encoding="utf-8")
-            return Stage3ExtractionResult(
-                mode="docling",
-                unit_files=[unit],
-                audit_notes_path=audit,
-                book_memory_path=bm,
-                evidence_index_path=ei,
-                selected_pages=[1, 2],
-                toc_pages=[3],
-                complex_pages=[2],
-            )
-
-        monkeypatch.setattr(
-            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
-        )
-
-        from epubforge.pipeline import run_extract
-
-        caplog.set_level(logging.INFO, logger="epubforge.pipeline")
-        run_extract(tmp_path / "book.pdf", cfg)
-
-        assert "Docling evidence draft" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Pipeline never requires a VLM/LLM provider
+# Test 2: Pipeline extraction behavior
 # ---------------------------------------------------------------------------
 
 
 class TestNoProviderRequired:
-    def test_extraction_never_calls_require_vlm(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """run_extract must never call require_llm or require_vlm — pipeline is docling-only."""
-        cfg = _make_cfg(tmp_path)
-        work = cfg.book_work_dir(tmp_path / "book.pdf")
-        _setup_work_dir(work)
-
-        provider_calls: list[str] = []
-
-        def fake_require_llm(self: Any) -> None:
-            provider_calls.append("require_llm")
-
-        def fake_require_vlm(self: Any) -> None:
-            provider_calls.append("require_vlm")
-
-        def fake_extract_skip_vlm(
-            raw_path: Path,
-            pages_path: Path,
-            out_dir: Path,
-            *,
-            force: bool = False,
-            page_filter: Any = None,
-            **kwargs: Any,
-        ) -> Stage3ExtractionResult:
-            unit = out_dir / "unit_0000.json"
-            unit.write_text("{}", encoding="utf-8")
-            audit = out_dir / "audit_notes.json"
-            audit.write_text("[]", encoding="utf-8")
-            bm = out_dir / "book_memory.json"
-            bm.write_text("{}", encoding="utf-8")
-            ei = out_dir / "evidence_index.json"
-            ei.write_text("{}", encoding="utf-8")
-            return Stage3ExtractionResult(
-                mode="docling",
-                unit_files=[unit],
-                audit_notes_path=audit,
-                book_memory_path=bm,
-                evidence_index_path=ei,
-                selected_pages=[1, 2],
-                toc_pages=[3],
-                complex_pages=[2],
-            )
-
-        monkeypatch.setattr(Config, "require_llm", fake_require_llm)
-        monkeypatch.setattr(Config, "require_vlm", fake_require_vlm)
-        monkeypatch.setattr(
-            "epubforge.extract_skip_vlm.extract_skip_vlm", fake_extract_skip_vlm
-        )
-
-        from epubforge.pipeline import run_extract
-
-        run_extract(tmp_path / "book.pdf", cfg)
-
-        assert provider_calls == [], f"Unexpected provider calls: {provider_calls}"
-
     def test_extraction_logs_provider_required_false(
         self,
         tmp_path: Path,
@@ -655,22 +473,18 @@ class TestReuseOnlyMismatch:
         self,
         tmp_path: Path,
     ) -> None:
-        """reuse_only=True when active artifact is for a different mode must fail."""
-        # Set up active artifact with an arbitrary id (won't match VLM desired)
-        cfg_skip = _make_cfg(tmp_path)
-        work = cfg_skip.book_work_dir(tmp_path / "book.pdf")
+        """reuse_only=True when active artifact is mismatched must fail."""
+        cfg = _make_cfg(tmp_path)
+        work = cfg.book_work_dir(tmp_path / "book.pdf")
         _setup_work_dir(work)
 
         old_artifact_id = "aaaa1111aaaa1111"
         _create_valid_active_artifact(work, old_artifact_id, mode="docling")
 
-        # Now ask for VLM (no api_key set, but reuse_only should fail before that)
-        cfg_vlm = _make_cfg(tmp_path)
-
         from epubforge.pipeline import run_extract
 
         with pytest.raises(RuntimeError, match="no valid active artifact"):
-            run_extract(tmp_path / "book.pdf", cfg_vlm, reuse_only=True)
+            run_extract(tmp_path / "book.pdf", cfg, reuse_only=True)
 
     def test_reuse_only_error_message_is_helpful(
         self,

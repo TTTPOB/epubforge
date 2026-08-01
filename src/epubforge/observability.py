@@ -50,7 +50,7 @@ def log_path_for(book_work_dir: Path) -> Path:
 
 @dataclass
 class UsageTracker:
-    """Process-wide LLM/VLM call accounting. One global instance via get_tracker()."""
+    """Process-wide LLM call accounting. One global instance via get_tracker()."""
 
     requests: int = 0
     cache_hits: int = 0

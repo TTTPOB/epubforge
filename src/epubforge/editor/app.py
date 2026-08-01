@@ -174,7 +174,7 @@ def _render_page_cmd(
         ),
     ] = None,
 ) -> None:
-    """Render a single page of the source PDF to JPEG (no LLM/VLM)."""
+    """Render a single page of the source PDF to JPEG."""
     from epubforge.editor.tool_surface import run_render_page
 
     if page <= 0:
@@ -184,76 +184,6 @@ def _render_page_cmd(
     cfg = app_ctx.config
     raise typer.Exit(
         _run(run_render_page, work=work, page=page, dpi=dpi, out=out, cfg=cfg)
-    )
-
-
-@editor_app.command("vlm-page")
-def _vlm_page_cmd(
-    ctx: typer.Context,
-    work: Annotated[Path, typer.Argument(help="Work directory")],
-    page: Annotated[int, typer.Option("--page", help="1-based page number")] = 0,
-    dpi: Annotated[int, typer.Option("--dpi", help="Render DPI")] = 200,
-    out: Annotated[
-        Optional[Path],
-        typer.Option(
-            "--out",
-            help="Output JSON path (default: edit_state/audit/vlm_pages/page_NNNN.json)",
-        ),
-    ] = None,
-    chapter: Annotated[
-        Optional[str],
-        typer.Option("--chapter", help="Chapter UID scope (analyze only blocks from this chapter)"),
-    ] = None,
-    blocks: Annotated[
-        Optional[str],
-        typer.Option("--blocks", help="Comma-separated block UIDs to analyze"),
-    ] = None,
-) -> None:
-    """Render a page, load evidence, call VLM, write result — never mutates book.json."""
-    from epubforge.editor.tool_surface import run_vlm_page
-
-    if page <= 0:
-        typer.echo('{"error": "--page must be a positive integer"}')
-        raise typer.Exit(2)
-    app_ctx = ctx.find_root().obj
-    cfg = app_ctx.config
-    blocks_list = blocks.split(",") if blocks else None
-    raise typer.Exit(
-        _run(
-            run_vlm_page,
-            work=work,
-            page=page,
-            dpi=dpi,
-            out=out,
-            cfg=cfg,
-            chapter=chapter,
-            blocks=blocks_list,
-        )
-    )
-
-
-@editor_app.command("vlm-range")
-def _vlm_range_cmd(
-    ctx: typer.Context,
-    work: Annotated[Path, typer.Argument(help="Work directory")],
-    start_page: Annotated[int, typer.Option("--start-page", help="Start page (1-based, inclusive)")] = 0,
-    end_page: Annotated[int, typer.Option("--end-page", help="End page (1-based, inclusive)")] = 0,
-    dpi: Annotated[int, typer.Option("--dpi", help="Render DPI")] = 200,
-    chapter: Annotated[Optional[str], typer.Option("--chapter", help="Chapter UID scope")] = None,
-    blocks: Annotated[Optional[str], typer.Option("--blocks", help="Comma-separated block UIDs")] = None,
-) -> None:
-    """Analyze a range of pages with VLM, creating one observation per page."""
-    from epubforge.editor.tool_surface import run_vlm_range
-
-    if start_page <= 0 or end_page <= 0:
-        typer.echo('{"error": "--start-page and --end-page must be positive integers"}')
-        raise typer.Exit(2)
-    app_ctx = ctx.find_root().obj
-    cfg = app_ctx.config
-    blocks_list = blocks.split(",") if blocks else None
-    raise typer.Exit(
-        _run(run_vlm_range, work=work, start_page=start_page, end_page=end_page,
-             dpi=dpi, cfg=cfg, chapter=chapter, blocks=blocks_list)
     )
 
 

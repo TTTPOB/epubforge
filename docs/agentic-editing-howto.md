@@ -18,21 +18,18 @@
 - `epubforge editor compact`
 - `epubforge editor render-prompt`
 - `epubforge editor render-page`
-- `epubforge editor vlm-page`
 
 `python -m epubforge.editor.*` 入口已废除。配置通过顶层 root callback 的 `--config` 一次性注入，所有子命令共享同一 `AppContext`。
 
-## skip-VLM 证据草稿与语义修复
+## 证据草稿与语义修复
 
-当 Stage 3 以 `--skip-vlm` 模式运行时，产出的块带有 `Provenance.source="docling"`，角色标签为 `docling_*_candidate`（如 `docling_heading_candidate`、`docling_footnote_candidate`）。这些 candidate 角色是机械映射标签，不是语义决策。
+Stage 3 当前使用 Docling 机械提取，产出的块带有 `Provenance.source="docling"`，角色标签为 `docling_*_candidate`（如 `docling_heading_candidate`、`docling_footnote_candidate`）。这些 candidate 角色是机械映射标签，不是语义决策。
 
 fixer 通过以下新工作流修复语义：
 
 - `BookPatch.replace_node`：替换块内容或角色
 - `BookPatch.set_field`：标记跨页连续性、修复表格标题/说明等字段
 - `PatchCommand`：表达拆分/合并/搬移/脚注配对等拓扑类修复
-
-`vlm-page` 只读地产生页面证据，supervisor 需要手动解读结果，再通过 `agent-output` 工作流更新书稿。
 
 ## 初始化语义
 
@@ -92,17 +89,15 @@ AgentOutput 是唯一的 agent 写入入口。它可包含：
 - 解决 convention 冲突
 - 必要时提交少量高确定性 `set_field` 修正
 
-## render-page 与 vlm-page
+## render-page
 
 ```bash
 # 渲染第 5 页为 JPEG，写入 edit_state/audit/page_images/page_0005.jpg
 epubforge --config config.toml editor render-page work/mybook --page 5
 
-# 对第 5 页重新调用 VLM，结果写入 edit_state/audit/vlm_pages/page_0005.json
-epubforge --config config.toml editor vlm-page work/mybook --page 5
 ```
 
-`render-page` 不消耗 LLM/VLM token。`vlm-page` 只处理 Stage 3 已选中页面，结果不会自动修改 `book.json`。
+`render-page` 只生成页面图像，不修改 `book.json`。
 
 ## 收敛与归档
 

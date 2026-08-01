@@ -7,7 +7,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -19,7 +19,7 @@ from epubforge.editor.log import compact_log, count_applied_log_events
 from epubforge.editor.memory import EditMemory
 from epubforge.editor.patches import PatchError, apply_book_patch, validate_book_patch
 from epubforge.editor.prompts import render_prompt
-from epubforge.editor.projection import _load_granite_per_page, render_chapter_projection, render_index
+from epubforge.editor.projection import render_chapter_projection, render_index
 from epubforge.editor.scratch import allocate_script_path, run_script, write_script_stub
 from epubforge.editor.state import (
     Stage3EditorMeta,
@@ -37,12 +37,13 @@ from epubforge.editor.state import (
     write_initial_state,
     initialize_book_state,
 )
-from epubforge.editor.workspace import GitError, find_repo_root, resolve_book_path_at_ref
+from epubforge.editor.workspace import (
+    GitError,
+    find_repo_root,
+    resolve_book_path_at_ref,
+)
 from epubforge.io import load_book, save_book
 from epubforge.ir.semantic import Book
-
-if TYPE_CHECKING:
-    from epubforge.editor.vlm_evidence import VLMObservation
 
 
 class DoctorContext(BaseModel):
@@ -547,7 +548,9 @@ def build_diff_books_result(
         patch = diff_books(base, proposed)
     except DiffError as exc:
         kind, exit_code = _classify_diff_error(exc)
-        unsupported_diffs = [{"message": str(exc)}] if kind == "unsupported_diff" else []
+        unsupported_diffs = (
+            [{"message": str(exc)}] if kind == "unsupported_diff" else []
+        )
         raise CommandError(
             str(exc),
             exit_code=exit_code,
@@ -671,7 +674,7 @@ def run_render_page(
     out: Path | None,
     cfg: Config,
 ) -> int:
-    """Render a single page of the source PDF to a JPEG image without LLM/VLM calls."""
+    """Render a single page of the source PDF to a JPEG image."""
     paths = resolve_editor_paths(work)
     ensure_work_dir(paths)
     ensure_initialized(paths)
@@ -702,347 +705,6 @@ def run_render_page(
             "source_pdf": str(source_pdf),
         }
     )
-    return 0
-
-
-def _run_vlm_page_core(
-    *,
-    paths,
-    page: int,
-    dpi: int,
-    cfg: Config,
-    chapter: str | None = None,
-    blocks: list[str] | None = None,
-) -> "tuple[VLMObservation, str | None]":
-    """Core VLM page analysis logic — returns (VLMObservation, evidence_warning).
-
-    Importable by vlm-range (phase 8C) which calls this in a loop.
-    Never mutates book.json or produces CLI output.
-    """
-    import base64
-    import tempfile
-
-    from epubforge.editor.vlm_evidence import (
-        VLMObservation,
-        VLMPageAnalysis,
-        _compute_sha256_bytes,
-        _compute_sha256_str,
-        _generate_observation_id,
-        save_vlm_observation,
-    )
-
-    # Step 1: Load meta and validate page
-    meta = load_editor_meta(paths)
-    if meta.stage3 is None:
-        raise CommandError(
-            "edit_state/meta.json has no stage3 section. "
-            "Re-initialize with `epubforge editor init` after running Stage 3."
-        )
-    stage3 = meta.stage3
-
-    if page not in stage3.selected_pages:
-        raise CommandError(
-            f"page {page} is not in selected pages {stage3.selected_pages}. "
-            "Only selected pages have evidence and are eligible for VLM re-analysis."
-        )
-
-    # Step 2: Load Book IR and scope validation
-    book = load_editable_book(paths)
-
-    if chapter is not None:
-        # Validate chapter exists
-        matching_chapters = [ch for ch in book.chapters if ch.uid == chapter]
-        if not matching_chapters:
-            raise CommandError(f"chapter not found: {chapter}")
-        # Scope to blocks from that chapter on this page
-        scope_blocks = [
-            b
-            for ch in matching_chapters
-            for b in ch.blocks
-            if b.provenance.page == page
-        ]
-    elif blocks is not None:
-        # Validate each block_uid exists in the book
-        all_blocks_by_uid = {
-            b.uid: b
-            for ch in book.chapters
-            for b in ch.blocks
-            if b.uid is not None
-        }
-        missing = [uid for uid in blocks if uid not in all_blocks_by_uid]
-        if missing:
-            raise CommandError(f"block UIDs not found in book: {missing}")
-        scope_blocks = [all_blocks_by_uid[uid] for uid in blocks]
-    else:
-        # Default: all blocks on this page
-        scope_blocks = [
-            b
-            for ch in book.chapters
-            for b in ch.blocks
-            if b.provenance.page == page
-        ]
-
-    scope_block_uids: set[str] = {b.uid for b in scope_blocks if b.uid is not None}
-
-    # Step 3: Render PDF page
-    source_pdf = paths.work_dir / stage3.source_pdf
-    if not source_pdf.exists():
-        raise CommandError(
-            f"source PDF not found: {source_pdf}. "
-            "Rerun parse with --force-rerun to restore source/source.pdf."
-        )
-
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_f:
-        tmp_img_path = Path(tmp_f.name)
-
-    try:
-        _render_pdf_page_image(source_pdf, page, dpi, tmp_img_path)
-        img_bytes = tmp_img_path.read_bytes()
-        image_sha256 = _compute_sha256_bytes(img_bytes)
-        img_b64 = base64.b64encode(img_bytes).decode("ascii")
-    finally:
-        try:
-            tmp_img_path.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Step 4: Load evidence
-    evidence_items: list[object] = []
-    evidence_warning: str | None = None
-    if stage3.evidence_index_path:
-        ev_path = Path(stage3.evidence_index_path)
-        if ev_path.exists():
-            from epubforge.stage3_artifacts import EvidenceIndex
-
-            ev_index = EvidenceIndex.model_validate_json(
-                ev_path.read_text(encoding="utf-8")
-            )
-            page_evidence = ev_index.pages.get(str(page), {})
-            evidence_items = (
-                page_evidence.get("items", [])
-                if isinstance(page_evidence, dict)
-                else []
-            )
-        else:
-            evidence_warning = f"evidence_index not found: {ev_path}"
-    else:
-        evidence_warning = "no evidence_index_path in stage3 meta"
-
-    if not evidence_items:
-        evidence_warning = (
-            evidence_warning or ""
-        ) + f" (no evidence items for page {page})"
-
-    # Step 5: Build blocks context
-    blocks_context = [
-        {
-            "uid": b.uid,
-            "kind": b.kind,
-            "text": (b.text[:200] if hasattr(b, "text") else ""),
-            "role": getattr(b, "role", None),
-            "page": b.provenance.page,
-        }
-        for b in scope_blocks
-    ]
-
-    # Step 6: Build VLM prompt and compute hash
-    evidence_text = (
-        json.dumps(evidence_items, ensure_ascii=False, indent=2)
-        if evidence_items
-        else "[]"
-    )
-    system_prompt = (
-        "You are a PDF extraction quality reviewer. "
-        "Analyze the provided page image and the extracted evidence items for accuracy."
-    )
-    user_content: list[object] = [
-        {
-            "type": "text",
-            "text": (
-                f"Page {page} evidence extracted by Stage 3 ({stage3.mode}):\n\n"
-                f"{evidence_text}\n\n"
-                "Blocks in scope (from book IR):\n\n"
-                f"{json.dumps(blocks_context, ensure_ascii=False, indent=2)}\n\n"
-                "Review the image and identify any extraction issues, missing elements, "
-                "or items requiring semantic correction."
-            ),
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
-        },
-    ]
-
-    from typing import cast as _cast
-
-    from openai.types.chat import ChatCompletionMessageParam as _Msg
-
-    messages = _cast(
-        "list[_Msg]",
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-    )
-    prompt_sha256 = _compute_sha256_str(json.dumps(messages, ensure_ascii=False))
-
-    # Step 7: Call VLM
-    from epubforge.llm.client import LLMClient
-
-    vlm_client = LLMClient(cfg, use_vlm=True)
-    vlm_result: VLMPageAnalysis = vlm_client.chat_parsed(
-        messages, response_format=VLMPageAnalysis
-    )
-
-    # Step 8: Build VLMObservation — filter hallucinated block_uids
-    filtered_findings = []
-    for finding in vlm_result.findings:
-        filtered_uids = [
-            uid for uid in finding.block_uids if uid in scope_block_uids
-        ]
-        filtered_findings.append(finding.model_copy(update={"block_uids": filtered_uids}))
-
-    obs = VLMObservation(
-        observation_id=_generate_observation_id(),
-        page=page,
-        chapter_uid=chapter,
-        related_block_uids=sorted(scope_block_uids),
-        model=vlm_client.model,
-        image_sha256=image_sha256,
-        prompt_sha256=prompt_sha256,
-        findings=filtered_findings,
-        raw_text=vlm_result.summary or None,
-        created_at=_timestamp(),
-        dpi=dpi,
-        source_pdf=str(source_pdf.relative_to(paths.work_dir)),
-    )
-
-    # Step 9: Save
-    save_vlm_observation(paths, obs)
-
-    # Step 10: Return
-    return obs, evidence_warning
-
-
-def run_vlm_page(
-    work: Path,
-    page: int,
-    dpi: int,
-    out: Path | None,
-    cfg: Config,
-    *,
-    chapter: str | None = None,
-    blocks: list[str] | None = None,
-) -> int:
-    """Render a page, load its evidence, call VLM, and write result — never mutates book.json."""
-    paths = resolve_editor_paths(work)
-    ensure_work_dir(paths)
-    ensure_initialized(paths)
-
-    obs, evidence_warning = _run_vlm_page_core(
-        paths=paths,
-        page=page,
-        dpi=dpi,
-        cfg=cfg,
-        chapter=chapter,
-        blocks=blocks,
-    )
-
-    # Backward compat: if out provided, also write legacy-format file
-    if out is not None:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        legacy_output: dict[str, object] = {
-            "page": obs.page,
-            "dpi": obs.dpi,
-            "source_pdf": obs.source_pdf,
-            "observation_id": obs.observation_id,
-            "findings": [f.model_dump(mode="json") for f in obs.findings],
-        }
-        if evidence_warning:
-            legacy_output["evidence_warning"] = evidence_warning
-        out.write_text(
-            json.dumps(legacy_output, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-    findings_summary = [
-        {"type": f.finding_type, "severity": f.severity}
-        for f in obs.findings
-    ]
-    json_payload: dict[str, object] = {
-        "observation_id": obs.observation_id,
-        "page": obs.page,
-        "output_path": str(out) if out is not None else None,
-        "findings_count": len(obs.findings),
-        "findings_summary": findings_summary,
-        "model": obs.model,
-    }
-    if evidence_warning:
-        json_payload["evidence_warning"] = evidence_warning
-    emit_json(json_payload)
-    return 0
-
-
-def run_vlm_range(
-    work: Path,
-    start_page: int,
-    end_page: int,
-    dpi: int,
-    cfg: Config,
-    *,
-    chapter: str | None = None,
-    blocks: list[str] | None = None,
-) -> int:
-    """Analyze a range of pages with VLM, creating one observation per page."""
-    paths = resolve_editor_paths(work)
-    ensure_work_dir(paths)
-    ensure_initialized(paths)
-    meta = load_editor_meta(paths)
-
-    if meta.stage3 is None:
-        raise CommandError(
-            "edit_state/meta.json has no stage3 section. "
-            "Re-initialize with `epubforge editor init` after running Stage 3."
-        )
-
-    if start_page > end_page:
-        raise CommandError(f"start_page ({start_page}) > end_page ({end_page})")
-
-    selected_set = set(meta.stage3.selected_pages)
-    pages_in_range = [
-        p for p in range(start_page, end_page + 1)
-        if p in selected_set
-    ]
-
-    if not pages_in_range:
-        raise CommandError(
-            f"no selected pages in range [{start_page}, {end_page}]"
-        )
-
-    observation_ids: list[str] = []
-    results: list[dict] = []
-
-    for page in pages_in_range:
-        obs, _warn = _run_vlm_page_core(
-            paths=paths,
-            page=page,
-            dpi=dpi,
-            cfg=cfg,
-            chapter=chapter,
-            blocks=blocks,
-        )
-        observation_ids.append(obs.observation_id)
-        results.append({
-            "observation_id": obs.observation_id,
-            "page": page,
-            "findings_count": len(obs.findings),
-        })
-
-    emit_json({
-        "observation_ids": observation_ids,
-        "pages_analyzed": len(pages_in_range),
-        "total_findings": sum(r["findings_count"] for r in results),
-        "per_page": results,
-    })
     return 0
 
 
@@ -1132,18 +794,21 @@ def run_projection_export(
 
     if chapter_uid is not None:
         target_paths = {
-            chapter_path.resolve(strict=False) for _chapter, chapter_path in chapter_targets
+            chapter_path.resolve(strict=False)
+            for _chapter, chapter_path in chapter_targets
         }
         for stale_path in chapters_dir.glob("*.md"):
-            if stale_path.resolve(strict=False) not in target_paths and stale_path.is_file():
+            if (
+                stale_path.resolve(strict=False) not in target_paths
+                and stale_path.is_file()
+            ):
                 stale_path.unlink()
 
     exported_at = _timestamp()
-    granite_pages = _load_granite_per_page(paths.work_dir)
     chapter_paths: list[str] = []
     blocks_written = 0
     for chapter, chapter_path in chapter_targets:
-        atomic_write_text(chapter_path, render_chapter_projection(chapter, granite_pages=granite_pages))
+        atomic_write_text(chapter_path, render_chapter_projection(chapter))
         chapter_paths.append(str(chapter_path))
         blocks_written += len(chapter.blocks)
 
@@ -1644,14 +1309,16 @@ def run_workspace_create(work: Path, branch: str, base_ref: str = "HEAD") -> int
         ) from exc
 
     work_dir = result.worktree_path / work_dir_rel
-    emit_json({
-        "created": True,
-        "worktree_path": str(result.worktree_path),
-        "branch": result.branch,
-        "work_dir": str(work_dir),
-        "commit": result.commit,
-        "base_ref": base_ref,
-    })
+    emit_json(
+        {
+            "created": True,
+            "worktree_path": str(result.worktree_path),
+            "branch": result.branch,
+            "work_dir": str(work_dir),
+            "commit": result.commit,
+            "base_ref": base_ref,
+        }
+    )
     return 0
 
 
@@ -1781,13 +1448,15 @@ def run_workspace_remove(work: Path, branch: str, force: bool = False) -> int:
             payload={"error": str(exc), "kind": "git_error"},
         ) from exc
 
-    emit_json({
-        "removed": True,
-        "worktree_path": str(result.worktree_path),
-        "branch": result.branch,
-        "branch_deleted": result.branch_deleted,
-        "force_used": result.force_used,
-    })
+    emit_json(
+        {
+            "removed": True,
+            "worktree_path": str(result.worktree_path),
+            "branch": result.branch,
+            "branch_deleted": result.branch_deleted,
+            "force_used": result.force_used,
+        }
+    )
     return 0
 
 
@@ -1816,20 +1485,22 @@ def run_workspace_gc(work: Path, max_age_days: int = 7, dry_run: bool = False) -
             payload={"error": str(exc), "kind": "git_error"},
         ) from exc
 
-    emit_json({
-        "removed": [
-            {
-                "worktree_path": str(r.worktree_path),
-                "branch": r.branch,
-                "branch_deleted": r.branch_deleted,
-                "force_used": r.force_used,
-            }
-            for r in result.removed
-        ],
-        "skipped": result.skipped,
-        "pruned": result.pruned,
-        "dry_run": dry_run,
-    })
+    emit_json(
+        {
+            "removed": [
+                {
+                    "worktree_path": str(r.worktree_path),
+                    "branch": r.branch,
+                    "branch_deleted": r.branch_deleted,
+                    "force_used": r.force_used,
+                }
+                for r in result.removed
+            ],
+            "skipped": result.skipped,
+            "pruned": result.pruned,
+            "dry_run": dry_run,
+        }
+    )
     return 0
 
 
@@ -1849,7 +1520,6 @@ __all__ = [
     "run_render_page",
     "run_render_prompt",
     "run_run_script",
-    "run_vlm_page",
     "run_workspace_create",
     "run_workspace_gc",
     "run_workspace_list",

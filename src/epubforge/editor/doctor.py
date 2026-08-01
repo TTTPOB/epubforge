@@ -293,7 +293,7 @@ def _docling_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
                 severity="info",
                 message=(
                     f"{chapter_uid} 包含复杂页面（如第 {page} 页），"
-                    "docling 未做 VLM 语义提取，建议开 scanner subagent 仔细核查。"
+                    "机械提取未做语义判断，建议开 scanner subagent 仔细核查。"
                 ),
                 scope="chapter",
                 chapter_uid=chapter_uid,
@@ -327,7 +327,7 @@ def _docling_hints(book: Book, complex_pages: list[int]) -> list[Hint]:
             )
         )
 
-    # table_merge_pending: VLM-sourced Table with continuation=True but multi_page=False
+    # table_merge_pending: a table continuation still needs merge review
     for ref in iter_blocks(book):
         block = ref.block
         if not isinstance(block, Table):

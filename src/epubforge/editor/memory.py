@@ -31,7 +31,6 @@ PATTERN_TOPICS: TypeAlias = Literal[
     "same_page_dup_callout",
     "cross_page_fn_body",
     "table_continuation_split_row",
-    "vlm_concatenated_heading",
 ]
 
 

@@ -8,11 +8,8 @@ Public API
 render_index(book, *, source, exported_at)
     Render a full-book index.md string.
 
-render_chapter_projection(chapter, *, granite_pages=None)
+    render_chapter_projection(chapter)
     Render a single Chapter to its projection string.
-
-_load_granite_per_page(workdir)
-    Load 01_raw_granite.json and split into per-page markdown dict.
 """
 
 from __future__ import annotations
@@ -20,7 +17,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from epubforge.ir.semantic import (
@@ -166,7 +162,9 @@ def _block_marker_line(block: Block) -> str:
     """Render a ``[[block <uid>]] {json}`` marker line."""
     meta = _block_metadata(block)
     uid = block.uid or ""
-    return f"[[block {uid}]] {json.dumps(meta, ensure_ascii=False, separators=(",", ":"))}"
+    return (
+        f"[[block {uid}]] {json.dumps(meta, ensure_ascii=False, separators=(',', ':'))}"
+    )
 
 
 def _chapter_page_range(chapter: Chapter) -> list[int]:
@@ -216,7 +214,9 @@ def render_index(
         "source": source,
         "chapters": len(book.chapters),
     }
-    lines.append(f"[[book]] {json.dumps(book_meta, ensure_ascii=False, separators=(",", ":"))}")
+    lines.append(
+        f"[[book]] {json.dumps(book_meta, ensure_ascii=False, separators=(',', ':'))}"
+    )
     lines.append("")
     lines.append("## Chapters")
     lines.append("")
@@ -226,55 +226,20 @@ def render_index(
     for i, ch in enumerate(book.chapters, start=1):
         uid = ch.uid or ""
         page_range = _chapter_page_range(ch)
-        pages_str = (
-            f"{page_range[0]}-{page_range[1]}"
-            if len(page_range) == 2
-            else "-"
-        )
+        pages_str = f"{page_range[0]}-{page_range[1]}" if len(page_range) == 2 else "-"
         lines.append(f"| {i} | {uid} | {ch.title} | {len(ch.blocks)} | {pages_str} |")
 
     lines.append("")
     return "\n".join(lines)
 
 
-def _load_granite_per_page(workdir: Path) -> dict[int, str] | None:
-    """Load 01_raw_granite.json and split into per-page markdown.
-
-    Returns None if file doesn't exist (granite not enabled or run).
-    """
-    granite_path = workdir / "01_raw_granite.json"
-    if not granite_path.exists():
-        return None
-
-    from docling_core.types.doc import DoclingDocument  # noqa: PLC0415
-
-    doc = DoclingDocument.load_from_json(granite_path)
-
-    pages: dict[int, str] = {}
-    for page_no in sorted(doc.pages.keys()):
-        md = doc.export_to_markdown(page_no=page_no)
-        if md.strip():
-            pages[page_no] = md
-    return pages
-
-
-def render_chapter_projection(
-    chapter: Chapter,
-    *,
-    granite_pages: dict[int, str] | None = None,  # page_no -> granite markdown for that page
-) -> str:
+def render_chapter_projection(chapter: Chapter) -> str:
     """Render a single *chapter* to its projection text.
 
     Parameters
     ----------
     chapter:
         The Chapter object to render.
-    granite_pages:
-        Optional mapping of page number to granite markdown for that page.
-        When provided, the relevant pages' granite content is prepended to
-        the chapter projection as secondary evidence for cross-validation.
-        When None (default), output is identical to the legacy format.
-
     Returns
     -------
     Markdown-ish projection content as a single string.
@@ -294,38 +259,11 @@ def render_chapter_projection(
         ch_meta["page_range"] = page_range
 
     lines.append(
-        f"[[chapter {uid}]] {json.dumps(ch_meta, ensure_ascii=False, separators=(",", ":"))}"
+        f"[[chapter {uid}]] {json.dumps(ch_meta, ensure_ascii=False, separators=(',', ':'))}"
     )
     lines.append("")
     lines.append("---")
     lines.append("")
-
-    # -- Granite cross-reference header (secondary evidence) ------------------
-    if granite_pages is not None:
-        # Collect pages referenced by this chapter's blocks
-        chapter_pages = sorted(
-            {block.provenance.page for block in chapter.blocks if block.provenance.page is not None}
-        )
-        relevant_pages = [p for p in chapter_pages if p in granite_pages]
-
-        if relevant_pages:
-            pages_str = ", ".join(str(p) for p in relevant_pages)
-            lines.append(f"<!-- granite cross-reference for pages {pages_str} -->")
-            lines.append(
-                "<!-- These are SECONDARY evidence per docs/rules/ocr-cross-validation.md.\n"
-                "     Standard pipeline (above) is the primary text source. Use granite to\n"
-                "     validate character-level OCR errors and to recover any line missed by\n"
-                "     Standard. Do not blindly trust granite—see ocr-cross-validation.md. -->"
-            )
-            lines.append("")
-
-            for page_no in relevant_pages:
-                lines.append(f"[[granite-ref page={page_no}]]")
-                lines.append(granite_pages[page_no])
-                lines.append("")
-
-            lines.append("---")
-            lines.append("")
 
     for block in chapter.blocks:
         marker = _block_marker_line(block)

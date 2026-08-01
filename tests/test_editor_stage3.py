@@ -1,10 +1,9 @@
-"""Tests for Stage 3 editor integration: meta, render-page, vlm-page, render-prompt context."""
+"""Tests for Stage 3 editor integration and render-prompt context."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner, Result
 
@@ -500,166 +499,7 @@ class TestRenderPageMissingPDF:
 
 
 # ---------------------------------------------------------------------------
-# 5. Mock vlm-page: verify output format and no book.json mutation
-# ---------------------------------------------------------------------------
-
-
-class TestVLMPage:
-    def _setup_work_dir_with_pdf(self, work_dir: Path) -> tuple[Stage3Manifest, str]:
-        """Initialize work dir fully with PDF and manifest."""
-        manifest = _make_manifest(work_dir, selected_pages=[1, 2], complex_pages=[2])
-        sha256 = _setup_active_manifest(work_dir, manifest)
-
-        # Write evidence index with real evidence
-        evidence_index = {
-            "schema_version": 3,
-            "artifact_id": manifest.artifact_id,
-            "mode": "docling",
-            "source_pdf": "source/source.pdf",
-            "pages": {
-                "1": {"items": [{"ref": "p1e1", "kind": "paragraph", "text": "hello"}]},
-                "2": {
-                    "items": [{"ref": "p2e1", "kind": "table", "text": "table data"}]
-                },
-            },
-            "refs": {},
-        }
-        ev_path = work_dir / manifest.sidecars["evidence_index"]
-        ev_path.write_text(json.dumps(evidence_index, indent=2), encoding="utf-8")
-
-        book = _minimal_book(
-            artifact_id=manifest.artifact_id, manifest_sha256=sha256, pages=[1, 2]
-        )
-        (work_dir / "05_semantic_raw.json").write_text(
-            book.model_dump_json(indent=2), encoding="utf-8"
-        )
-
-        # Create PDF
-        source_dir = work_dir / "source"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        import pypdfium2 as pdfium
-
-        doc = pdfium.PdfDocument.new()
-        doc.new_page(width=595, height=842)
-        doc.new_page(width=595, height=842)
-        doc.save(str(source_dir / "source.pdf"))
-
-        runner.invoke(app, ["editor", "init", str(work_dir)], catch_exceptions=False)
-        return manifest, sha256
-
-    def test_vlm_page_does_not_mutate_book_json(self, tmp_path: Path) -> None:
-        """vlm-page must not modify book.json."""
-        from epubforge.editor.vlm_evidence import VLMPageAnalysis
-
-        work_dir = tmp_path / "book"
-        work_dir.mkdir()
-        self._setup_work_dir_with_pdf(work_dir)
-
-        paths = resolve_editor_paths(work_dir)
-        from epubforge.io import load_book
-
-        book_before = load_book(paths.book_path)
-        book_before_json = book_before.model_dump_json()
-
-        mock_result = VLMPageAnalysis(page=1, findings=[], summary="ok")
-
-        with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.chat_parsed.return_value = mock_result
-            mock_llm_instance.model = "test-vlm-model"
-            mock_llm_cls.return_value = mock_llm_instance
-
-            result = runner.invoke(
-                app,
-                ["editor", "vlm-page", str(work_dir), "--page", "1"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0, result.output
-
-        # Verify book.json is unchanged
-        from epubforge.io import load_book as lb2
-
-        book_after = lb2(paths.book_path)
-        assert book_after.model_dump_json() == book_before_json
-
-    def test_vlm_page_writes_output_json(self, tmp_path: Path) -> None:
-        from epubforge.editor.vlm_evidence import VLMPageAnalysis
-
-        work_dir = tmp_path / "book"
-        work_dir.mkdir()
-        self._setup_work_dir_with_pdf(work_dir)
-
-        mock_result = VLMPageAnalysis(page=1, findings=[], summary="")
-
-        with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.chat_parsed.return_value = mock_result
-            mock_llm_instance.model = "test-vlm-model"
-            mock_llm_cls.return_value = mock_llm_instance
-
-            result = runner.invoke(
-                app,
-                ["editor", "vlm-page", str(work_dir), "--page", "1"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
-        assert "observation_id" in payload
-        assert payload["page"] == 1
-        assert "findings_count" in payload
-
-    def test_vlm_page_rejects_non_selected_page(self, tmp_path: Path) -> None:
-        work_dir = tmp_path / "book"
-        work_dir.mkdir()
-        self._setup_work_dir_with_pdf(work_dir)
-
-        result = runner.invoke(
-            app,
-            ["editor", "vlm-page", str(work_dir), "--page", "99"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code != 0
-        output = json.loads(result.output)
-        assert "99" in output.get("error", "")
-
-    def test_vlm_page_custom_out_path(self, tmp_path: Path) -> None:
-        from epubforge.editor.vlm_evidence import VLMPageAnalysis
-
-        work_dir = tmp_path / "book"
-        work_dir.mkdir()
-        self._setup_work_dir_with_pdf(work_dir)
-
-        out_path = tmp_path / "vlm_out.json"
-        mock_result = VLMPageAnalysis(page=2, findings=[], summary="")
-
-        with patch("epubforge.llm.client.LLMClient") as mock_llm_cls:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.chat_parsed.return_value = mock_result
-            mock_llm_instance.model = "test-vlm-model"
-            mock_llm_cls.return_value = mock_llm_instance
-
-            result = runner.invoke(
-                app,
-                [
-                    "editor",
-                    "vlm-page",
-                    str(work_dir),
-                    "--page",
-                    "2",
-                    "--out",
-                    str(out_path),
-                ],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0, result.output
-        assert out_path.exists()
-
-
-# ---------------------------------------------------------------------------
-# 6. render-prompt includes extraction context and candidate-role guidance
+# 5. render-prompt includes extraction context and candidate-role guidance
 # ---------------------------------------------------------------------------
 
 
@@ -709,10 +549,7 @@ class TestRenderPromptExtractionContext:
         assert "Extraction context" in prompt
         assert "mode:" in prompt
         assert "render-page" in prompt
-        assert "vlm-page" in prompt
-        assert "vlm-range" in prompt
-        assert "--chapter" in prompt
-        assert "VLMObservation" in prompt or "observation_id" in prompt
+        assert "--page" in prompt
         # skipped_vlm field no longer exists
         assert "skipped_vlm" not in prompt
 

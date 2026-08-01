@@ -201,7 +201,7 @@ class BookPatch(StrictModel):
     scope: restricts which nodes the patch may touch.
     changes: ordered list of atomic IRChange operations. Empty lists are legal no-op patches.
     rationale: non-empty explanation for the changes.
-    evidence_refs: optional list of VLMObservation ids or other evidence refs.
+    evidence_refs: optional opaque evidence references.
     """
 
     patch_id: str

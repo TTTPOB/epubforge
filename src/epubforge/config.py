@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ProviderSettings(BaseModel):
-    """Settings for a single LLM/VLM provider endpoint."""
+    """Settings for the text LLM provider endpoint."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -65,64 +65,10 @@ class EditorSettings(BaseModel):
     max_loops: int = 50
 
 
-class OcrSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool = False
-    force_full_page_ocr: bool = True
-    ocr_version: str = "PP-OCRv5"
-    model_type: str = "mobile"
-    backend: str = "onnxruntime"
-    text_score: float = 0.5
-    bitmap_area_threshold: float = 0.05
-
-
-class GraniteSettings(BaseModel):
-    """Granite-Docling-258M VLM via llama-server (OpenAI-compatible API).
-
-    Off by default. When `enabled=True`, parse stage runs Granite as a
-    secondary pipeline alongside the standard Docling+OCR primary; the
-    output is persisted as 01_raw_granite.json next to 01_raw.json.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    api_url: str = "http://localhost:8080/v1/chat/completions"
-    api_model: str = "granite-docling"
-    prompt: str = "Convert this page to docling."
-    scale: float = 2.0
-    timeout_seconds: int = 180
-    max_tokens: int = 4096
-    health_check: bool = True
-    # Concurrency MUST be 1 for default llama-server -np 1 config on 8GB WSL2.
-    # Increase only if llama-server -np N is configured to match.
-    concurrency: int = 1
-
-
 class ExtractSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_book_memory: bool = True
-    # Stage 1 traditional pipeline batches the PDF into chunks of this many
-    # pages before calling DocumentConverter.convert. With OCR enabled, a
-    # single 50-page convert peaks above 5 GiB RSS on 8 GiB WSL2; batching
-    # keeps peak memory bounded by per-batch cost. Default 20 pages.
-    page_batch_size: int = 20
-    # When set, parse the PDF in segments of this many pages each via a
-    # short-lived subprocess to bound peak memory. Process exit is the only
-    # reliable way to release onnxruntime/torch shape-cache mmap regions
-    # accumulated across ``convert()`` calls. None = single-process
-    # (default, backward-compatible). See
-    # docs/explorations/stage1-pdf-parser-memory.md.
-    segment_size: int | None = Field(
-        default=None,
-        description=(
-            "If set, parse PDF in segments of N pages each via subprocess "
-            "to bound peak memory. None = single-process (default)."
-        ),
-    )
-    ocr: OcrSettings = Field(default_factory=OcrSettings)
-    granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +82,6 @@ class Config(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     llm: ProviderSettings = Field(default_factory=ProviderSettings)
-    vlm: ProviderSettings = Field(
-        default_factory=lambda: ProviderSettings(
-            model="google/gemini-flash-3", max_tokens=16384
-        )
-    )
     mineru: MineruSettings = Field(default_factory=MineruSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     editor: EditorSettings = Field(default_factory=EditorSettings)
@@ -152,38 +93,12 @@ class Config(BaseSettings):
                 "LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)"
             )
 
-    def require_vlm(self) -> None:
-        resolved = self.resolved_vlm()
-        if not resolved.api_key:
-            raise SystemExit(
-                "VLM API key is required (set [vlm].api_key or EPUBFORGE_VLM_API_KEY)"
-            )
-
     def require_mineru(self) -> None:
         if not self.mineru.api_key:
             raise SystemExit(
                 "MinerU API key is required "
                 "(set [mineru].api_key or EPUBFORGE_MINERU_API_KEY)"
             )
-
-    def resolved_vlm(self) -> ProviderSettings:
-        """Return effective VLM settings, falling back to LLM for api_key.
-
-        api_key: vlm.api_key if not None, else llm.api_key
-        base_url: vlm.base_url (defaults to same as llm default; override via [vlm] or env)
-        All other fields: taken directly from vlm.
-        """
-        return ProviderSettings(
-            base_url=self.vlm.base_url,
-            api_key=self.vlm.api_key
-            if self.vlm.api_key is not None
-            else self.llm.api_key,
-            model=self.vlm.model,
-            timeout_seconds=self.vlm.timeout_seconds,
-            max_tokens=self.vlm.max_tokens,
-            prompt_caching=self.vlm.prompt_caching,
-            extra_body=self.vlm.extra_body,
-        )
 
     def book_work_dir(self, pdf_path: Path) -> Path:
         return self.runtime.work_dir / pdf_path.stem
@@ -215,17 +130,6 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
         lambda v: None if v == "" else int(v),
     ),
     ("EPUBFORGE_LLM_PROMPT_CACHING", "llm", "prompt_caching", _bool_env),
-    ("EPUBFORGE_VLM_BASE_URL", "vlm", "base_url", str),
-    ("EPUBFORGE_VLM_API_KEY", "vlm", "api_key", str),
-    ("EPUBFORGE_VLM_MODEL", "vlm", "model", str),
-    ("EPUBFORGE_VLM_TIMEOUT", "vlm", "timeout_seconds", float),
-    (
-        "EPUBFORGE_VLM_MAX_TOKENS",
-        "vlm",
-        "max_tokens",
-        lambda v: None if v == "" else int(v),
-    ),
-    ("EPUBFORGE_VLM_PROMPT_CACHING", "vlm", "prompt_caching", _bool_env),
     ("EPUBFORGE_MINERU_API_KEY", "mineru", "api_key", str),
     ("EPUBFORGE_MINERU_BASE_URL", "mineru", "base_url", str),
     ("EPUBFORGE_MINERU_MODEL_VERSION", "mineru", "model_version", str),
@@ -256,28 +160,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
-    ("EPUBFORGE_EXTRACT_PAGE_BATCH_SIZE", "extract", "page_batch_size", int),
-    (
-        "EPUBFORGE_EXTRACT_SEGMENT_SIZE",
-        "extract",
-        "segment_size",
-        lambda v: None if v == "" else int(v),
-    ),
-    ("EPUBFORGE_EXTRACT_OCR_ENABLED", "extract.ocr", "enabled", _bool_env),
-    ("EPUBFORGE_EXTRACT_GRANITE_ENABLED", "extract.granite", "enabled", _bool_env),
-    ("EPUBFORGE_EXTRACT_GRANITE_API_URL", "extract.granite", "api_url", str),
-    ("EPUBFORGE_EXTRACT_GRANITE_API_MODEL", "extract.granite", "api_model", str),
-    ("EPUBFORGE_EXTRACT_GRANITE_TIMEOUT", "extract.granite", "timeout_seconds", int),
 ]
-
-_SECTION_MODELS = {
-    "llm": ProviderSettings,
-    "vlm": ProviderSettings,
-    "mineru": MineruSettings,
-    "runtime": RuntimeSettings,
-    "editor": EditorSettings,
-    "extract": ExtractSettings,
-}
 
 
 def _apply_env_overrides(base: dict[str, Any]) -> dict[str, Any]:
@@ -317,7 +200,7 @@ def load_config(config_path: Path | None = None) -> Config:
             toml_data = tomllib.load(fh)
         # Accept only known top-level sections; unknown keys at the top level are silently
         # ignored (Config.model_config extra="ignore" handles this at parse time too).
-        for key in ("llm", "vlm", "mineru", "runtime", "editor", "extract"):
+        for key in ("llm", "mineru", "runtime", "editor", "extract"):
             if key in toml_data:
                 base[key] = dict(toml_data[key])
 

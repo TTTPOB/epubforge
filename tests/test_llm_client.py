@@ -21,12 +21,12 @@ class _DummyOutput(BaseModel):
     value: str = ""
 
 
-def _make_client(tmp_path, *, use_vlm: bool = False) -> LLMClient:
+def _make_client(tmp_path) -> LLMClient:
     cfg = Config(
         llm=ProviderSettings(base_url="https://example.com/v1", api_key="test-key"),
         runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
     )
-    return LLMClient(cfg, use_vlm=use_vlm)
+    return LLMClient(cfg)
 
 
 def _make_usage(prompt: int = 10, completion: int = 5) -> MagicMock:
@@ -240,34 +240,6 @@ class TestJsonObjectFallback:
                 [{"role": "user", "content": "hi"}], _DummyOutput, 0.0, {}
             )
         assert result.parsed.value == "complete"
-
-
-class TestVlmDefaultMaxTokens:
-    def test_vlm_max_tokens_defaults_to_16384(self, tmp_path) -> None:
-        # The VLM default_factory sets max_tokens=16384; not overriding here means default applies
-        cfg = Config(
-            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
-        )
-        client = LLMClient(cfg, use_vlm=True)
-        assert client.max_tokens == 16384
-
-    def test_vlm_max_tokens_respects_explicit_config(self, tmp_path) -> None:
-        cfg = Config(
-            vlm=ProviderSettings(
-                base_url="https://example.com/v1", api_key="test-key", max_tokens=8192
-            ),
-            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
-        )
-        client = LLMClient(cfg, use_vlm=True)
-        assert client.max_tokens == 8192
-
-    def test_llm_max_tokens_unchanged(self, tmp_path) -> None:
-        cfg = Config(
-            llm=ProviderSettings(api_key="test-key", max_tokens=None),
-            runtime=RuntimeSettings(cache_dir=tmp_path / ".cache"),
-        )
-        client = LLMClient(cfg, use_vlm=False)
-        assert client.max_tokens is None
 
 
 def _make_usage_with_cached(
