@@ -300,6 +300,41 @@ score =
 
 让系统自动拒绝切穿字符、跨栏合并和文本重复归属。确认任何 VLM 输出都无法绕过这些约束。
 
+## MinerU 云端结果质检与逐页修复计划
+
+MinerU 云端任务返回后，统一以 PDF `CropBox` 作为页面坐标空间，并按以下流程处理：
+
+1. 保存 MinerU 返回的原始元素类型、bbox、置信度和阅读顺序，不提前改写结果。
+2. 按 `CropBox` 渲染每一页，将 bbox、元素类型和阅读顺序编号画到页面上。
+3. 每页编码成有损 JPEG，使用固定尺寸、颜色表和 JPEG quality，确保不同轮次可以直接比较。
+4. 让 Luna Medium 逐页检查元素划分，判断图片、图注、正文、脚注、表格及阅读顺序是否正确。
+5. Luna Medium 为每页返回 `pass` 或 `fail`。对于失败页，同时记录错误元素、错误类型和原因。
+6. 将全部失败页写入独立清单，只对这些页面运行 Paddle 修复流程。
+
+Paddle 修复流程以本次测试中 `p104-layout-db-balanced-v1` 的组合为起点：
+
+- layout model：`PP-DocLayout-S`
+- text detection model：`PP-OCRv5_mobile_det`
+- layout threshold：`0.35`
+- layout NMS：启用
+- DB pixel threshold：`0.25`
+- DB box threshold：`0.45`
+- DB unclip ratio：`1.5`
+- 后处理：语义区域与 DB 文本行对齐，删除图片内部的正文候选
+
+每个失败页执行以下循环：
+
+1. 缓存一次模型原始输出。
+2. 调节 layout threshold、DB threshold、box threshold、unclip ratio 和区域合并规则，生成少量确定性候选。
+3. 将候选 bbox 画到页面 JPEG 上，让 Luna Medium 选择最好的候选。
+4. Luna Medium 可以返回候选 ID，并对 reading order 给出排列修正；它不直接生成坐标。
+5. 对选中的 bbox 执行覆盖率、重叠、越界、跨栏和图片内部文字排除检查。
+6. 重新生成页面 JPEG 交给 Luna Medium 检查，重复处理到该页通过。
+
+每轮保存参数、候选 ID、Luna 判断、reading-order 修正和硬约束结果。最终输出每页接受的 bbox、元素类型、阅读顺序及对应 Paddle 参数，便于复现和审计。
+
+文字密集的报纸剪报、宣传画等内容必须整体归入 `figure`。图内可见文字不能进入正文流。绕图页面需要分别保存侧栏正文和下方通栏正文，不能退化成普通双栏。
+
 ## 来源
 
 - [pdfminer.six Layout analysis algorithm](https://pdfminersix.readthedocs.io/en/latest/topic/converting_pdf_to_text.html)

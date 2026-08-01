@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pdf": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "--from",
+        "pdf-mcp==1.22.0",
+        "pdf-mcp"
+      ],
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}
