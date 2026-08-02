@@ -1,7 +1,7 @@
 """Find chapter starts in normalized MinerU content.
 
 This module intentionally stops at ordered boundary detection.  It does not
-change the normalized content or construct Semantic IR chapters.
+change the normalized content or render chapter workspaces.
 """
 
 from __future__ import annotations
@@ -639,12 +639,6 @@ def _write_artifact_atomic(path: Path, artifact: ChapterSegmentationArtifact) ->
             temporary_path.unlink(missing_ok=True)
 
 
-# Names kept as small conveniences for later pipeline wiring and callers that
-# prefer describing the response rather than the operation.
-ChapterSegmentationResult = ChapterSegmentationResponse
-segment_mineru_chapters = segment_chapters
-
-
 __all__ = [
     "CHAPTERS_SCHEMA",
     "CHAPTERS_SCHEMA_VERSION",
@@ -655,9 +649,7 @@ __all__ = [
     "ChapterSegmentationArtifact",
     "ChapterSegmentationError",
     "ChapterSegmentationResponse",
-    "ChapterSegmentationResult",
     "is_chapter_segmentation_fresh",
     "segment_chapters",
-    "segment_mineru_chapters",
     "validate_boundaries",
 ]

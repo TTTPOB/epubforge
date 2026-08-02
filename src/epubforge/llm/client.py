@@ -23,9 +23,6 @@ from pydantic import BaseModel
 from epubforge.config import Config
 from epubforge.observability import get_tracker
 
-# Re-export so existing `from epubforge.llm.client import Message` imports stay valid.
-Message = ChatCompletionMessageParam
-
 T = TypeVar("T", bound=BaseModel)
 
 log = logging.getLogger(__name__)

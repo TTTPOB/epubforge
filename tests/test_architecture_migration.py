@@ -1,13 +1,55 @@
+"""Architecture checks for the direct MinerU-Luna workflow."""
+
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+from typing import cast
 
+from click import Group
+import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from epubforge import pipeline
 from epubforge.cli import app
 from epubforge.config import ChaptersSettings, Config, load_config
-from epubforge.epub_builder import resolve_build_source
+
+
+REPO_ROOT = Path(__file__).parents[1]
+SOURCE_ROOT = REPO_ROOT / "src" / "epubforge"
+COMMANDS = {"run", "parse", "normalize", "segment", "prepare", "revise"}
+RETAINED_MODULES = (
+    "annotation",
+    "chapter_revision",
+    "chapter_segmentation",
+    "chapter_workspace",
+    "config",
+    "mineru",
+    "mineru_content",
+    "observability",
+    "page_geometry",
+    "pipeline",
+    "strict_json",
+    "llm.client",
+)
+DELETED_MODULES = (
+    "assembler",
+    "audit.structure",
+    "classifier",
+    "editor.doctor",
+    "editor.agent_output",
+    "editor.patches",
+    "epub_builder",
+    "extract_skip_vlm",
+    "fields",
+    "io",
+    "ir.semantic",
+    "markers",
+    "query",
+    "stage3_artifacts",
+    "text_utils",
+)
 
 
 def test_run_all_uses_the_five_stage_chapter_workflow(monkeypatch) -> None:
@@ -30,33 +72,33 @@ def test_run_all_uses_the_five_stage_chapter_workflow(monkeypatch) -> None:
     assert calls == ["parse", "normalize", "segment", "prepare", "revise"]
 
 
-def test_resolve_build_source_prefers_edit_state_book(tmp_path: Path) -> None:
-    legacy = tmp_path / "05_semantic.json"
-    legacy.write_text("{}", encoding="utf-8")
-    (tmp_path / "06_proofread.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "07_footnote_verified.json").write_text("{}", encoding="utf-8")
-
-    editable = tmp_path / "edit_state" / "book.json"
-    editable.parent.mkdir()
-    editable.write_text("{}", encoding="utf-8")
-
-    assert resolve_build_source(tmp_path) == editable
+@pytest.mark.parametrize("module_name", RETAINED_MODULES)
+def test_retained_modules_import(module_name: str) -> None:
+    importlib.import_module(f"epubforge.{module_name}")
 
 
-def test_cli_help_omits_removed_stage_commands() -> None:
-    runner = CliRunner()
+@pytest.mark.parametrize("module_name", DELETED_MODULES)
+def test_deleted_modules_have_no_source_or_import(module_name: str) -> None:
+    module_path = SOURCE_ROOT.joinpath(*module_name.split("."))
+    assert not module_path.with_suffix(".py").exists()
 
-    result = runner.invoke(app, ["--help"])
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(f"epubforge.{module_name}")
+
+
+def test_cli_exposes_only_the_six_current_commands() -> None:
+    click_app = cast(Group, get_command(app))
+
+    assert set(click_app.commands) == COMMANDS
+
+    result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "refine-toc" not in result.output
-    assert "proofread" not in result.output
-    assert "footnote-verify" not in result.output
-    assert "build" in result.output
+    for command in COMMANDS:
+        assert command in result.output
 
 
 def test_run_command_accepts_stage_5(monkeypatch) -> None:
-    runner = CliRunner()
     calls: list[int] = []
 
     def fake_run_all(*args, **kwargs) -> None:
@@ -64,39 +106,17 @@ def test_run_command_accepts_stage_5(monkeypatch) -> None:
 
     monkeypatch.setattr(pipeline, "run_all", fake_run_all)
 
-    result = runner.invoke(app, ["run", "book.pdf", "--from", "5"])
+    result = CliRunner().invoke(app, ["run", "book.pdf", "--from", "5"])
 
     assert result.exit_code == 0
     assert calls == [5]
 
 
 def test_run_command_rejects_stage_above_5() -> None:
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["run", "book.pdf", "--from", "6"])
+    result = CliRunner().invoke(app, ["run", "book.pdf", "--from", "6"])
 
     assert result.exit_code != 0
     assert "1<=x<=5" in result.output
-
-
-def test_load_config_reads_editor_section_and_env_overrides(
-    tmp_path: Path, monkeypatch
-) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[editor]
-compact_threshold = 12
-max_loops = 7
-""".strip(),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "33")
-
-    cfg = load_config(config_path)
-
-    assert cfg.editor.compact_threshold == 33
-    assert cfg.editor.max_loops == 7
 
 
 def test_load_config_reads_chapter_rendering_section_and_env_override(
@@ -118,7 +138,9 @@ jpeg_quality = 88
     assert cfg.chapters.render_dpi == 200
     assert cfg.chapters.jpeg_quality == 88
     assert ChaptersSettings().render_dpi == 150
+    assert not hasattr(cfg, "editor")
+    assert not hasattr(cfg, "extract")
 
 
-def test_default_model_selects_luna_medium_provider_id() -> None:
+def test_default_model_selects_luna_provider_id() -> None:
     assert Config().llm.model == "openai/gpt-5.6-luna"

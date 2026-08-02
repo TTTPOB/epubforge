@@ -1,5 +1,6 @@
 # project runtime dirs
 work/
+# Preserve local generated/legacy exports, not a production pipeline contract.
 out/
 fixtures/*.pdf
 

@@ -1,8 +1,7 @@
 """Build deterministic, agent-editable workspaces for MinerU chapters.
 
 This module consumes the committed ``02_content`` and ``03_chapters`` JSON
-contracts.  It deliberately stops at HTML and page evidence; it does not
-create Semantic IR or editor patches.
+contracts.  It publishes chapter HTML and annotated page evidence for revision.
 """
 
 from __future__ import annotations
@@ -425,16 +424,6 @@ def build_chapter_workspace(
         finally:
             if staging != Path():
                 _remove_path(staging)
-
-
-def build_chapter_edit_workspace(*args: Any, **kwargs: Any) -> Path:
-    """Compatibility name for callers that describe the edit output."""
-    return build_chapter_workspace(*args, **kwargs)
-
-
-def materialize_chapter_workspace(*args: Any, **kwargs: Any) -> Path:
-    """Compatibility name for pipeline wiring and direct callers."""
-    return build_chapter_workspace(*args, **kwargs)
 
 
 def _load_content(path: Path, *, max_total_asset_bytes: int) -> _Content:
@@ -2105,7 +2094,5 @@ __all__ = [
     "WORKSPACE_SCHEMA",
     "WORKSPACE_SCHEMA_VERSION",
     "ChapterWorkspaceError",
-    "build_chapter_edit_workspace",
     "build_chapter_workspace",
-    "materialize_chapter_workspace",
 ]

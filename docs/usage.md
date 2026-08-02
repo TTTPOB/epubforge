@@ -2,107 +2,79 @@
 
 ## 快速开始
 
-安装依赖：
+安装依赖并配置两个 API key：
 
 ```bash
 uv sync
+export EPUBFORGE_MINERU_API_KEY=...
+export EPUBFORGE_LLM_API_KEY=...
+uv run epubforge --config config.example.toml run fixtures/bmsf.pdf
 ```
 
-默认流程经过五个阶段生成经过修订的章节 HTML。Stage 1 使用 MinerU 官方 API。
-配置 `EPUBFORGE_MINERU_API_KEY` 或 `[mineru].api_key`，然后运行：
+`--config` 必须指向明确的 TOML 文件。省略时，程序只读取默认值和环境变量，
+不会扫描当前目录中的配置文件。
 
-```bash
-uv run epubforge --config config.example.toml run fixtures/example.pdf
-```
-
-Stage 1 会写入：
-
-- `work/example/source/source.pdf`
-- `work/example/source/source_meta.json`
-- `work/example/01_raw.zip`，原始 MinerU API ZIP 归档
-
-已有 `01_raw.zip` 时，parse 会复用归档。传入 `--force-rerun` 才会重新调用 MinerU。
-Stage 1 会先读取完整页数，超过 1000 页的 PDF 会在请求 MinerU 前拒绝。201 至
-1000 页的 PDF 会按每段最多 200 页切分；外层 `01_raw.zip` 包含
-`manifest.json` 和按页码排序的 `segments/segment-NNN-pages-FFFF-LLLL.zip`，每个
-segment 保留一份完整的 MinerU 响应 ZIP。200 页以内继续直接保存单份原始响应 ZIP。
-Stage 1 的崩溃一致性发布要求 POSIX 运行时，以及支持目录 `fsync` 和原子重命名的本地
-文件系统。Windows 会在调用 MinerU 或修改 Stage 1 文件前拒绝执行。网络文件系统的
-`fsync` 和重命名语义可能不同，项目不承诺其崩溃一致性。
-
-## Pipeline
+## 五个阶段
 
 | 阶段 | 命令 | 输入 | 输出 |
 |---|---|---|---|
-| 1 | `epubforge parse` | PDF | `source/source.pdf`、`01_raw.zip` |
-| 2 | `epubforge normalize` | `01_raw.zip`、source PDF | `02_content/content.json`、assets |
-| 3 | `epubforge segment` | `02_content/content.json` | `03_chapters/chapters.json` |
-| 4 | `epubforge prepare` | normalized content、chapter plan、source PDF | `04_edit/manifest.json`、chapter HTML、page JPEGs |
-| 5 | `epubforge revise` | `04_edit/` | 每章 `corrected.html`、`revision.json` |
+| 1 parse | `parse` | PDF | `source/source.pdf`、`source/source_meta.json`、`01_raw.zip` |
+| 2 normalize | `normalize` | `01_raw.zip`、source PDF | `02_content/content.json`、`assets/` |
+| 3 segment | `segment` | `content.json` | `03_chapters/chapters.json` |
+| 4 prepare | `prepare` | content、chapter plan、source PDF | `04_edit/manifest.json`、章节 HTML、标注页面 JPEG |
+| 5 revise | `revise` | `04_edit/` | 每章 `corrected.html`、`revision.json` |
 
-输出树示例：
+`run` 按顺序执行五个阶段：
+
+```bash
+uv run epubforge --config config.example.toml run fixtures/bmsf.pdf
+uv run epubforge --config config.example.toml run fixtures/bmsf.pdf --from 3 --force-rerun
+```
+
+`--from` 接受 `1` 到 `5`。程序复用更早阶段的新鲜输出；加入
+`--force-rerun` 后，程序从指定阶段起重建输出。每个单阶段命令也接受
+`--force-rerun` 或 `-f`。Stage 5 默认遇到首个章节错误就停止，同时保留已经成功
+发布的章节；传入 `--continue-on-error` 才会继续后续章节。
+
+## 输出目录
 
 ```text
-work/example/
-├── source/source.pdf
+work/bmsf/
+├── source/
+│   ├── source.pdf
+│   └── source_meta.json
 ├── 01_raw.zip
-├── 02_content/content.json
-├── 02_content/assets/
+├── 02_content/
+│   ├── content.json
+│   └── assets/
 ├── 03_chapters/chapters.json
 └── 04_edit/
     ├── manifest.json
     └── chapters/0001/
+        ├── chapter.json
         ├── chapter.html
         ├── corrected.html
         ├── revision.json
         └── pages/page-0000.jpg
 ```
 
-单独运行阶段：
+Stage 1 直接保存 MinerU 返回的 ZIP。200 页以内保存一份原始响应；201 到 1000
+页的 PDF 会按每段最多 200 页上传，`01_raw.zip` 会保存外层
+`manifest.json` 和完整的分段响应 ZIP。程序最多接受 1000 页。
 
-```bash
-uv run epubforge normalize fixtures/example.pdf
-uv run epubforge segment fixtures/example.pdf
-uv run epubforge prepare fixtures/example.pdf
-uv run epubforge revise fixtures/example.pdf
-```
+Stage 1 发布结果要求 POSIX 环境、目录 `fsync` 和原子重命名。程序会先检查这些能力，
+再读取 PDF 或调用 MinerU。网络文件系统不提供项目承诺的崩溃一致性保证。
 
-`run` 会串行执行 Stage 1-5：
+## Agent 页面工作区
 
-```bash
-uv run epubforge --config config.example.toml run fixtures/example.pdf
-uv run epubforge --config config.example.toml run fixtures/example.pdf --from 3 --force-rerun
-```
+Stage 4 在程序内部读取 source PDF，生成带 content ID、page ID 和 bbox 标记的章节
+HTML，以及 `pages/page-*.jpg` 标注页面。章节 agent 只接收这些 HTML 和 JPEG 文件，
+不会打开、渲染或访问 PDF。
 
-`--from` 接受 `1-5`。早期阶段会按新鲜度检查确保依赖存在；
-`--force-rerun` 会强制重跑选定阶段及后续阶段。默认 `run` 不接受旧版
-`--pages` 参数。Stage 5 默认在首个章节失败后停止，并保留已经发布的成功章节；
-传入 `--continue-on-error` 才会继续处理后续章节。
+Luna 在 Stage 3 只返回经过校验的章节边界，在 Stage 5 只返回修订后的 HTML。程序会
+检查边界、标签、content ID、bbox 和文件哈希，再原子发布结果。
 
-章节阶段从 `[llm].model` 读取模型 ID。示例配置使用
-`openai/gpt-5.6-luna` 选择 Luna Medium；代码不会硬编码模型。Provider 专属的
-reasoning 或 variant 参数放在 `[llm].extra_body`，不要把 OpenCode 任务 variant
-当作应用 API 模型设置。
-
-旧的 `classify`、`extract`、`assemble`、`build` 命令仍保留为迁移期接口，`run`
-不会调用这些命令。
-
-## Editor
-
-```bash
-uv run epubforge --config config.example.toml editor init work/example
-uv run epubforge --config config.example.toml editor doctor work/example
-uv run epubforge --config config.example.toml editor render-prompt work/example --kind fixer --chapter <chapter_uid>
-uv run epubforge --config config.example.toml editor render-page work/example --page 5
-```
-
-编辑器通过 `AgentOutput` 和 `BookPatch` 记录结构化修改。`evidence_refs` 保留为外部证据引用字段，编辑器不解释其来源。
-
-## 配置
-
-必须通过 `--config <path>` 显式指定 TOML 文件；省略时只加载内建默认值和环境变量。
-
-常用设置：
+## 配置与日志
 
 ```toml
 [llm]
@@ -117,24 +89,26 @@ language = "ch"
 [runtime]
 cache_dir = "work/.cache"
 work_dir = "work"
-out_dir = "out"
+log_level = "INFO"
 
 [chapters]
 render_dpi = 150
 jpeg_quality = 92
 ```
 
-环境变量示例：
+常用环境变量如下：
 
 ```bash
 EPUBFORGE_MINERU_API_KEY=...
 EPUBFORGE_LLM_API_KEY=sk-or-...
 EPUBFORGE_LLM_MODEL=openai/gpt-5.6-luna
+EPUBFORGE_RUNTIME_WORK_DIR=work
+EPUBFORGE_RUNTIME_CACHE_DIR=work/.cache
 EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
 ```
 
-日志默认写入 `work/<name>/logs/run-<timestamp>.log`，同时输出到 stderr：
+日志默认写入 `work/<name>/logs/`，同时输出到 stderr：
 
 ```bash
-uv run epubforge -L DEBUG parse fixtures/example.pdf
+uv run epubforge -L DEBUG parse fixtures/bmsf.pdf
 ```

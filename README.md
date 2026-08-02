@@ -1,77 +1,84 @@
 # epubforge
 
-MinerU-based PDF → EPUB conversion with agentic editing support.
+epubforge is a MinerU-Luna pipeline that turns a PDF into corrected chapter
+HTML. MinerU supplies the raw document archive. Luna detects chapter boundaries
+and revises chapter HTML after the pipeline prepares annotated page evidence.
 
-The default workflow produces corrected chapter HTML in five stages. Stage 1
-stores the MinerU API archive at `work/<book>/01_raw.zip` and keeps the source
-PDF at `work/<book>/source/source.pdf`. Stage 1 reads the full PDF page count
-before any MinerU API request, accepts at most 1000 pages, and sends at most
-200 pages per MinerU upload. Set
-`EPUBFORGE_MINERU_API_KEY` or `[mineru].api_key`, then run:
+## Quick Start
+
+Set `EPUBFORGE_MINERU_API_KEY` and `EPUBFORGE_LLM_API_KEY`, then run:
 
 ```bash
+uv sync
 uv run epubforge --config config.example.toml run input.pdf
 ```
 
-Stage 1 requires a POSIX runtime and a local filesystem that supports durable
-directory `fsync` and atomic rename. The command rejects unsupported runtimes
-before it calls MinerU or changes published Stage 1 files. Network filesystems
-can expose different `fsync` and rename behavior, so epubforge does not extend
-the crash-consistency guarantee to them.
+The six CLI commands are `run`, `parse`, `normalize`, `segment`, `prepare`,
+and `revise`. Each stage command accepts `--force-rerun`; `run` also accepts
+`--from 1` through `--from 5` and `--continue-on-error` for chapter revision.
 
-The default stages and outputs are:
+## Contracts
 
 | Stage | Command | Output |
-|---|---|---|
-| 1 | `parse` | `source/source.pdf`, `01_raw.zip` |
-| 2 | `normalize` | `02_content/content.json`, normalized assets |
+| --- | --- | --- |
+| 1 | `parse` | `source/source.pdf`, `source/source_meta.json`, `01_raw.zip` |
+| 2 | `normalize` | `02_content/content.json`, `02_content/assets/` |
 | 3 | `segment` | `03_chapters/chapters.json` |
-| 4 | `prepare` | `04_edit/manifest.json`, chapter HTML and page JPEGs |
-| 5 | `revise` | `04_edit/chapters/*/corrected.html`, `revision.json` |
+| 4 | `prepare` | `04_edit/manifest.json`, chapter HTML, annotated page JPEGs |
+| 5 | `revise` | `04_edit/chapters/<ordinal>/corrected.html`, `revision.json` |
 
-`run` executes these stages in order. Each stage also accepts `-f` or
-`--force-rerun`. `--from` accepts `1-5`; earlier stages ensure prerequisites,
-and `--force-rerun` affects the selected stage and later stages. The default
-run command has no page filter.
+For a book named `input`, the workspace looks like:
 
-The chapter stages record the configured model in their artifacts. The example
-configuration selects Luna Medium with `openai/gpt-5.6-luna` in `[llm].model`;
-provider-specific reasoning or variant settings belong in `[llm].extra_body`.
-The pipeline does not hardcode a model name.
+```text
+work/input/
+├── source/
+│   ├── source.pdf
+│   └── source_meta.json
+├── 01_raw.zip
+├── 02_content/
+│   ├── content.json
+│   └── assets/
+├── 03_chapters/chapters.json
+└── 04_edit/
+    ├── manifest.json
+    └── chapters/0001/
+        ├── chapter.json
+        ├── chapter.html
+        ├── corrected.html
+        ├── revision.json
+        └── pages/page-0000.jpg
+```
 
-The older `classify`, `extract`, `assemble`, and `build` commands remain
-available as legacy interfaces while the migration finishes. They do not run
-as part of `run`.
+Stage 1 stores the untouched MinerU ZIP. PDFs up to 200 pages use the original
+response ZIP directly. Larger accepted PDFs use an outer archive containing
+`manifest.json` and ordered response ZIPs, with no flattened members.
 
-For PDFs up to 200 pages, `01_raw.zip` remains the original MinerU response ZIP.
-For PDFs from 201 through 1000 pages, `01_raw.zip` is an outer ZIP with stable
-member ordering and headers. It contains `manifest.json` and ordered
-`segments/segment-NNN-pages-FFFF-LLLL.zip` members. Each segment member
-preserves one complete MinerU response ZIP without flattening its files. Batch
-IDs and response hashes in the manifest vary between MinerU runs.
+Stage 1 requires POSIX directory `fsync` and atomic rename support. It rejects
+unsupported filesystems before calling MinerU or replacing published files.
+
+## Configuration
+
+Pass configuration explicitly:
+
+```bash
+uv run epubforge --config config.example.toml parse input.pdf
+```
+
+The configuration sections are `[llm]`, `[mineru]`, `[runtime]`, and
+`[chapters]`. Environment variables override individual fields. The main
+credentials are `EPUBFORGE_LLM_API_KEY` and `EPUBFORGE_MINERU_API_KEY`.
 
 ## Tests
 
-Run the test suite with two worker processes by default:
-
 ```bash
 uv run pytest
-```
-
-Run the suite serially when debugging shared process state:
-
-```bash
 uv run pytest -n 0
+uv run pyrefly check
+uv run python -m compileall -q src tests scripts
+uv lock --check
 ```
 
-Use serial mode for interactive `pdb` debugging:
-
-```bash
-uv run pytest -n 0 --pdb
-```
-
-Use four workers as an explicit local override on machines with enough CPU and memory:
-
-```bash
-uv run pytest -n 4 --dist worksteal
-```
+The optional Paddle layout tuning script remains at
+`scripts/paddle_layout_tune.py`. It reads selected PDF pages in its own
+explicit run, caches raw inference evidence, and supports deterministic
+postprocessing and trusted page patches.

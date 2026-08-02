@@ -54,21 +54,7 @@ class RuntimeSettings(BaseModel):
     concurrency: int = 4
     cache_dir: Path = Path("work/.cache")
     work_dir: Path = Path("work")
-    out_dir: Path = Path("out")
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
-
-
-class EditorSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    compact_threshold: int = 50
-    max_loops: int = 50
-
-
-class ExtractSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enable_book_memory: bool = True
 
 
 class ChaptersSettings(BaseModel):
@@ -93,8 +79,6 @@ class Config(BaseSettings):
     llm: ProviderSettings = Field(default_factory=ProviderSettings)
     mineru: MineruSettings = Field(default_factory=MineruSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
-    editor: EditorSettings = Field(default_factory=EditorSettings)
-    extract: ExtractSettings = Field(default_factory=ExtractSettings)
     chapters: ChaptersSettings = Field(default_factory=ChaptersSettings)
 
     def require_llm(self) -> None:
@@ -112,9 +96,6 @@ class Config(BaseSettings):
 
     def book_work_dir(self, pdf_path: Path) -> Path:
         return self.runtime.work_dir / pdf_path.stem
-
-    def book_out_path(self, pdf_path: Path) -> Path:
-        return self.runtime.out_dir / f"{pdf_path.stem}.epub"
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +146,7 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_RUNTIME_CONCURRENCY", "runtime", "concurrency", int),
     ("EPUBFORGE_RUNTIME_CACHE_DIR", "runtime", "cache_dir", Path),
     ("EPUBFORGE_RUNTIME_WORK_DIR", "runtime", "work_dir", Path),
-    ("EPUBFORGE_RUNTIME_OUT_DIR", "runtime", "out_dir", Path),
     ("EPUBFORGE_RUNTIME_LOG_LEVEL", "runtime", "log_level", str),
-    ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
-    ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
-    ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
     ("EPUBFORGE_CHAPTERS_RENDER_DPI", "chapters", "render_dpi", int),
     ("EPUBFORGE_CHAPTERS_JPEG_QUALITY", "chapters", "jpeg_quality", int),
 ]
@@ -212,7 +189,7 @@ def load_config(config_path: Path | None = None) -> Config:
             toml_data = tomllib.load(fh)
         # Accept only known top-level sections; unknown keys at the top level are silently
         # ignored (Config.model_config extra="ignore" handles this at parse time too).
-        for key in ("llm", "mineru", "runtime", "editor", "extract", "chapters"):
+        for key in ("llm", "mineru", "runtime", "chapters"):
             if key in toml_data:
                 base[key] = dict(toml_data[key])
 

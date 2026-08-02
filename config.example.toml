@@ -1,7 +1,7 @@
 # Example configuration for epubforge.
 # Pass this file via: uv run epubforge --config config.example.toml <command>
 # Settings here can be overridden by EPUBFORGE_* environment variables.
-# Unknown keys in any section are rejected (fail-fast).
+# Unknown keys in known sections are rejected (fail-fast).
 
 [llm]
 base_url        = "https://openrouter.ai/api/v1"
@@ -31,15 +31,7 @@ language              = "ch"  # ch | en | korean | japan
 concurrency = 4
 cache_dir   = "work/.cache"
 work_dir    = "work"
-out_dir     = "out"
 log_level   = "INFO"   # DEBUG | INFO | WARNING
-
-[editor]
-compact_threshold           = 50     # compact after N audit events
-max_loops                   = 50     # max agent loop iterations
-
-[extract]
-enable_book_memory   = true  # maintain rolling BookMemory across extraction units
 
 [chapters]
 render_dpi   = 150  # chapter page JPEG rendering DPI; valid range 72-300

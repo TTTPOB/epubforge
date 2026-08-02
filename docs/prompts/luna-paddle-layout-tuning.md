@@ -16,7 +16,7 @@ Read these primary artifacts before deciding:
 
 `source.jpg` is an optional unmarked CropBox raster. Consult the existing file only when a bbox outline or label in the annotated and raw images masks important content and leaves the page meaning ambiguous. Do not open or render the original PDF to obtain another page image.
 
-Judge the current result directly. Do not classify the page as simple or complex first.
+Judge the current result directly. Do not make a preliminary page-kind decision.
 
 ## Allowed actions
 

@@ -2,7 +2,7 @@
 
 Stage 1 deliberately stores the response archive without changing it.  This
 module is the first reader of that archive and keeps its output independent of
-the Semantic IR and editor subsystems.
+the later chapter stages.
 """
 
 from __future__ import annotations
@@ -314,34 +314,6 @@ def normalize_mineru_content(
             raise MineruContentError(f"Cannot normalize MinerU archive: {exc}") from exc
         finally:
             _remove_path(staging_path)
-
-
-def normalize_content(
-    raw_archive: str | Path,
-    output_dir: str | Path | None = None,
-    *,
-    source_pdf: str | Path,
-    force: bool = False,
-    full_page_count: int | None = None,
-    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-    max_member_bytes: int | None = None,
-    max_asset_bytes: int | None = None,
-    max_members: int = DEFAULT_MAX_MEMBERS,
-) -> Path:
-    """Compatibility alias for :func:`normalize_mineru_content`."""
-    return normalize_mineru_content(
-        raw_archive,
-        output_dir,
-        source_pdf=source_pdf,
-        force=force,
-        full_page_count=full_page_count,
-        max_archive_bytes=max_archive_bytes,
-        max_uncompressed_bytes=max_uncompressed_bytes,
-        max_member_bytes=max_member_bytes,
-        max_asset_bytes=max_asset_bytes,
-        max_members=max_members,
-    )
 
 
 def _source_pdf_details(path: Path) -> tuple[str, int]:
@@ -1444,6 +1416,5 @@ __all__ = [
     "CONTENT_SCHEMA",
     "CONTENT_SCHEMA_VERSION",
     "MineruContentError",
-    "normalize_content",
     "normalize_mineru_content",
 ]

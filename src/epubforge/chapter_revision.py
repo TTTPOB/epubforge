@@ -144,7 +144,7 @@ _TAG_ATTRS: dict[str, frozenset[str]] = {
     "td": frozenset({"colspan", "rowspan"}),
 }
 
-SYSTEM_PROMPT = """You are a precise EPUB chapter editor. Use only the supplied HTML and annotated page images.
+SYSTEM_PROMPT = """You are a precise corrected-HTML chapter editor. Use only the supplied HTML and annotated page images.
 Return one corrected complete HTML document.
 Correct headings and section boundaries, semantic block tags, reading order, OCR text, repeated headers or footers, page numbers, tables, figures, captions, footnotes, and paragraphs that continue across pages.
 Keep every data-content-idx reference. One element may use an ordered space-separated list to merge content IDs. A split may repeat one ID only with data-content-part="n/N"; use every part exactly once.

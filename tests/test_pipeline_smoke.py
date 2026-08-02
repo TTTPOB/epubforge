@@ -1,47 +1,57 @@
-"""End-to-end smoke test for the ingestion pipeline.
-
-Requires fixtures/*.pdf to exist and API env vars to be set.
-Skips automatically when fixtures are absent so CI passes without credentials.
-"""
+"""Optional end-to-end smoke test for the current five-stage run command."""
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
+import subprocess
 
 import pytest
 
-FIXTURES = sorted(Path("fixtures").glob("*.pdf"))
-FIXTURE = FIXTURES[0] if FIXTURES else None
+
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "bmsf.pdf"
 
 
-@pytest.mark.skipif(not FIXTURES, reason="No PDF fixtures found in fixtures/")
+@pytest.mark.skipif(not FIXTURE.is_file(), reason="No PDF fixture found")
 @pytest.mark.skipif(
-    not os.environ.get("EPUBFORGE_LLM_API_KEY"),
-    reason="EPUBFORGE_LLM_API_KEY not set",
+    not (
+        os.environ.get("EPUBFORGE_LLM_API_KEY")
+        and os.environ.get("EPUBFORGE_MINERU_API_KEY")
+    ),
+    reason="EPUBFORGE_LLM_API_KEY and EPUBFORGE_MINERU_API_KEY are required",
 )
-def test_full_pipeline_smoke() -> None:
-    """Run stage 4 on top of existing stage 1-3 outputs and verify the raw semantic artifact."""
-    assert FIXTURE is not None
-    work_dir = Path("work") / FIXTURE.stem
-
-    # Require stages 1-3 to already exist (expensive; skip test if not)
-    if not (work_dir / "02_pages.json").exists():
-        pytest.skip("Stage 2 output missing — run parse+classify first")
-    if not list((work_dir / "03_extract").glob("unit_*.json")):
-        pytest.skip("Stage 3 output missing — run extract first")
+def test_full_pipeline_smoke_uses_isolated_run_path(tmp_path: Path) -> None:
+    work_root = tmp_path / "work"
+    cache_root = tmp_path / "cache"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EPUBFORGE_RUNTIME_WORK_DIR": str(work_root),
+            "EPUBFORGE_RUNTIME_CACHE_DIR": str(cache_root),
+        }
+    )
 
     result = subprocess.run(
-        ["uv", "run", "epubforge", "run", str(FIXTURE), "--from", "4", "--force-rerun"],
+        ["uv", "run", "epubforge", "run", str(FIXTURE), "--force-rerun"],
         capture_output=True,
         text=True,
+        env=environment,
+        check=False,
     )
+
     assert result.returncode == 0, f"Pipeline failed:\n{result.stdout}\n{result.stderr}"
+    work_dir = work_root / FIXTURE.stem
+    assert (work_dir / "01_raw.zip").is_file()
+    assert (work_dir / "02_content/content.json").is_file()
+    assert (work_dir / "03_chapters/chapters.json").is_file()
+    assert (work_dir / "04_edit/manifest.json").is_file()
 
-    raw_path = work_dir / "05_semantic_raw.json"
-    assert raw_path.exists(), "05_semantic_raw.json not created"
-
-    raw = json.loads(raw_path.read_text())
-    assert raw["chapters"], "05_semantic_raw.json has no chapters"
+    chapters = json.loads(
+        (work_dir / "04_edit/manifest.json").read_text(encoding="utf-8")
+    )["chapters"]
+    assert chapters
+    for chapter in chapters:
+        chapter_dir = work_dir / "04_edit" / chapter["path"]
+        assert (chapter_dir / "corrected.html").is_file()
+        assert (chapter_dir / "revision.json").is_file()

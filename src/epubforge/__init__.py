@@ -1,1 +1,1 @@
-"""epubforge: MinerU-based PDF to EPUB converter."""
+"""epubforge: MinerU-Luna pipeline for corrected chapter HTML."""

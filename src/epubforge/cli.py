@@ -6,19 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import typer
-from rich.console import Console
 
 from epubforge.config import Config, load_config
 from epubforge import pipeline
-from epubforge.editor.app import editor_app
 from epubforge.observability import log_path_for, setup_logging
 
 app = typer.Typer(
     name="epubforge",
-    help="LLM-assisted PDF → EPUB converter for books and theses.",
+    help="MinerU-Luna PDF pipeline for corrected chapter HTML.",
     no_args_is_help=True,
 )
-console = Console()
 
 log = logging.getLogger(__name__)
 
@@ -59,9 +56,6 @@ def _global_options(
     ctx.obj = AppContext(config=cfg, log_file_override=log_file)
 
 
-app.add_typer(editor_app, name="editor")
-
-
 def _get_config(ctx: typer.Context) -> Config:
     """Retrieve effective config from root AppContext."""
     root_obj = ctx.find_root().obj
@@ -82,11 +76,9 @@ def _init_logging(
 
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
     log.info(
-        "epubforge startup: model=%s cache_dir=%s editor=compact:%d/max_loops:%d log=%s",
+        "epubforge startup: model=%s cache_dir=%s log=%s",
         cfg.llm.model,
         cfg.runtime.cache_dir,
-        cfg.editor.compact_threshold,
-        cfg.editor.max_loops,
         log_path or "(stderr only)",
     )
 
@@ -108,50 +100,6 @@ def _run_logged_stage(
     log_path = _init_logging(cfg, pdf_path, log_file_override)
     _log_startup_banner(cfg, log_path)
     runner(pdf_path, cfg, force=force, **kwargs)
-
-
-def _parse_pages(pages_str: str | None) -> set[int] | None:
-    """Parse '5,10-12,20' into {5, 10, 11, 12, 20}."""
-    if not pages_str:
-        return None
-    result: set[int] = set()
-    for part in pages_str.split(","):
-        part = part.strip()
-        if "-" in part:
-            lo_str, hi_str = part.split("-", 1)
-            lo_str = lo_str.strip()
-            hi_str = hi_str.strip()
-            try:
-                lo = int(lo_str)
-                hi = int(hi_str)
-            except ValueError:
-                raise typer.BadParameter(
-                    f"invalid page spec '{part}'", param_hint="--pages"
-                )
-            if lo <= 0 or hi <= 0:
-                raise typer.BadParameter(
-                    f"page number must be positive in range '{part}'",
-                    param_hint="--pages",
-                )
-            if lo > hi:
-                raise typer.BadParameter(
-                    f"reversed page range '{part}': start ({lo}) must be <= end ({hi})",
-                    param_hint="--pages",
-                )
-            result.update(range(lo, hi + 1))
-        else:
-            try:
-                page = int(part)
-            except ValueError:
-                raise typer.BadParameter(
-                    f"invalid page spec '{part}'", param_hint="--pages"
-                )
-            if page <= 0:
-                raise typer.BadParameter(
-                    f"page number must be positive, got {part}", param_hint="--pages"
-                )
-            result.add(page)
-    return result
 
 
 @app.command()
@@ -244,52 +192,3 @@ def revise(
         force=force,
         continue_on_error=continue_on_error,
     )
-
-
-@app.command()
-def classify(
-    ctx: typer.Context,
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-) -> None:
-    """Legacy page classifier; use normalize for the default workflow."""
-    _run_logged_stage(ctx, pdf_path, pipeline.run_classify, force=force)
-
-
-@app.command()
-def extract(
-    ctx: typer.Context,
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-    pages: str | None = typer.Option(
-        None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
-    ),
-) -> None:
-    """Legacy extraction stage; use segment for the default workflow."""
-    _run_logged_stage(
-        ctx,
-        pdf_path,
-        pipeline.run_extract,
-        force=force,
-        pages=_parse_pages(pages),
-    )
-
-
-@app.command()
-def assemble(
-    ctx: typer.Context,
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-) -> None:
-    """Legacy Semantic IR assembly; use prepare for the default workflow."""
-    _run_logged_stage(ctx, pdf_path, pipeline.run_assemble, force=force)
-
-
-@app.command()
-def build(
-    ctx: typer.Context,
-    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
-    force: bool = typer.Option(False, "--force-rerun", "-f"),
-) -> None:
-    """Legacy EPUB build from Semantic IR."""
-    _run_logged_stage(ctx, pdf_path, pipeline.run_build, force=force)
