@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+from pathlib import Path
+import threading
+import time
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +17,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from epubforge.config import Config, ProviderSettings, RuntimeSettings
+from epubforge.llm import client as llm_client_module
 from epubforge.llm.client import LLMClient, _apply_cache_control
 from epubforge.observability import get_tracker
 
@@ -102,6 +107,201 @@ class TestTruncationRetry:
                 )
 
         assert any("truncated" in r.message.lower() for r in caplog.records)
+
+
+class TestSemanticCacheValidation:
+    @staticmethod
+    def _reject_invalid(value: _DummyOutput) -> None:
+        if value.value == "invalid":
+            raise ValueError("semantic result is invalid")
+
+    def test_invalid_provider_result_is_not_cached(self, tmp_path) -> None:
+        client = _make_client(tmp_path)
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "provider-invalid"}],
+        )
+        invalid = _make_completion(_DummyOutput(value="invalid"))
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=invalid
+        ):
+            with pytest.raises(ValueError, match="semantic result"):
+                client.chat_parsed(
+                    messages,
+                    response_format=_DummyOutput,
+                    validator=self._reject_invalid,
+                )
+
+        key = client._cache_key(messages, _DummyOutput, None, {})
+        assert not client._cache_path(key).exists()
+
+    def test_invalid_cached_result_is_evicted_and_provider_is_called(
+        self, tmp_path
+    ) -> None:
+        client = _make_client(tmp_path)
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "cached-invalid"}],
+        )
+        invalid = _make_completion(_DummyOutput(value="invalid"))
+        valid = _make_completion(_DummyOutput(value="valid"))
+
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=invalid
+        ):
+            client.chat_parsed(messages, response_format=_DummyOutput)
+
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=valid
+        ) as mock_parse:
+            result = client.chat_parsed(
+                messages,
+                response_format=_DummyOutput,
+                validator=self._reject_invalid,
+            )
+
+        assert result.value == "valid"
+        assert mock_parse.call_count == 1
+
+    def test_bypass_cache_calls_provider_and_replaces_cache(self, tmp_path) -> None:
+        client = _make_client(tmp_path)
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "forced"}],
+        )
+        cached = _make_completion(_DummyOutput(value="cached"))
+        forced = _make_completion(_DummyOutput(value="forced"))
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=cached
+        ):
+            client.chat_parsed(messages, response_format=_DummyOutput)
+
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=forced
+        ) as mock_parse:
+            result = client.chat_parsed(
+                messages,
+                response_format=_DummyOutput,
+                bypass_cache=True,
+            )
+
+        assert result.value == "forced"
+        assert mock_parse.call_count == 1
+        with patch.object(
+            client._client.chat.completions, "parse", side_effect=AssertionError
+        ):
+            assert (
+                client.chat_parsed(messages, response_format=_DummyOutput).value
+                == "forced"
+            )
+
+    def test_cache_replace_failure_keeps_previous_record(self, tmp_path) -> None:
+        client = _make_client(tmp_path)
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "atomic-cache"}],
+        )
+        old = _make_completion(_DummyOutput(value="old"))
+        new = _make_completion(_DummyOutput(value="new"))
+        with patch.object(client._client.chat.completions, "parse", return_value=old):
+            client.chat_parsed(messages, response_format=_DummyOutput)
+
+        key = client._cache_key(messages, _DummyOutput, None, {})
+        cache_path = client._cache_path(key)
+        old_bytes = cache_path.read_bytes()
+        original_replace = llm_client_module.os.replace
+
+        def fail_cache_replace(source, destination):
+            if Path(destination) == cache_path:
+                raise OSError("cache replace failed")
+            original_replace(source, destination)
+
+        with (
+            patch.object(client._client.chat.completions, "parse", return_value=new),
+            patch.object(
+                llm_client_module.os, "replace", side_effect=fail_cache_replace
+            ),
+        ):
+            with pytest.raises(OSError, match="cache replace failed"):
+                client.chat_parsed(
+                    messages,
+                    response_format=_DummyOutput,
+                    bypass_cache=True,
+                )
+
+        assert cache_path.read_bytes() == old_bytes
+        assert not list(cache_path.parent.glob(f".{cache_path.name}.*.tmp"))
+
+    def test_per_key_lock_prevents_duplicate_provider_calls(self, tmp_path) -> None:
+        clients = [_make_client(tmp_path), _make_client(tmp_path)]
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "same-key-concurrency"}],
+        )
+        call_count = 0
+        count_lock = threading.Lock()
+
+        def provider(**_: Any) -> MagicMock:
+            nonlocal call_count
+            with count_lock:
+                call_count += 1
+            time.sleep(0.05)
+            return _make_completion(_DummyOutput(value="one-provider"))
+
+        with (
+            patch.object(
+                clients[0]._client.chat.completions, "parse", side_effect=provider
+            ),
+            patch.object(
+                clients[1]._client.chat.completions, "parse", side_effect=provider
+            ),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            futures = [
+                executor.submit(
+                    client.chat_parsed,
+                    messages,
+                    response_format=_DummyOutput,
+                )
+                for client in clients
+            ]
+            results = [future.result() for future in futures]
+
+        assert call_count == 1
+        assert [result.value for result in results] == ["one-provider", "one-provider"]
+
+    def test_cache_rejection_log_does_not_include_response_text(
+        self, tmp_path, caplog
+    ) -> None:
+        client = _make_client(tmp_path)
+        messages = cast(
+            list[ChatCompletionMessageParam],
+            [{"role": "user", "content": "private-response"}],
+        )
+        cached = _make_completion(_DummyOutput(value="private-response"))
+        replacement = _make_completion(_DummyOutput(value="accepted"))
+        with patch.object(
+            client._client.chat.completions, "parse", return_value=cached
+        ):
+            client.chat_parsed(messages, response_format=_DummyOutput)
+
+        def reject_with_secret(value: _DummyOutput) -> None:
+            if value.value == "private-response":
+                raise ValueError("private-response")
+
+        with (
+            patch.object(
+                client._client.chat.completions, "parse", return_value=replacement
+            ),
+            caplog.at_level(logging.WARNING, logger="epubforge.llm.client"),
+        ):
+            client.chat_parsed(
+                messages,
+                response_format=_DummyOutput,
+                validator=reject_with_secret,
+            )
+
+        assert "private-response" not in caplog.text
 
 
 class TestJsonObjectFallback:

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, Callable, TypeVar, cast
 
+from filelock import FileLock
 from openai import BadRequestError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel
@@ -112,6 +117,48 @@ def _count_images(messages: list[ChatCompletionMessageParam]) -> int:
     return count
 
 
+@contextmanager
+def _cache_key_lock(cache_path: Path) -> Iterator[None]:
+    """Serialize cache read, validation, provider call, and publication per key."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_path.with_name(f".{cache_path.name}.lock")
+    lock = FileLock(str(lock_path))
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _write_cache_atomic(path: Path, parsed: BaseModel) -> None:
+    """Publish one complete cache record without exposing partial JSON."""
+    serialized = json.dumps(
+        {"content": parsed.model_dump_json()},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    fd: int | None = None
+    temporary_path: Path | None = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(fd, "wb") as stream:
+            fd = None
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 class LLMClient:
     """Thin wrapper around an OpenAI-compatible chat endpoint with Pydantic parsing."""
 
@@ -140,6 +187,8 @@ class LLMClient:
         response_format: type[T],
         temperature: float | None = None,
         extra_body: dict[str, Any] | None = None,
+        validator: Callable[[T], bool | None] | None = None,
+        bypass_cache: bool = False,
     ) -> T:
         merged_extra = _deep_merge(self.extra_body, extra_body or {})
         cache_key = self._cache_key(
@@ -161,43 +210,72 @@ class LLMClient:
             images,
         )
 
-        if cache_path.exists():
-            raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
-            log.info("%s req=%s cache HIT", self._kind, req_id)
-            get_tracker().record_hit()
-            return response_format.model_validate_json(raw)
+        with _cache_key_lock(cache_path):
+            if not bypass_cache and cache_path.exists():
+                try:
+                    raw = json.loads(cache_path.read_text(encoding="utf-8"))["content"]
+                    parsed = response_format.model_validate_json(raw)
+                    if validator is not None:
+                        if validator(parsed) is False:
+                            raise ValueError(
+                                "semantic validator rejected cached result"
+                            )
+                except Exception as exc:
+                    log.warning(
+                        "%s req=%s cached result rejected; evicting cache entry (%s)",
+                        self._kind,
+                        req_id,
+                        type(exc).__name__,
+                    )
+                    try:
+                        cache_path.unlink(missing_ok=True)
+                    except OSError as unlink_error:
+                        log.warning(
+                            "%s req=%s could not evict invalid cache entry: %s",
+                            self._kind,
+                            req_id,
+                            type(unlink_error).__name__,
+                        )
+                else:
+                    log.info("%s req=%s cache HIT", self._kind, req_id)
+                    get_tracker().record_hit()
+                    return parsed
 
-        t0 = time.perf_counter()
-        sdk_messages = _apply_cache_control(messages, enabled=self.prompt_caching)
-        result = self._call_parsed(
-            sdk_messages, response_format, temperature, merged_extra, req_id=req_id
-        )
-        elapsed = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            sdk_messages = _apply_cache_control(messages, enabled=self.prompt_caching)
+            result = self._call_parsed(
+                sdk_messages,
+                response_format,
+                temperature,
+                merged_extra,
+                req_id=req_id,
+            )
+            elapsed = time.perf_counter() - t0
 
-        log.info(
-            "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc cached=%d",
-            self._kind,
-            req_id,
-            elapsed,
-            result.finish_reason,
-            result.prompt_tokens,
-            result.completion_tokens,
-            result.cached_tokens,
-        )
-        get_tracker().record_miss(
-            prompt=result.prompt_tokens,
-            completion=result.completion_tokens,
-            elapsed=elapsed,
-            cached=result.cached_tokens,
-        )
+            log.info(
+                "%s req=%s cache MISS elapsed=%.2fs finish=%s usage=%dp+%dc cached=%d",
+                self._kind,
+                req_id,
+                elapsed,
+                result.finish_reason,
+                result.prompt_tokens,
+                result.completion_tokens,
+                result.cached_tokens,
+            )
+            get_tracker().record_miss(
+                prompt=result.prompt_tokens,
+                completion=result.completion_tokens,
+                elapsed=elapsed,
+                cached=result.cached_tokens,
+            )
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        parsed = result.parsed
-        cache_path.write_text(
-            json.dumps({"content": parsed.model_dump_json()}),
-            encoding="utf-8",
-        )
-        return parsed
+            parsed = cast(T, result.parsed)
+            if validator is not None:
+                if validator(parsed) is False:
+                    raise ValueError("semantic validator rejected provider result")
+
+            _write_cache_atomic(cache_path, parsed)
+            return parsed
 
     def _call_parsed(
         self,
