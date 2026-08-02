@@ -146,7 +146,7 @@ def _open_regular_fd(path: Path, label: str) -> int:
         try:
             fd = os.open(
                 components[-1],
-                os.O_RDONLY | os.O_NOFOLLOW,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=directory_fd,
             )
             if not stat.S_ISREG(os.fstat(fd).st_mode):

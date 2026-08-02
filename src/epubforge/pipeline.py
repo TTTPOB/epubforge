@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from epubforge.config import Config
 from epubforge.llm.client import LLMClient
 from epubforge.mineru import MineruClient, MineruDownloadResult
 from epubforge.observability import get_tracker, stage_timer
+from epubforge.strict_json import StrictJsonError, read_json_document
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +109,70 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _open_regular_fd(path: Path, label: str) -> int:
+    """Open one regular file descriptor without following the final symlink."""
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError(
+            f"Cannot safely open {label}: POSIX O_NOFOLLOW is unavailable"
+        )
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError(
+                f"{label} is a symlink and cannot be read: {path}"
+            ) from exc
+        raise RuntimeError(f"Cannot safely open {label}: {path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"{label} is not a regular file: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _sha256_fd(descriptor: int, label: str) -> str:
+    digest = hashlib.sha256()
+    while True:
+        try:
+            chunk = os.read(descriptor, _ARCHIVE_COPY_BUFFER_SIZE)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read {label}: {exc}") from exc
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_source_snapshot(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev == after.st_dev
+        and before.st_ino == after.st_ino
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def _write_all(descriptor: int, data: bytes, label: str) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        try:
+            written = os.write(descriptor, remaining)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot write {label}: {exc}") from exc
+        if written <= 0:
+            raise RuntimeError(f"Cannot write {label}: write made no progress")
+        remaining = remaining[written:]
 
 
 def _fsync_file(path: Path) -> None:
@@ -338,15 +405,90 @@ def _source_paths(work: Path) -> tuple[Path, Path]:
 
 def _ensure_existing_parse_source(work: Path) -> None:
     source_pdf, source_meta = _source_paths(work)
-    missing = [
-        str(path.relative_to(work))
-        for path in (source_pdf, source_meta)
-        if not path.is_file()
-    ]
-    if missing:
+    raw_archive = _stage_path(work, "01_raw.zip")
+    try:
+        raw_descriptor = _open_regular_fd(
+            raw_archive,
+            "published Stage 1 raw archive",
+        )
+    except RuntimeError as exc:
         raise RuntimeError(
-            "Existing parse output is missing stable source artifact(s): "
-            f"{', '.join(missing)}. Rerun parse with --force-rerun."
+            f"Existing parse output raw archive is invalid: {exc}. "
+            "Rerun parse with --force-rerun."
+        ) from exc
+    else:
+        os.close(raw_descriptor)
+
+    try:
+        metadata, _ = read_json_document(
+            source_meta,
+            "Stage 1 source metadata",
+        )
+    except StrictJsonError as exc:
+        raise RuntimeError(
+            "Existing parse output has invalid source metadata at "
+            f"{source_meta}: {exc}. Rerun parse with --force-rerun."
+        ) from exc
+
+    if not isinstance(metadata, dict):
+        raise RuntimeError(
+            "Existing parse output source metadata must be a JSON object at "
+            f"{source_meta}. Rerun parse with --force-rerun."
+        )
+    if metadata.get("source_pdf") != "source/source.pdf":
+        raise RuntimeError(
+            "Existing parse output source metadata has an unexpected source_pdf "
+            f"at {source_meta}. Rerun parse with --force-rerun."
+        )
+    expected_sha256 = metadata.get("sha256")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise RuntimeError(
+            "Existing parse output source metadata has an invalid sha256 at "
+            f"{source_meta}. Rerun parse with --force-rerun."
+        )
+    expected_size = metadata.get("size_bytes")
+    if (
+        not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size < 0
+    ):
+        raise RuntimeError(
+            "Existing parse output source metadata has an invalid size_bytes at "
+            f"{source_meta}. Rerun parse with --force-rerun."
+        )
+
+    try:
+        descriptor = _open_regular_fd(source_pdf, "published Stage 1 source PDF")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Existing parse output source PDF is invalid: {exc}. "
+            "Rerun parse with --force-rerun."
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        digest = _sha256_fd(descriptor, f"published Stage 1 source PDF {source_pdf}")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    if not _same_source_snapshot(before, after):
+        raise RuntimeError(
+            "Existing parse output source PDF changed while it was being checked. "
+            "Rerun parse with --force-rerun."
+        )
+    if before.st_size != expected_size:
+        raise RuntimeError(
+            "Existing parse output source PDF size drifted from source_meta.json. "
+            "Rerun parse with --force-rerun."
+        )
+    if digest != expected_sha256:
+        raise RuntimeError(
+            "Existing parse output source PDF SHA-256 drifted from source_meta.json. "
+            "Rerun parse with --force-rerun."
         )
 
 
@@ -361,22 +503,63 @@ def _prepare_source_pdf(
     if not original.is_file():
         raise FileNotFoundError(f"PDF not found: {original}")
 
+    source_fd = _open_regular_fd(original, "input PDF")
+    destination_fd: int | None = None
     try:
-        os.link(original, source_pdf)
-        copy_method = "hardlink"
-    except OSError:
-        shutil.copy2(original, source_pdf)
-        copy_method = "copy2"
+        source_before = os.fstat(source_fd)
+        destination_fd = os.open(
+            source_pdf,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            try:
+                chunk = os.read(source_fd, _ARCHIVE_COPY_BUFFER_SIZE)
+            except OSError as exc:
+                raise RuntimeError(f"Cannot read input PDF {original}: {exc}") from exc
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+            _write_all(destination_fd, chunk, f"staged source PDF {source_pdf}")
 
-    if not os.access(source_pdf, os.R_OK):
-        raise RuntimeError(f"Persisted source PDF is not readable: {source_pdf}")
+        source_after = os.fstat(source_fd)
+        if (
+            not _same_source_snapshot(source_before, source_after)
+            or total != source_before.st_size
+        ):
+            raise RuntimeError(
+                "Input PDF changed while it was being copied; concurrent mutation "
+                f"detected for {original}. Retry after the input stops changing."
+            )
+        destination_stat = os.fstat(destination_fd)
+        if (
+            not stat.S_ISREG(destination_stat.st_mode)
+            or destination_stat.st_size != total
+        ):
+            raise RuntimeError(
+                f"Staged source PDF is not a complete regular file: {source_pdf}"
+            )
+        _verify_original_input_path(original, source_after)
+        os.fsync(destination_fd)
+        sha256 = digest.hexdigest()
+        copy_method = "copy"
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        os.close(source_fd)
 
-    sha256 = _sha256_file(source_pdf)
     meta: dict[str, object] = {
         "source_pdf": "source/source.pdf",
         "original_pdf_abs": str(original),
         "sha256": sha256,
-        "size_bytes": source_pdf.stat().st_size,
+        "size_bytes": total,
         "copied_at": datetime.now(timezone.utc).isoformat(),
     }
     source_meta.write_text(
@@ -395,6 +578,45 @@ def _prepare_source_pdf(
         copy_method,
     )
     return source_pdf, meta
+
+
+def _verify_original_input_path(
+    original: Path, copied_source_stat: os.stat_result
+) -> None:
+    """Reject path replacement or deletion after copying from the source fd."""
+    try:
+        path_stat = os.lstat(original)
+    except OSError as exc:
+        raise RuntimeError(
+            "Input PDF changed while it was being copied; concurrent mutation "
+            f"detected for {original}: {exc}"
+        ) from exc
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_dev != copied_source_stat.st_dev
+        or path_stat.st_ino != copied_source_stat.st_ino
+    ):
+        raise RuntimeError(
+            "Input PDF changed while it was being copied; concurrent mutation "
+            f"detected for {original}."
+        )
+
+    try:
+        current_descriptor = _open_regular_fd(original, "input PDF")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Input PDF changed while it was being copied; concurrent mutation "
+            f"detected for {original}: {exc}"
+        ) from exc
+    try:
+        current_stat = os.fstat(current_descriptor)
+    finally:
+        os.close(current_descriptor)
+    if not _same_source_snapshot(copied_source_stat, current_stat):
+        raise RuntimeError(
+            "Input PDF changed while it was being copied; concurrent mutation "
+            f"detected for {original}."
+        )
 
 
 def _stage1_transaction_path(work: Path) -> Path:
@@ -513,17 +735,38 @@ def _begin_stage1_transaction(work: Path, staging_dir: Path) -> tuple[Path, Path
         or staging_dir.name.startswith(_STAGE1_RECOVERY_PREFIX)
     ):
         raise RuntimeError(f"Stage 1 staging directory is not safe: {staging_dir}")
+    target_stats: list[os.stat_result | None] = []
+    for target_name in _STAGE1_TARGET_NAMES:
+        target = work / target_name
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot inspect existing Stage 1 target {target}: {exc}. "
+                "Remove or replace it, then rerun with --force-rerun."
+            ) from exc
+        if target_stat is not None and not stat.S_ISREG(target_stat.st_mode):
+            target_kind = (
+                "symlink" if stat.S_ISLNK(target_stat.st_mode) else "non-regular file"
+            )
+            raise RuntimeError(
+                f"Cannot create Stage 1 backup for {target_kind} target {target}. "
+                "Remove or replace it with a regular file, then rerun with "
+                "--force-rerun."
+            )
+        target_stats.append(target_stat)
+
     recovery_dir = Path(tempfile.mkdtemp(prefix=_STAGE1_RECOVERY_PREFIX, dir=work))
     try:
         staging_relative = staging_dir.relative_to(work)
         targets: list[dict[str, object]] = []
-        for index, target_name in enumerate(_STAGE1_TARGET_NAMES):
+        for index, (target_name, target_stat) in enumerate(
+            zip(_STAGE1_TARGET_NAMES, target_stats, strict=True)
+        ):
             target = work / target_name
-            if target.is_symlink() or target.is_dir():
-                raise RuntimeError(
-                    f"Cannot create Stage 1 backup for non-file target: {target}"
-                )
-            exists = target.exists()
+            exists = target_stat is not None
             backup_name: str | None = None
             sha256: str | None = None
             size_bytes: int | None = None
@@ -815,7 +1058,7 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
         _cleanup_orphan_stage1_dirs(work)
         _validate_stage1_target_parents(work)
         out = _stage_path(work, "01_raw.zip")
-        if out.exists() and not force:
+        if (out.exists() or out.is_symlink()) and not force:
             log.info("skip parse — reusing %s (pass --force-rerun to re-run)", out)
             _ensure_existing_parse_source(work)
             return

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -73,9 +74,23 @@ def _config(work_dir: Path) -> Config:
 def _seed_published_stage1(work: Path) -> dict[Path, bytes]:
     source_dir = work / "source"
     source_dir.mkdir(parents=True)
+    source_bytes = b"previous source"
+    source_meta = (
+        json.dumps(
+            {
+                "source_pdf": "source/source.pdf",
+                "original_pdf_abs": str(work / "original.pdf"),
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "size_bytes": len(source_bytes),
+                "copied_at": "2026-01-01T00:00:00+00:00",
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
     files = {
-        source_dir / "source.pdf": b"previous source",
-        source_dir / "source_meta.json": b"previous metadata\n",
+        source_dir / "source.pdf": source_bytes,
+        source_dir / "source_meta.json": source_meta,
         work / "01_raw.zip": b"previous output",
     }
     for path, content in files.items():
@@ -149,6 +164,397 @@ def test_parse_keeps_single_response_for_200_pages(
     with zipfile.ZipFile(output) as archive:
         assert archive.namelist() == ["full.md", "layout.json"]
     assert not list(output.parent.glob(".stage1-*"))
+
+
+def test_parse_copies_source_to_a_distinct_inode_and_records_matching_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+
+    pipeline.run_parse(pdf_path, _config(tmp_path / "work"))
+
+    source_path = tmp_path / "work" / "book" / "source" / "source.pdf"
+    source_meta = json.loads(
+        (source_path.parent / "source_meta.json").read_text(encoding="utf-8")
+    )
+    assert (source_path.stat().st_dev, source_path.stat().st_ino) != (
+        pdf_path.stat().st_dev,
+        pdf_path.stat().st_ino,
+    )
+    assert source_meta["sha256"] == hashlib.sha256(source_path.read_bytes()).hexdigest()
+    assert source_meta["size_bytes"] == source_path.stat().st_size
+
+
+def test_original_mutation_after_success_does_not_change_published_source_or_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+
+    pipeline.run_parse(pdf_path, cfg)
+    work = tmp_path / "work" / "book"
+    published_source = work / "source" / "source.pdf"
+    published_meta = work / "source" / "source_meta.json"
+    source_before = published_source.read_bytes()
+    meta_before = published_meta.read_bytes()
+
+    pdf_path.write_bytes(pdf_path.read_bytes() + b"changed after Stage 1")
+
+    pipeline.run_parse(pdf_path, cfg, force=False)
+
+    assert published_source.read_bytes() == source_before
+    assert published_meta.read_bytes() == meta_before
+
+
+def test_reuse_after_original_deletion_does_not_change_published_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+
+    pipeline.run_parse(pdf_path, cfg)
+    work = tmp_path / "work" / "book"
+    published_source = work / "source" / "source.pdf"
+    published_meta = work / "source" / "source_meta.json"
+    source_before = published_source.read_bytes()
+    meta_before = published_meta.read_bytes()
+    pdf_path.unlink()
+
+    pipeline.run_parse(pdf_path, cfg, force=False)
+
+    assert published_source.read_bytes() == source_before
+    assert published_meta.read_bytes() == meta_before
+
+
+def test_force_rerun_accepts_published_source_as_input_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    published_source = work / "source" / "source.pdf"
+    source_before = published_source.read_bytes()
+    monkeypatch.setattr(Config, "book_work_dir", lambda _self, _pdf_path: work)
+
+    pipeline.run_parse(published_source, cfg, force=True)
+
+    assert published_source.read_bytes() == source_before
+    assert not list(work.glob(".stage1-*"))
+
+
+def test_concurrent_source_mutation_keeps_previous_published_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    previous_files = {
+        path: path.read_bytes()
+        for path in (
+            work / "source" / "source.pdf",
+            work / "source" / "source_meta.json",
+            work / "01_raw.zip",
+        )
+    }
+    real_read = pipeline.os.read
+    mutated = False
+
+    def mutate_after_first_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            pdf_path.write_bytes(pdf_path.read_bytes() + b"concurrent mutation")
+        return chunk
+
+    monkeypatch.setattr(pipeline.os, "read", mutate_after_first_read)
+    with pytest.raises(RuntimeError, match="concurrent mutation"):
+        pipeline.run_parse(pdf_path, cfg, force=True)
+
+    assert mutated
+    assert {path: path.read_bytes() for path in previous_files} == previous_files
+    assert not list(work.glob(".stage1-*"))
+
+
+@pytest.mark.parametrize("mutation", ["replace", "delete"])
+def test_atomic_source_path_mutation_during_copy_keeps_previous_published_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    previous_files = {
+        path: path.read_bytes()
+        for path in (
+            work / "source" / "source.pdf",
+            work / "source" / "source_meta.json",
+            work / "01_raw.zip",
+        )
+    }
+    real_read = pipeline.os.read
+    mutated = False
+
+    def mutate_path_after_first_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            if mutation == "replace":
+                replacement = tmp_path / "replacement.pdf"
+                replacement.write_bytes(pdf_path.read_bytes())
+                os.replace(replacement, pdf_path)
+            else:
+                pdf_path.unlink()
+        return chunk
+
+    monkeypatch.setattr(pipeline.os, "read", mutate_path_after_first_read)
+    with pytest.raises(RuntimeError, match="concurrent mutation"):
+        pipeline.run_parse(pdf_path, cfg, force=True)
+
+    assert mutated
+    assert {path: path.read_bytes() for path in previous_files} == previous_files
+    assert not list(work.glob(".stage1-*"))
+
+
+def test_same_size_source_mutation_with_restored_mtime_fails_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    previous_files = {
+        path: path.read_bytes()
+        for path in (
+            work / "source" / "source.pdf",
+            work / "source" / "source_meta.json",
+            work / "01_raw.zip",
+        )
+    }
+    original_stat = pdf_path.stat()
+    source_bytes = bytearray(pdf_path.read_bytes())
+    source_bytes[0] ^= 1
+    real_read = pipeline.os.read
+    mutated = False
+
+    def mutate_content_after_first_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            pdf_path.write_bytes(source_bytes)
+            os.utime(
+                pdf_path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+        return chunk
+
+    monkeypatch.setattr(pipeline.os, "read", mutate_content_after_first_read)
+    with pytest.raises(RuntimeError, match="concurrent mutation"):
+        pipeline.run_parse(pdf_path, cfg, force=True)
+
+    assert mutated
+    assert {path: path.read_bytes() for path in previous_files} == previous_files
+    assert not list(work.glob(".stage1-*"))
+
+
+def test_non_force_skip_detects_published_source_hash_and_size_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    source_path = work / "source" / "source.pdf"
+    source_path.write_bytes(source_path.read_bytes() + b"drift")
+
+    with pytest.raises(RuntimeError, match="--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+
+def test_non_force_skip_detects_same_size_published_source_hash_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    source_path = tmp_path / "work" / "book" / "source" / "source.pdf"
+    source_bytes = bytearray(source_path.read_bytes())
+    source_bytes[0] ^= 1
+    source_path.write_bytes(source_bytes)
+
+    with pytest.raises(RuntimeError, match=r"SHA-256.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+
+def test_non_force_skip_rejects_metadata_hash_mismatch_without_size_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    source_path = work / "source" / "source.pdf"
+    source_meta = work / "source" / "source_meta.json"
+    metadata = json.loads(source_meta.read_text(encoding="utf-8"))
+    metadata["sha256"] = "0" * 64
+    source_meta.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=r"SHA-256.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+    assert source_path.stat().st_size == metadata["size_bytes"]
+
+
+def test_non_force_skip_rejects_raw_archive_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    raw_archive = work / "01_raw.zip"
+    replacement = tmp_path / "replacement.zip"
+    replacement.write_bytes(raw_archive.read_bytes())
+    raw_archive.unlink()
+    try:
+        raw_archive.symlink_to(replacement)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(RuntimeError, match=r"raw archive.*symlink.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+
+def test_stage1_backup_rejects_fifo_target_without_blocking(
+    tmp_path: Path,
+) -> None:
+    if os.name != "posix" or not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable")
+    work = tmp_path / "work" / "book"
+    source_dir = work / "source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.pdf").write_bytes(b"published source")
+    (source_dir / "source_meta.json").write_bytes(b"{}\n")
+    raw_archive = work / "01_raw.zip"
+    try:
+        os.mkfifo(raw_archive)
+    except OSError:
+        pytest.skip("FIFO creation is unavailable")
+    staging_dir = work / ".stage1-fifo-test"
+    staging_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match=r"non-regular file.*--force-rerun"):
+        pipeline._begin_stage1_transaction(work, staging_dir)
+
+    assert raw_archive.is_fifo()
+    assert not list(work.glob(".stage1-recovery-*"))
+
+
+def test_non_force_skip_rejects_published_source_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    source_path = work / "source" / "source.pdf"
+    replacement = tmp_path / "replacement.pdf"
+    replacement.write_bytes(source_path.read_bytes())
+    source_path.unlink()
+    try:
+        source_path.symlink_to(replacement)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(RuntimeError, match=r"symlink.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+
+def test_non_force_skip_rejects_source_metadata_symlink_or_malformed_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "book.pdf"
+    _write_pdf(pdf_path, 1)
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+    pipeline.run_parse(pdf_path, cfg)
+
+    work = tmp_path / "work" / "book"
+    source_meta = work / "source" / "source_meta.json"
+    replacement = tmp_path / "replacement-meta.json"
+    replacement.write_bytes(source_meta.read_bytes())
+    source_meta.unlink()
+    try:
+        source_meta.symlink_to(replacement)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(RuntimeError, match=r"symlink.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+    source_meta.unlink()
+    valid_metadata = json.loads(replacement.read_text(encoding="utf-8"))
+    valid_metadata["source_pdf"] = "source/other.pdf"
+    source_meta.write_text(json.dumps(valid_metadata), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unexpected source_pdf.*--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
+
+    source_meta.write_bytes(replacement.read_bytes())
+    source_meta.unlink()
+    source_meta.write_text("{malformed", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="--force-rerun"):
+        pipeline.run_parse(pdf_path, cfg, force=False)
 
 
 def test_parse_packages_ordered_201_page_responses_without_collisions(
