@@ -12,6 +12,8 @@ from contextlib import contextmanager
 import errno
 import hashlib
 import json
+import logging
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -21,13 +23,22 @@ import tempfile
 from typing import Any
 import zipfile
 
+from filelock import FileLock
 import pymupdf
 
+from epubforge.strict_json import StrictJsonError, parse_json_document
+from epubforge.page_geometry import (
+    PAGE_GEOMETRY_CONTRACT,
+    PageGeometryError,
+    normalize_page_geometry,
+)
 
 CONTENT_SCHEMA = "epubforge.mineru-content"
-CONTENT_SCHEMA_VERSION = 1
+CONTENT_SCHEMA_VERSION = 2
 MAX_FULL_PAGE_COUNT = 1000
 MAX_MINERU_SEGMENT_PAGES = 200
+MAX_INPUT_JSON_BYTES = 64 * 1024 * 1024
+MAX_SOURCE_PDF_BYTES = 2 * 1024**3
 DEFAULT_MAX_ARCHIVE_BYTES = 2 * 1024**3
 DEFAULT_MAX_UNCOMPRESSED_BYTES = 8 * 1024**3
 DEFAULT_MAX_MEMBERS = 100_000
@@ -40,6 +51,7 @@ _ASSET_PATH_KEYS = frozenset(
     }
 )
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+log = logging.getLogger(__name__)
 
 
 class MineruContentError(ValueError):
@@ -47,9 +59,15 @@ class MineruContentError(ValueError):
 
 
 class _ZipIndex:
-    def __init__(self, members: dict[str, zipfile.ZipInfo], total_size: int) -> None:
+    def __init__(
+        self,
+        members: dict[str, zipfile.ZipInfo],
+        total_size: int,
+        member_count: int,
+    ) -> None:
         self.members = members
         self.total_size = total_size
+        self.member_count = member_count
 
 
 class _AssetStore:
@@ -153,10 +171,9 @@ def normalize_mineru_content(
     raw_archive: str | Path,
     output_dir: str | Path | None = None,
     *,
+    source_pdf: str | Path,
     force: bool = False,
     full_page_count: int | None = None,
-    source_pdf: str | Path | None = None,
-    work_dir: str | Path | None = None,
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
     max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
     max_member_bytes: int | None = None,
@@ -167,25 +184,15 @@ def normalize_mineru_content(
 
     With ``force=False``, a previously published directory is reused only
     when its recorded source archive SHA-256 matches the current input.  A
-    stale or incomplete directory gets rebuilt.  Pass ``source_pdf`` to
-    validate the manifest's source PDF SHA and page count; ``work_dir`` is an
-    explicit shorthand for ``work_dir/source/source.pdf`` and
-    ``work_dir/02_content``.  The function returns the published directory.
+    stale or incomplete directory gets rebuilt.  ``source_pdf`` supplies the
+    source PDF whose SHA and page count must match the normalized content.  The
+    function returns the published directory.
     """
     raw_path = Path(raw_archive)
-    if source_pdf is not None and work_dir is not None:
-        raise ValueError("source_pdf and work_dir are mutually exclusive")
-    if work_dir is not None:
-        work_path = Path(work_dir)
-        source_pdf_path = work_path / "source" / "source.pdf"
-        output_path = (
-            work_path / "02_content" if output_dir is None else Path(output_dir)
-        )
-    else:
-        source_pdf_path = None if source_pdf is None else Path(source_pdf)
-        output_path = (
-            raw_path.parent / "02_content" if output_dir is None else Path(output_dir)
-        )
+    source_pdf_path = Path(source_pdf)
+    output_path = (
+        raw_path.parent / "02_content" if output_dir is None else Path(output_dir)
+    )
     _validate_limits(
         max_archive_bytes,
         max_uncompressed_bytes,
@@ -206,114 +213,116 @@ def normalize_mineru_content(
         "max_member_bytes": max_member_bytes,
         "max_asset_bytes": max_asset_bytes,
         "max_members": max_members,
+        "page_geometry": PAGE_GEOMETRY_CONTRACT,
     }
-    source_pdf_sha256: str | None = None
-    source_pdf_page_count: int | None = None
-    if source_pdf_path is not None:
-        source_pdf_sha256, source_pdf_page_count = _source_pdf_details(source_pdf_path)
-
     output_parent = output_path.parent
+    _validate_output_parent(output_path)
     output_parent.mkdir(parents=True, exist_ok=True)
-    staging_path = Path(
-        tempfile.mkdtemp(prefix=f".{output_path.name}.", dir=output_parent)
-    )
-    try:
-        assets_dir = staging_path / "assets"
-        assets_dir.mkdir()
-        asset_store = _AssetStore(
-            assets_dir,
-            max_asset_bytes=effective_asset_bytes,
+    lock_path = output_parent / f".{output_path.name}.lock"
+    with FileLock(str(lock_path)):
+        source_pdf_sha256, source_pdf_page_count = _source_pdf_details(source_pdf_path)
+        staging_path = Path(
+            tempfile.mkdtemp(prefix=f".{output_path.name}.", dir=output_parent)
         )
-        with _open_raw_archive(
-            raw_path,
-            max_archive_bytes=max_archive_bytes,
-        ) as (archive, archive_size, source_sha256):
-            outer_index = _index_zip(
-                archive,
-                label=f"raw archive {raw_path}",
-                max_uncompressed_bytes=max_uncompressed_bytes,
-                max_member_bytes=effective_member_bytes,
-                max_members=max_members,
+        try:
+            assets_dir = staging_path / "assets"
+            assets_dir.mkdir()
+            asset_store = _AssetStore(
+                assets_dir,
+                max_asset_bytes=effective_asset_bytes,
             )
-            if "manifest.json" in outer_index.members:
-                (
-                    payload,
-                    page_count,
-                    kind,
-                    segment_count,
-                    normalized_source_pdf_sha256,
-                ) = _normalize_segmented(
+            with _open_raw_archive(
+                raw_path,
+                max_archive_bytes=max_archive_bytes,
+            ) as (archive, archive_size, source_sha256):
+                outer_index = _index_zip(
                     archive,
-                    outer_index,
-                    staging_path,
-                    asset_store,
-                    max_archive_bytes=max_archive_bytes,
+                    label=f"raw archive {raw_path}",
                     max_uncompressed_bytes=max_uncompressed_bytes,
                     max_member_bytes=effective_member_bytes,
                     max_members=max_members,
-                    source_pdf_sha256=source_pdf_sha256,
-                    source_pdf_page_count=source_pdf_page_count,
                 )
-            else:
-                (
-                    payload,
-                    page_count,
-                    kind,
-                    segment_count,
-                    normalized_source_pdf_sha256,
-                ) = _normalize_direct(
-                    archive,
-                    outer_index,
-                    asset_store,
-                    full_page_count=full_page_count,
-                    source_pdf_sha256=source_pdf_sha256,
-                    source_pdf_page_count=source_pdf_page_count,
-                )
+                if "manifest.json" in outer_index.members:
+                    (
+                        payload,
+                        page_count,
+                        kind,
+                        segment_count,
+                        normalized_source_pdf_sha256,
+                        page_geometry,
+                    ) = _normalize_segmented(
+                        archive,
+                        outer_index,
+                        staging_path,
+                        asset_store,
+                        max_archive_bytes=max_archive_bytes,
+                        max_uncompressed_bytes=max_uncompressed_bytes,
+                        max_member_bytes=effective_member_bytes,
+                        max_members=max_members,
+                        source_pdf_sha256=source_pdf_sha256,
+                        source_pdf_page_count=source_pdf_page_count,
+                    )
+                else:
+                    (
+                        payload,
+                        page_count,
+                        kind,
+                        segment_count,
+                        normalized_source_pdf_sha256,
+                        page_geometry,
+                    ) = _normalize_direct(
+                        archive,
+                        outer_index,
+                        asset_store,
+                        full_page_count=full_page_count,
+                        source_pdf_sha256=source_pdf_sha256,
+                        source_pdf_page_count=source_pdf_page_count,
+                    )
 
-        result = {
-            "schema": CONTENT_SCHEMA,
-            "schema_version": CONTENT_SCHEMA_VERSION,
-            "source_archive_sha256": source_sha256,
-            "source_archive_size": archive_size,
-            "source_kind": kind,
-            "segment_count": segment_count,
-            "page_count": page_count,
-            "source_pdf_sha256": normalized_source_pdf_sha256,
-            "items_sha256": _json_sha256(payload),
-            "normalization": normalization_contract,
-            "assets": asset_store.metadata(),
-            "items": payload,
-        }
-        content_path = staging_path / "content.json"
-        content_path.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        _fsync_file(content_path)
-        if not force and _existing_output_matches(
-            output_path,
-            staging_path,
-            asset_store.metadata(),
-        ):
+            result = {
+                "schema": CONTENT_SCHEMA,
+                "schema_version": CONTENT_SCHEMA_VERSION,
+                "source_archive_sha256": source_sha256,
+                "source_archive_size": archive_size,
+                "source_kind": kind,
+                "segment_count": segment_count,
+                "page_count": page_count,
+                "page_geometry": page_geometry,
+                "source_pdf_sha256": normalized_source_pdf_sha256,
+                "items_sha256": _json_sha256(payload),
+                "normalization": normalization_contract,
+                "assets": asset_store.metadata(),
+                "items": payload,
+            }
+            content_path = staging_path / "content.json"
+            content_path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _fsync_file(content_path)
+            if not force and _existing_output_matches(
+                output_path,
+                staging_path,
+                asset_store.metadata(),
+            ):
+                return output_path
+            _publish_directory(staging_path, output_path)
             return output_path
-        _publish_directory(staging_path, output_path)
-        return output_path
-    except (MineruContentError, OSError, zipfile.BadZipFile) as exc:
-        if isinstance(exc, MineruContentError):
-            raise
-        raise MineruContentError(f"Cannot normalize MinerU archive: {exc}") from exc
-    finally:
-        _remove_path(staging_path)
+        except (MineruContentError, OSError, zipfile.BadZipFile) as exc:
+            if isinstance(exc, MineruContentError):
+                raise
+            raise MineruContentError(f"Cannot normalize MinerU archive: {exc}") from exc
+        finally:
+            _remove_path(staging_path)
 
 
 def normalize_content(
     raw_archive: str | Path,
     output_dir: str | Path | None = None,
     *,
+    source_pdf: str | Path,
     force: bool = False,
     full_page_count: int | None = None,
-    source_pdf: str | Path | None = None,
-    work_dir: str | Path | None = None,
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
     max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
     max_member_bytes: int | None = None,
@@ -324,10 +333,9 @@ def normalize_content(
     return normalize_mineru_content(
         raw_archive,
         output_dir,
+        source_pdf=source_pdf,
         force=force,
         full_page_count=full_page_count,
-        source_pdf=source_pdf,
-        work_dir=work_dir,
         max_archive_bytes=max_archive_bytes,
         max_uncompressed_bytes=max_uncompressed_bytes,
         max_member_bytes=max_member_bytes,
@@ -339,10 +347,16 @@ def normalize_content(
 def _source_pdf_details(path: Path) -> tuple[str, int]:
     fd = _open_regular_fd(path, f"source PDF {path}")
     try:
-        data = _read_fd(fd, f"source PDF {path}")
+        data = _read_fd(
+            fd,
+            f"source PDF {path}",
+            max_bytes=MAX_SOURCE_PDF_BYTES,
+        )
         source_sha256 = hashlib.sha256(data).hexdigest()
         with pymupdf.open(stream=data, filetype="pdf") as document:
             page_count = document.page_count
+    except MineruContentError:
+        raise
     except Exception as exc:
         raise MineruContentError(f"Cannot read source PDF: {path}") from exc
     finally:
@@ -360,18 +374,31 @@ def _normalize_direct(
     asset_store: _AssetStore,
     *,
     full_page_count: int | None,
-    source_pdf_sha256: str | None,
-    source_pdf_page_count: int | None,
-) -> tuple[list[dict[str, Any]], int, str, int, str | None]:
+    source_pdf_sha256: str,
+    source_pdf_page_count: int,
+) -> tuple[
+    list[dict[str, Any]],
+    int,
+    str,
+    int,
+    str,
+    list[dict[str, int | float]],
+]:
     if any(name.startswith("segments/") for name in index.members):
         raise MineruContentError("Segmented response archive is missing manifest.json")
     if "manifest.json" in index.members:
         raise MineruContentError("Direct response archive cannot contain manifest.json")
     raw_items = _load_content_items(archive, index, "direct response")
+    local_geometry = _load_layout_geometry(
+        archive,
+        index,
+        "direct response",
+    )
     page_count = _direct_page_count(
         raw_items,
         full_page_count,
         source_pdf_page_count,
+        geometry_count=len(local_geometry),
     )
     if page_count > MAX_FULL_PAGE_COUNT:
         raise MineruContentError("Direct response exceeds the 1000-page limit")
@@ -385,13 +412,14 @@ def _normalize_direct(
         content_idx_start=0,
         asset_store=asset_store,
     )
-    return items, page_count, "direct", 1, source_pdf_sha256
+    return items, page_count, "direct", 1, source_pdf_sha256, local_geometry
 
 
 def _direct_page_count(
     raw_items: list[dict[str, Any]],
     explicit_page_count: int | None,
     source_pdf_page_count: int | None,
+    geometry_count: int,
 ) -> int:
     if source_pdf_page_count is not None:
         if (
@@ -405,7 +433,10 @@ def _direct_page_count(
     elif explicit_page_count is not None:
         page_count = explicit_page_count
     else:
-        page_count = max((item["page_idx"] for item in raw_items), default=-1) + 1
+        page_count = max(
+            geometry_count,
+            max((item["page_idx"] for item in raw_items), default=-1) + 1,
+        )
     if (
         not isinstance(page_count, int)
         or isinstance(page_count, bool)
@@ -416,6 +447,10 @@ def _direct_page_count(
         )
     if page_count > MAX_FULL_PAGE_COUNT:
         raise MineruContentError("Direct response exceeds the 1000-page limit")
+    if geometry_count != page_count:
+        raise MineruContentError(
+            "Direct layout geometry must contain exactly one page per page_count"
+        )
     return page_count
 
 
@@ -429,9 +464,16 @@ def _normalize_segmented(
     max_uncompressed_bytes: int,
     max_member_bytes: int,
     max_members: int,
-    source_pdf_sha256: str | None,
-    source_pdf_page_count: int | None,
-) -> tuple[list[dict[str, Any]], int, str, int, str]:
+    source_pdf_sha256: str,
+    source_pdf_page_count: int,
+) -> tuple[
+    list[dict[str, Any]],
+    int,
+    str,
+    int,
+    str,
+    list[dict[str, int | float]],
+]:
     manifest_info = outer_index.members["manifest.json"]
     manifest = _load_json_member(
         outer, manifest_info, "segmented manifest", max_member_bytes
@@ -445,15 +487,12 @@ def _normalize_segmented(
     segments = manifest["segments"]
     if not isinstance(segments, list) or not segments:
         raise MineruContentError("Segmented manifest must contain non-empty segments")
-    if source_pdf_sha256 is not None:
-        if source_pdf_sha256 != manifest_source_pdf_sha256:
-            raise MineruContentError(
-                "Source PDF SHA-256 does not match segmented manifest"
-            )
-        if source_pdf_page_count != page_count:
-            raise MineruContentError(
-                "Source PDF page count does not match segmented manifest"
-            )
+    if source_pdf_sha256 != manifest_source_pdf_sha256:
+        raise MineruContentError("Source PDF SHA-256 does not match segmented manifest")
+    if source_pdf_page_count != page_count:
+        raise MineruContentError(
+            "Source PDF page count does not match segmented manifest"
+        )
 
     expected_first_page = 1
     normalized: list[dict[str, Any]] = []
@@ -461,6 +500,8 @@ def _normalize_segmented(
     nested_dir = staging_path / ".nested"
     nested_dir.mkdir()
     nested_uncompressed_size = outer_index.total_size
+    nested_member_count = 0
+    page_geometry: list[dict[str, int | float]] = []
     for position, raw_segment in enumerate(segments, start=1):
         if not isinstance(raw_segment, dict):
             raise MineruContentError(f"Segment {position} must be an object")
@@ -507,8 +548,11 @@ def _normalize_segmented(
                     label=f"segment {index} response",
                     max_uncompressed_bytes=max_uncompressed_bytes,
                     max_member_bytes=max_member_bytes,
-                    max_members=max_members,
+                    max_members=max_members
+                    - outer_index.member_count
+                    - nested_member_count,
                 )
+                nested_member_count += nested_index.member_count
                 nested_uncompressed_size += nested_index.total_size
                 if nested_uncompressed_size > max_uncompressed_bytes:
                     raise MineruContentError(
@@ -516,6 +560,12 @@ def _normalize_segmented(
                     )
                 raw_items = _load_content_items(
                     nested, nested_index, f"segment {index} response"
+                )
+                local_geometry = _load_layout_geometry(
+                    nested,
+                    nested_index,
+                    f"segment {index} response",
+                    page_count=segment_page_count,
                 )
                 normalized.extend(
                     _normalize_items(
@@ -529,6 +579,14 @@ def _normalize_segmented(
                         asset_store=asset_store,
                     )
                 )
+                page_geometry.extend(
+                    {
+                        "page_idx": int(entry["page_idx"]) + first_page - 1,
+                        "width": entry["width"],
+                        "height": entry["height"],
+                    }
+                    for entry in local_geometry
+                )
                 content_idx += len(raw_items)
         finally:
             nested_path.unlink(missing_ok=True)
@@ -537,6 +595,11 @@ def _normalize_segmented(
     nested_dir.rmdir()
     if expected_first_page != page_count + 1:
         raise MineruContentError("Segment page ranges do not cover the full book")
+    page_geometry.sort(key=lambda entry: int(entry["page_idx"]))
+    if [entry["page_idx"] for entry in page_geometry] != list(range(page_count)):
+        raise MineruContentError(
+            "Segment layout geometry must contain exactly one record per global page"
+        )
     if set(outer_index.members) != {
         "manifest.json",
         *(_normalize_member_name(segment["response_archive"]) for segment in segments),
@@ -548,6 +611,7 @@ def _normalize_segmented(
         "segmented",
         len(segments),
         manifest_source_pdf_sha256,
+        page_geometry,
     )
 
 
@@ -579,10 +643,12 @@ def _load_content_items(
         archive,
         index.members[candidates[0]],
         f"{label} content list",
-        max(index.members[candidates[0]].file_size, 1),
+        min(index.members[candidates[0]].file_size, MAX_INPUT_JSON_BYTES),
     )
     if not isinstance(raw, list):
         raise MineruContentError(f"{label} content list must be a JSON array")
+    if not raw:
+        raise MineruContentError(f"{label} content list must be non-empty")
     items: list[dict[str, Any]] = []
     for item_index, item in enumerate(raw):
         if not isinstance(item, dict):
@@ -599,6 +665,90 @@ def _load_content_items(
             )
         items.append(item)
     return items
+
+
+def _load_layout_geometry(
+    archive: zipfile.ZipFile,
+    index: _ZipIndex,
+    label: str,
+    *,
+    page_count: int | None = None,
+) -> list[dict[str, int | float]]:
+    """Read the ordered top-left coordinate space declared by MinerU."""
+    layout_names = [
+        name
+        for name, info in index.members.items()
+        if not info.is_dir() and PurePosixPath(name).name == "layout.json"
+    ]
+    if len(layout_names) != 1 or layout_names[0] != "layout.json":
+        raise MineruContentError(f"{label} must contain exactly one layout.json")
+    info = index.members[layout_names[0]]
+    raw = _load_json_member(
+        archive,
+        info,
+        f"{label} layout",
+        min(info.file_size, MAX_INPUT_JSON_BYTES),
+    )
+    if not isinstance(raw, dict):
+        raise MineruContentError(f"{label} layout must be a JSON object")
+    pdf_info = raw.get("pdf_info")
+    if not isinstance(pdf_info, list) or not pdf_info:
+        raise MineruContentError(f"{label} layout pdf_info must be a non-empty array")
+
+    geometry: list[dict[str, int | float]] = []
+    seen: set[int] = set()
+    for position, page in enumerate(pdf_info):
+        if not isinstance(page, dict):
+            raise MineruContentError(
+                f"{label} layout pdf_info entry {position} must be an object"
+            )
+        page_idx = page.get("page_idx")
+        if (
+            not isinstance(page_idx, int)
+            or isinstance(page_idx, bool)
+            or page_idx < 0
+            or page_idx in seen
+        ):
+            raise MineruContentError(
+                f"{label} layout has an invalid or duplicate page_idx"
+            )
+        if page_count is not None and page_idx >= page_count:
+            raise MineruContentError(
+                f"{label} layout page_idx is outside its response range"
+            )
+        page_size = page.get("page_size")
+        width, height = _layout_page_size(page_size, f"{label} layout page {page_idx}")
+        seen.add(page_idx)
+        geometry.append({"page_idx": page_idx, "width": width, "height": height})
+
+    try:
+        normalized = normalize_page_geometry(
+            geometry,
+            page_count=len(geometry) if page_count is None else page_count,
+        )
+    except PageGeometryError as exc:
+        raise MineruContentError(f"{label} layout {exc}") from exc
+    return [dict(entry) for entry in normalized]
+
+
+def _layout_page_size(value: Any, label: str) -> tuple[float, float]:
+    if isinstance(value, list) and len(value) == 2:
+        raw_width, raw_height = value
+    elif isinstance(value, dict) and set(value) == {"width", "height"}:
+        raw_width, raw_height = value["width"], value["height"]
+    else:
+        raise MineruContentError(f"{label} page_size must contain width and height")
+    if any(
+        not isinstance(part, (int, float))
+        or isinstance(part, bool)
+        or not math.isfinite(float(part))
+        for part in (raw_width, raw_height)
+    ):
+        raise MineruContentError(f"{label} page_size must contain finite numbers")
+    width, height = float(raw_width), float(raw_height)
+    if width <= 0 or height <= 0:
+        raise MineruContentError(f"{label} page_size must be positive")
+    return width, height
 
 
 def _normalize_items(
@@ -786,7 +936,7 @@ def _index_zip(
         if total_size > max_uncompressed_bytes:
             raise MineruContentError(f"{label} exceeds the uncompressed size limit")
         members[name] = info
-    return _ZipIndex(members, total_size)
+    return _ZipIndex(members, total_size, len(infos))
 
 
 def _load_json_member(
@@ -795,30 +945,16 @@ def _load_json_member(
     label: str,
     max_bytes: int,
 ) -> Any:
-    data = _read_member(archive, info, label, max_bytes)
+    effective_max_bytes = min(max_bytes, MAX_INPUT_JSON_BYTES)
+    data = _read_member(archive, info, label, effective_max_bytes)
     try:
-        return json.loads(
-            data.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_json_constant,
+        return parse_json_document(
+            data,
+            label=label,
+            max_bytes=effective_max_bytes,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise MineruContentError(f"{label} is not valid UTF-8 JSON: {exc}") from exc
-
-
-def _reject_duplicate_json_keys(
-    pairs: list[tuple[str, Any]],
-) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise MineruContentError(f"Duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(value: str) -> Any:
-    raise MineruContentError(f"Invalid JSON constant: {value}")
+    except StrictJsonError as exc:
+        raise MineruContentError(str(exc)) from exc
 
 
 def _read_member(
@@ -1005,37 +1141,89 @@ def _validate_limits(
 
 
 def _open_regular_fd(path: Path, label: str) -> int:
-    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+    if (
+        os.name != "posix"
+        or not hasattr(os, "O_NOFOLLOW")
+        or not hasattr(os, "O_DIRECTORY")
+    ):
         raise MineruContentError(
             f"Cannot safely open {label}: POSIX O_NOFOLLOW is unavailable"
         )
-    flags = os.O_RDONLY | os.O_NOFOLLOW
+    path = Path(path)
+    if path.is_absolute():
+        components = path.parts[1:]
+        directory_fd = os.open("/", os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    else:
+        components = path.parts
+        directory_fd = os.open(".", os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    if not components or any(part in {"", ".", ".."} for part in components):
+        os.close(directory_fd)
+        raise MineruContentError(f"Cannot safely open {label}: unsafe path")
     try:
-        fd = os.open(path, flags)
+        for component in components[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        fd = os.open(
+            components[-1],
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise MineruContentError(f"{label} is not a regular file")
+        return fd
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise MineruContentError(
                 f"Cannot safely open {label}: symlink rejected"
             ) from exc
         raise MineruContentError(f"Cannot safely open {label}: {exc}") from exc
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise MineruContentError(f"{label} is not a regular file")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
+    finally:
+        os.close(directory_fd)
 
 
-def _read_fd(fd: int, label: str) -> bytes:
+def _fd_fingerprint(fd: int, label: str) -> tuple[int, int, int, int]:
     try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        raise MineruContentError(f"Cannot inspect {label}: {exc}") from exc
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _ensure_fd_unchanged(
+    before: tuple[int, int, int, int],
+    after: tuple[int, int, int, int],
+    label: str,
+) -> None:
+    if before != after:
+        raise MineruContentError(f"{label} changed while reading")
+
+
+def _read_fd(fd: int, label: str, *, max_bytes: int | None = None) -> bytes:
+    try:
+        before = _fd_fingerprint(fd, label)
+        if max_bytes is not None and before[2] > max_bytes:
+            raise MineruContentError(f"{label} exceeds the size limit")
         os.lseek(fd, 0, os.SEEK_SET)
         chunks: list[bytes] = []
+        total = 0
         while True:
             chunk = os.read(fd, _COPY_BUFFER_SIZE)
             if not chunk:
                 break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise MineruContentError(f"{label} exceeds the size limit")
             chunks.append(chunk)
+        after = _fd_fingerprint(fd, label)
+        _ensure_fd_unchanged(before, after, label)
+        if total != before[2]:
+            raise MineruContentError(f"{label} is truncated")
         return b"".join(chunks)
     except OSError as exc:
         raise MineruContentError(f"Cannot read {label}: {exc}") from exc
@@ -1043,13 +1231,20 @@ def _read_fd(fd: int, label: str) -> bytes:
 
 def _hash_fd(fd: int, label: str) -> str:
     digest = hashlib.sha256()
+    total = 0
     try:
+        before = _fd_fingerprint(fd, label)
         os.lseek(fd, 0, os.SEEK_SET)
         while True:
             chunk = os.read(fd, _COPY_BUFFER_SIZE)
             if not chunk:
                 break
+            total += len(chunk)
             digest.update(chunk)
+        after = _fd_fingerprint(fd, label)
+        _ensure_fd_unchanged(before, after, label)
+        if total != before[2]:
+            raise MineruContentError(f"{label} is truncated")
     except OSError as exc:
         raise MineruContentError(f"Cannot read {label}: {exc}") from exc
     return digest.hexdigest()
@@ -1215,7 +1410,9 @@ def _publish_directory(staged_path: Path, output_path: Path) -> None:
         try:
             _remove_path(backup_path)
         except OSError:
-            pass
+            log.warning(
+                "cannot remove previous content backup after publish: %s", backup_path
+            )
 
 
 def _remove_path(path: Path) -> None:
@@ -1223,6 +1420,19 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
     else:
         shutil.rmtree(path)
+
+
+def _validate_output_parent(output_path: Path) -> None:
+    """Reject unsafe output ancestors before creating locks or staging files."""
+    current = output_path.parent
+    while True:
+        if current.is_symlink():
+            raise MineruContentError(f"output parent is a symlink: {current}")
+        if current.exists() and not current.is_dir():
+            raise MineruContentError(f"output parent is not a directory: {current}")
+        if current == current.parent:
+            return
+        current = current.parent
 
 
 def _fsync_file(path: Path) -> None:

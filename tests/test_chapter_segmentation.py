@@ -137,25 +137,40 @@ def _items_sha256(items: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
+def _content_sha256(items: list[dict[str, Any]], geometry: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"items": items, "page_geometry": geometry},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _write_content(tmp_path: Path) -> Path:
     content_path = tmp_path / "02_content" / "content.json"
     content_path.parent.mkdir()
     items = _items()
     items_sha256 = _items_sha256(items)
+    page_geometry = [
+        {"page_idx": index, "width": 100.0, "height": 120.0} for index in range(8)
+    ]
     content_path.write_text(
         json.dumps(
             {
                 "schema": "epubforge.mineru-content",
-                "schema_version": 1,
+                "schema_version": 2,
                 "source_archive_sha256": "a" * 64,
                 "source_archive_size": 1,
                 "source_kind": "direct",
                 "segment_count": 1,
                 "page_count": 8,
-                "source_pdf_sha256": None,
+                "source_pdf_sha256": "a" * 64,
                 "items_sha256": items_sha256,
-                "normalization": {"contract_version": 1},
+                "normalization": {"contract_version": 2},
                 "assets": {},
+                "page_geometry": page_geometry,
                 "items": items,
             },
             ensure_ascii=False,
@@ -390,6 +405,16 @@ def test_rejects_tampered_content_contract(tmp_path: Path, field: str) -> None:
     assert not fake.calls
 
 
+def test_rejects_missing_source_pdf_sha256(tmp_path: Path) -> None:
+    content_path = _write_content(tmp_path)
+    payload = json.loads(content_path.read_text(encoding="utf-8"))
+    payload["source_pdf_sha256"] = None
+    content_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ChapterSegmentationError):
+        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+
+
 def test_rejects_duplicate_keys_and_unordered_items(tmp_path: Path) -> None:
     content_path = _write_content(tmp_path)
     valid = content_path.read_text(encoding="utf-8")
@@ -451,11 +476,34 @@ def test_projection_contract_change_invalidates_fresh_artifact(
     monkeypatch.setattr(
         segmentation,
         "CONTENT_PROJECTION_CONTRACT",
-        (2, ("content_idx", "page_idx", "type", "text_level", "text")),
+        (3, ("content_idx", "page_idx", "type", "text_level", "text")),
     )
     segment_chapters(content_path, tmp_path, fake)
 
     assert len(fake.calls) == 2
+
+
+def test_page_geometry_change_invalidates_fresh_artifact(tmp_path: Path) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeLLM(_success_response())
+    segment_chapters(content_path, tmp_path, fake)
+    payload = json.loads(content_path.read_text(encoding="utf-8"))
+    payload["page_geometry"][0]["width"] = 101.0
+    content_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    segment_chapters(content_path, tmp_path, fake)
+
+    assert len(fake.calls) == 2
+
+
+def test_page_geometry_hash_canonicalizes_integer_and_float_dimensions() -> None:
+    items = [{"content_idx": 0, "page_idx": 0, "type": "text", "text": "x"}]
+    integer_geometry = [{"page_idx": 0, "width": 100, "height": 120}]
+    float_geometry = [{"page_idx": 0, "width": 100.0, "height": 120.0}]
+
+    assert segmentation._content_source_sha256(items, integer_geometry) == (
+        segmentation._content_source_sha256(items, float_geometry)
+    )
 
 
 def test_symlink_output_is_not_reused(tmp_path: Path) -> None:

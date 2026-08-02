@@ -19,10 +19,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from epubforge.llm.client import LLMClient
 from epubforge.mineru_content import CONTENT_SCHEMA, CONTENT_SCHEMA_VERSION
+from epubforge.page_geometry import (
+    PageGeometryError,
+    content_source_sha256,
+    normalize_page_geometry,
+)
+from epubforge.strict_json import (
+    DEFAULT_MAX_JSON_BYTES,
+    StrictJsonError,
+    read_json_document,
+)
 
 
 CHAPTERS_SCHEMA = "epubforge.chapter-segmentation"
 CHAPTERS_SCHEMA_VERSION = 1
+MAX_INPUT_JSON_BYTES = DEFAULT_MAX_JSON_BYTES
 
 # Keep this prompt independent from transport and source-file details.  The
 # prompt fingerprint is calculated at call time so a prompt or projection edit
@@ -38,7 +49,7 @@ CONTENT ITEMS:
 # The projection contract belongs in freshness fingerprints because changing
 # any projected field changes the model input even when the prose stays put.
 CONTENT_PROJECTION_CONTRACT: tuple[int, tuple[str, ...]] = (
-    1,
+    2,
     ("content_idx", "page_idx", "type", "text_level", "text"),
 )
 
@@ -69,6 +80,7 @@ _SOURCE_CONTENT_KEYS = frozenset(
         "items_sha256",
         "normalization",
         "assets",
+        "page_geometry",
         "items",
     }
 )
@@ -128,10 +140,11 @@ class _NormalizedContent(BaseModel):
     source_kind: Literal["direct", "segmented"]
     segment_count: int = Field(ge=1)
     page_count: int = Field(ge=0)
-    source_pdf_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    source_pdf_sha256: str = Field(pattern=_SHA256_PATTERN)
     items_sha256: str = Field(pattern=_SHA256_PATTERN)
     normalization: dict[str, Any]
     assets: dict[str, dict[str, Any]]
+    page_geometry: list[dict[str, Any]] = Field(min_length=1)
     items: list[dict[str, Any]] = Field(min_length=1)
 
 
@@ -164,8 +177,8 @@ def segment_chapters(
     """
     source_path = _resolve_content_path(Path(content_path))
     output_path = _resolve_output_path(Path(output_dir))
-    source_items = _load_source_items(source_path)
-    source_sha256 = _items_sha256(source_items)
+    source_items, page_geometry = _load_source_items(source_path)
+    source_sha256 = _content_source_sha256(source_items, page_geometry)
     current_model = _resolve_model(llm_client)
     prompt_sha256 = _prompt_sha256()
     contract_sha256 = _contract_sha256()
@@ -317,14 +330,16 @@ def _resolve_output_path(output_dir: Path) -> Path:
     return chapter_dir / "chapters.json"
 
 
-def _load_source_items(path: Path) -> list[dict[str, Any]]:
+def _load_source_items(
+    path: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_non_finite,
+        payload, _ = read_json_document(
+            path,
+            "normalized content",
+            max_bytes=MAX_INPUT_JSON_BYTES,
         )
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (OSError, StrictJsonError, ValueError) as exc:
         raise ChapterSegmentationError(
             f"Cannot read normalized content: {path}"
         ) from exc
@@ -353,20 +368,10 @@ def _load_source_items(path: Path) -> list[dict[str, Any]]:
 
     normalized = list(content.items)
     _validate_ordered_source_items(normalized, page_count=content.page_count)
-    return normalized
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"Duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_non_finite(value: str) -> Any:
-    raise ValueError(f"Non-finite JSON number is not allowed: {value}")
+    geometry = _validate_page_geometry(
+        list(content.page_geometry), page_count=content.page_count
+    )
+    return normalized, list(geometry)
 
 
 def _validate_ordered_source_items(
@@ -402,6 +407,15 @@ def _validate_ordered_source_items(
                 f"Content item {position} has an invalid type"
             )
         previous_page_idx = page_idx
+
+
+def _validate_page_geometry(
+    geometry: Sequence[Mapping[str, Any]], *, page_count: int
+) -> tuple[dict[str, int | float], ...]:
+    try:
+        return normalize_page_geometry(geometry, page_count=page_count)
+    except PageGeometryError as exc:
+        raise ChapterSegmentationError(f"Normalized content {exc}") from exc
 
 
 def _index_source_items(
@@ -507,6 +521,16 @@ def _items_sha256(items: Sequence[Mapping[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _content_source_sha256(
+    items: Sequence[Mapping[str, Any]],
+    page_geometry: Sequence[Mapping[str, Any]],
+) -> str:
+    try:
+        return content_source_sha256(items, page_geometry)
+    except PageGeometryError as exc:
+        raise ChapterSegmentationError(f"Normalized content {exc}") from exc
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -530,12 +554,13 @@ def _load_fresh_artifact(
     prompt_sha256: str,
     contract_sha256: str,
 ) -> ChapterSegmentationArtifact | None:
-    if path.is_symlink() or not path.is_file():
-        return None
     try:
-        artifact = ChapterSegmentationArtifact.model_validate_json(
-            path.read_text(encoding="utf-8")
+        payload, _ = read_json_document(
+            path,
+            "chapter segmentation artifact",
+            max_bytes=MAX_INPUT_JSON_BYTES,
         )
+        artifact = ChapterSegmentationArtifact.model_validate(payload)
         if (
             artifact.schema_name != CHAPTERS_SCHEMA
             or artifact.schema_version != CHAPTERS_SCHEMA_VERSION
@@ -548,8 +573,8 @@ def _load_fresh_artifact(
         validate_boundaries(artifact.boundaries, source_items)
     except (
         OSError,
-        UnicodeError,
-        json.JSONDecodeError,
+        StrictJsonError,
+        ValueError,
         ValidationError,
         ChapterSegmentationError,
     ):

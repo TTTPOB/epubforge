@@ -1441,3 +1441,37 @@ def test_candidate_deduplication_rejects_string_provenance() -> None:
 
     with pytest.raises(tune.TuneError, match="sources must be a list"):
         tune._deduplicate_candidate_boxes([box])
+
+
+def test_annotated_jpeg_contains_visible_bbox_and_label_pixels(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    output = tmp_path / "annotated.jpg"
+    _write_jpeg(source, 160, 120)
+    tune.draw_annotated_jpeg(
+        source,
+        output,
+        [
+            {
+                "id": "L001",
+                "type": "FIGURE",
+                "x0": 40,
+                "y0": 40,
+                "x1": 120,
+                "y1": 90,
+                "reading_order": 1,
+            }
+        ],
+        quality=92,
+    )
+    pixmap = fitz.Pixmap(str(output))
+    red_pixels = 0
+    dark_pixels = 0
+    for y in range(pixmap.height):
+        for x in range(pixmap.width):
+            red, green, blue = pixmap.pixel(x, y)[:3]
+            if red > green + 35 and red > blue + 25:
+                red_pixels += 1
+            if red < 80 and green < 80 and blue < 80:
+                dark_pixels += 1
+    assert red_pixels > 20
+    assert dark_pixels > 3
