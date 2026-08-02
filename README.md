@@ -27,3 +27,29 @@ member ordering and headers. It contains `manifest.json` and ordered
 `segments/segment-NNN-pages-FFFF-LLLL.zip` members. Each segment member
 preserves one complete MinerU response ZIP without flattening its files. Batch
 IDs and response hashes in the manifest vary between MinerU runs.
+
+## Tests
+
+Run the test suite with two worker processes by default:
+
+```bash
+uv run pytest
+```
+
+Run the suite serially when debugging shared process state:
+
+```bash
+uv run pytest -n 0
+```
+
+Use serial mode for interactive `pdb` debugging:
+
+```bash
+uv run pytest -n 0 --pdb
+```
+
+Use four workers as an explicit local override on machines with enough CPU and memory:
+
+```bash
+uv run pytest -n 4 --dist worksteal
+```
