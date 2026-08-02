@@ -22,7 +22,7 @@ class ProviderSettings(BaseModel):
 
     base_url: str = "https://openrouter.ai/api/v1"
     api_key: str | None = None
-    model: str = "anthropic/claude-haiku-4.5"
+    model: str = "openai/gpt-5.6-luna"
     timeout_seconds: float = 300.0
     max_tokens: int | None = None
     prompt_caching: bool = True
@@ -71,6 +71,15 @@ class ExtractSettings(BaseModel):
     enable_book_memory: bool = True
 
 
+class ChaptersSettings(BaseModel):
+    """Rendering settings for chapter workspaces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    render_dpi: int = Field(default=150, ge=72, le=300)
+    jpeg_quality: int = Field(default=92, ge=1, le=100)
+
+
 # ---------------------------------------------------------------------------
 # Top-level Config — extra="ignore" so unknown env vars don't raise
 # ---------------------------------------------------------------------------
@@ -86,6 +95,7 @@ class Config(BaseSettings):
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     editor: EditorSettings = Field(default_factory=EditorSettings)
     extract: ExtractSettings = Field(default_factory=ExtractSettings)
+    chapters: ChaptersSettings = Field(default_factory=ChaptersSettings)
 
     def require_llm(self) -> None:
         if not self.llm.api_key:
@@ -160,6 +170,8 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_EDITOR_COMPACT_THRESHOLD", "editor", "compact_threshold", int),
     ("EPUBFORGE_EDITOR_MAX_LOOPS", "editor", "max_loops", int),
     ("EPUBFORGE_ENABLE_BOOK_MEMORY", "extract", "enable_book_memory", _bool_env),
+    ("EPUBFORGE_CHAPTERS_RENDER_DPI", "chapters", "render_dpi", int),
+    ("EPUBFORGE_CHAPTERS_JPEG_QUALITY", "chapters", "jpeg_quality", int),
 ]
 
 
@@ -200,7 +212,7 @@ def load_config(config_path: Path | None = None) -> Config:
             toml_data = tomllib.load(fh)
         # Accept only known top-level sections; unknown keys at the top level are silently
         # ignored (Config.model_config extra="ignore" handles this at parse time too).
-        for key in ("llm", "mineru", "runtime", "editor", "extract"):
+        for key in ("llm", "mineru", "runtime", "editor", "extract", "chapters"):
             if key in toml_data:
                 base[key] = dict(toml_data[key])
 

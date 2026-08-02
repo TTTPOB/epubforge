@@ -228,6 +228,37 @@ def segment_chapters(
     return output_path
 
 
+def is_chapter_segmentation_fresh(
+    content_path: str | Path,
+    output_dir: str | Path,
+    *,
+    model: str,
+) -> bool:
+    """Return whether the published chapter plan matches current inputs.
+
+    This preflight validates the same source, model, prompt, contract, and
+    boundary checks as :func:`segment_chapters` without constructing an LLM
+    client or making a provider request.
+    """
+    source_path = _resolve_content_path(Path(content_path))
+    output_path = _resolve_output_path(Path(output_dir))
+    source_items, page_geometry = _load_source_items(source_path)
+    source_sha256 = _content_source_sha256(source_items, page_geometry)
+    if not isinstance(model, str) or not model.strip():
+        raise ChapterSegmentationError("An LLM model is required for freshness checks")
+    return (
+        _load_fresh_artifact(
+            output_path,
+            source_items=source_items,
+            source_sha256=source_sha256,
+            model=model,
+            prompt_sha256=_prompt_sha256(),
+            contract_sha256=_contract_sha256(),
+        )
+        is not None
+    )
+
+
 def validate_boundaries(
     boundaries: Sequence[ChapterBoundary],
     source_items: Sequence[Mapping[str, Any]],
@@ -625,6 +656,7 @@ __all__ = [
     "ChapterSegmentationError",
     "ChapterSegmentationResponse",
     "ChapterSegmentationResult",
+    "is_chapter_segmentation_fresh",
     "segment_chapters",
     "segment_mineru_chapters",
     "validate_boundaries",

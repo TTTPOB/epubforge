@@ -640,87 +640,60 @@ class TestManifestActivationAfterExtraction:
 
 
 # ---------------------------------------------------------------------------
-# Test 7: run_all with from_stage >= 4 calls run_extract with reuse_only=True
+# Test 7: run_all forwards five-stage force semantics
 # ---------------------------------------------------------------------------
 
 
-class TestRunAllReuseOnly:
-    def test_run_all_from_stage_4_uses_reuse_only(
+class TestRunAllFiveStages:
+    @pytest.mark.parametrize("from_stage", range(1, 6))
+    @pytest.mark.parametrize("force", [False, True])
+    def test_run_all_from_force_matrix(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        from_stage: int,
+        force: bool,
     ) -> None:
-        """run_all(from_stage=4) must call run_extract with reuse_only=True."""
+        """run_all applies --force-rerun from the selected stage onward."""
         cfg = _make_cfg(tmp_path)
         pdf = tmp_path / "book.pdf"
         pdf.write_bytes(b"%PDF-1.7\n")
 
-        run_extract_calls: list[dict[str, Any]] = []
-
-        def fake_run_extract(
-            pdf_path: Path,
-            cfg_arg: Any,
-            *,
-            force: bool = False,
-            pages: Any = None,
-            reuse_only: bool = False,
-        ) -> None:
-            run_extract_calls.append({"reuse_only": reuse_only, "force": force})
-
-        def fake_run_parse(*args: Any, **kwargs: Any) -> None:
-            pass
-
-        def fake_run_classify(*args: Any, **kwargs: Any) -> None:
-            pass
-
-        def fake_run_assemble(*args: Any, **kwargs: Any) -> None:
-            pass
-
-        monkeypatch.setattr("epubforge.pipeline.run_extract", fake_run_extract)
-        monkeypatch.setattr("epubforge.pipeline.run_parse", fake_run_parse)
-        monkeypatch.setattr("epubforge.pipeline.run_classify", fake_run_classify)
-        monkeypatch.setattr("epubforge.pipeline.run_assemble", fake_run_assemble)
+        stage_calls: list[tuple[str, bool]] = []
+        for name in ("parse", "normalize", "segment", "prepare", "revise"):
+            monkeypatch.setattr(
+                "epubforge.pipeline.run_" + name,
+                lambda *args, _name=name, **kwargs: stage_calls.append(
+                    (_name, kwargs["force"])
+                ),
+            )
 
         from epubforge.pipeline import run_all
 
-        run_all(pdf, cfg, from_stage=4)
+        run_all(pdf, cfg, force=force, from_stage=from_stage)
 
-        assert len(run_extract_calls) == 1
-        assert run_extract_calls[0]["reuse_only"] is True
+        assert stage_calls == [
+            (name, force and index >= from_stage)
+            for index, name in enumerate(
+                ("parse", "normalize", "segment", "prepare", "revise"),
+                start=1,
+            )
+        ]
 
-    def test_run_all_from_stage_3_does_not_use_reuse_only(
+    def test_run_all_rejects_invalid_from_stage(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """run_all(from_stage=3) must NOT use reuse_only."""
+        """Direct callers receive the same five-stage range contract as CLI."""
         cfg = _make_cfg(tmp_path)
         pdf = tmp_path / "book.pdf"
         pdf.write_bytes(b"%PDF-1.7\n")
 
-        run_extract_calls: list[dict[str, Any]] = []
-
-        def fake_run_extract(
-            pdf_path: Path,
-            cfg_arg: Any,
-            *,
-            force: bool = False,
-            pages: Any = None,
-            reuse_only: bool = False,
-        ) -> None:
-            run_extract_calls.append({"reuse_only": reuse_only})
-
-        monkeypatch.setattr("epubforge.pipeline.run_extract", fake_run_extract)
-        monkeypatch.setattr("epubforge.pipeline.run_parse", lambda *a, **k: None)
-        monkeypatch.setattr("epubforge.pipeline.run_classify", lambda *a, **k: None)
-        monkeypatch.setattr("epubforge.pipeline.run_assemble", lambda *a, **k: None)
-
         from epubforge.pipeline import run_all
 
-        run_all(pdf, cfg, from_stage=3)
-
-        assert len(run_extract_calls) == 1
-        assert run_extract_calls[0]["reuse_only"] is False
+        with pytest.raises(ValueError, match="between 1 and 5"):
+            run_all(pdf, cfg, from_stage=6)
 
 
 # ---------------------------------------------------------------------------

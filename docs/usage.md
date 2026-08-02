@@ -8,11 +8,11 @@
 uv sync
 ```
 
-Stage 1 使用 MinerU 官方 API。配置 `EPUBFORGE_MINERU_API_KEY` 或
-`[mineru].api_key`，然后运行：
+默认流程经过五个阶段生成经过修订的章节 HTML。Stage 1 使用 MinerU 官方 API。
+配置 `EPUBFORGE_MINERU_API_KEY` 或 `[mineru].api_key`，然后运行：
 
 ```bash
-uv run epubforge --config config.example.toml parse fixtures/example.pdf
+uv run epubforge --config config.example.toml run fixtures/example.pdf
 ```
 
 Stage 1 会写入：
@@ -32,33 +32,60 @@ Stage 1 的崩溃一致性发布要求 POSIX 运行时，以及支持目录 `fsy
 
 ## Pipeline
 
-| 阶段 | 命令 | 当前输入 | 输出 |
+| 阶段 | 命令 | 输入 | 输出 |
 |---|---|---|---|
 | 1 | `epubforge parse` | PDF | `source/source.pdf`、`01_raw.zip` |
-| 2 | `epubforge classify` | `01_raw.json` | `02_pages.json` |
-| 3 | `epubforge extract` | `01_raw.json`、`02_pages.json`、source PDF | `03_extract/` |
-| 4 | `epubforge assemble` | Stage 3 active manifest | `05_semantic_raw.json` |
-| 5 | `epubforge build` | `edit_state/book.json` 或 `05_semantic.json` | `out/<name>.epub` |
+| 2 | `epubforge normalize` | `01_raw.zip`、source PDF | `02_content/content.json`、assets |
+| 3 | `epubforge segment` | `02_content/content.json` | `03_chapters/chapters.json` |
+| 4 | `epubforge prepare` | normalized content、chapter plan、source PDF | `04_edit/manifest.json`、chapter HTML、page JPEGs |
+| 5 | `epubforge revise` | `04_edit/` | 每章 `corrected.html`、`revision.json` |
 
-Stages 2-4 仍读取 `01_raw.json`。MinerU ZIP 到该旧 JSON 接口的转换留在后续任务，当前边界会让完整 pipeline 在 Stage 2 停止。
+输出树示例：
 
-单独运行后续命令：
-
-```bash
-uv run epubforge classify fixtures/example.pdf
-uv run epubforge extract fixtures/example.pdf
-uv run epubforge assemble fixtures/example.pdf
-uv run epubforge build fixtures/example.pdf
+```text
+work/example/
+├── source/source.pdf
+├── 01_raw.zip
+├── 02_content/content.json
+├── 02_content/assets/
+├── 03_chapters/chapters.json
+└── 04_edit/
+    ├── manifest.json
+    └── chapters/0001/
+        ├── chapter.html
+        ├── corrected.html
+        ├── revision.json
+        └── pages/page-0000.jpg
 ```
 
-`run` 会串行执行 Stage 1-4：
+单独运行阶段：
+
+```bash
+uv run epubforge normalize fixtures/example.pdf
+uv run epubforge segment fixtures/example.pdf
+uv run epubforge prepare fixtures/example.pdf
+uv run epubforge revise fixtures/example.pdf
+```
+
+`run` 会串行执行 Stage 1-5：
 
 ```bash
 uv run epubforge --config config.example.toml run fixtures/example.pdf
-uv run epubforge --config config.example.toml run fixtures/example.pdf --from 3
+uv run epubforge --config config.example.toml run fixtures/example.pdf --from 3 --force-rerun
 ```
 
-`--from` 接受 `1-4`。`--force-rerun` 会强制重跑指定阶段及后续阶段。
+`--from` 接受 `1-5`。早期阶段会按新鲜度检查确保依赖存在；
+`--force-rerun` 会强制重跑选定阶段及后续阶段。默认 `run` 不接受旧版
+`--pages` 参数。Stage 5 默认在首个章节失败后停止，并保留已经发布的成功章节；
+传入 `--continue-on-error` 才会继续处理后续章节。
+
+章节阶段从 `[llm].model` 读取模型 ID。示例配置使用
+`openai/gpt-5.6-luna` 选择 Luna Medium；代码不会硬编码模型。Provider 专属的
+reasoning 或 variant 参数放在 `[llm].extra_body`，不要把 OpenCode 任务 variant
+当作应用 API 模型设置。
+
+旧的 `classify`、`extract`、`assemble`、`build` 命令仍保留为迁移期接口，`run`
+不会调用这些命令。
 
 ## Editor
 
@@ -80,7 +107,7 @@ uv run epubforge --config config.example.toml editor render-page work/example --
 ```toml
 [llm]
 api_key = "sk-or-..."
-model = "anthropic/claude-haiku-4.5"
+model = "openai/gpt-5.6-luna"
 
 [mineru]
 api_key = "..."
@@ -91,6 +118,10 @@ language = "ch"
 cache_dir = "work/.cache"
 work_dir = "work"
 out_dir = "out"
+
+[chapters]
+render_dpi = 150
+jpeg_quality = 92
 ```
 
 环境变量示例：
@@ -98,7 +129,7 @@ out_dir = "out"
 ```bash
 EPUBFORGE_MINERU_API_KEY=...
 EPUBFORGE_LLM_API_KEY=sk-or-...
-EPUBFORGE_LLM_MODEL=anthropic/claude-haiku-4.5
+EPUBFORGE_LLM_MODEL=openai/gpt-5.6-luna
 EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
 ```
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,25 @@ def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
     )
 
 
+def _run_logged_stage(
+    ctx: typer.Context,
+    pdf_path: Path,
+    runner: Callable[..., None],
+    *,
+    force: bool,
+    **kwargs: object,
+) -> None:
+    """Load command context, configure logging, and invoke one pipeline stage."""
+    cfg = _get_config(ctx)
+    root_obj = ctx.find_root().obj
+    log_file_override = (
+        root_obj.log_file_override if isinstance(root_obj, AppContext) else None
+    )
+    log_path = _init_logging(cfg, pdf_path, log_file_override)
+    _log_startup_banner(cfg, log_path)
+    runner(pdf_path, cfg, force=force, **kwargs)
+
+
 def _parse_pages(pages_str: str | None) -> set[int] | None:
     """Parse '5,10-12,20' into {5, 10, 11, 12, 20}."""
     if not pages_str:
@@ -145,23 +165,23 @@ def run(
         1,
         "--from",
         min=1,
-        max=4,
-        help="Start from stage N (1–4); existing outputs are reused unless --force-rerun",
+        max=5,
+        help="Start from stage N (1–5); existing outputs are reused unless --force-rerun",
     ),
-    pages: str | None = typer.Option(
-        None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
+    continue_on_error: bool = typer.Option(
+        False,
+        "--continue-on-error",
+        help="Continue later chapter revisions after a chapter failure",
     ),
 ) -> None:
-    """Run the ingestion pipeline (parse → classify → extract → assemble)."""
-    cfg = _get_config(ctx)
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
-    )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_all(
-        pdf_path, cfg, force=force, from_stage=from_stage, pages=_parse_pages(pages)
+    """Run parse, normalize, segment, prepare, and revise through corrected HTML."""
+    _run_logged_stage(
+        ctx,
+        pdf_path,
+        pipeline.run_all,
+        force=force,
+        from_stage=from_stage,
+        continue_on_error=continue_on_error,
     )
 
 
@@ -172,15 +192,58 @@ def parse(
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
     """Stage 1 — MinerU extraction → work/<name>/01_raw.zip."""
-    cfg = _get_config(ctx)
+    _run_logged_stage(ctx, pdf_path, pipeline.run_parse, force=force)
 
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
+
+@app.command()
+def normalize(
+    ctx: typer.Context,
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force-rerun", "-f"),
+) -> None:
+    """Stage 2 — normalize 01_raw.zip → work/<name>/02_content/."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_normalize, force=force)
+
+
+@app.command()
+def segment(
+    ctx: typer.Context,
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force-rerun", "-f"),
+) -> None:
+    """Stage 3 — detect chapter boundaries → work/<name>/03_chapters/."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_segment, force=force)
+
+
+@app.command()
+def prepare(
+    ctx: typer.Context,
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force-rerun", "-f"),
+) -> None:
+    """Stage 4 — render chapter workspaces → work/<name>/04_edit/."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_prepare, force=force)
+
+
+@app.command()
+def revise(
+    ctx: typer.Context,
+    pdf_path: Path = typer.Argument(..., help="Input PDF file"),
+    force: bool = typer.Option(False, "--force-rerun", "-f"),
+    continue_on_error: bool = typer.Option(
+        False,
+        "--continue-on-error",
+        help="Continue later chapter revisions after a chapter failure",
+    ),
+) -> None:
+    """Stage 5 — revise chapter workspaces → corrected.html."""
+    _run_logged_stage(
+        ctx,
+        pdf_path,
+        pipeline.run_revise,
+        force=force,
+        continue_on_error=continue_on_error,
     )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_parse(pdf_path, cfg, force=force)
 
 
 @app.command()
@@ -189,15 +252,8 @@ def classify(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
-    """Stage 2 — classify pages as simple/complex → work/<name>/02_pages.json."""
-    cfg = _get_config(ctx)
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
-    )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_classify(pdf_path, cfg, force=force)
+    """Legacy page classifier; use normalize for the default workflow."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_classify, force=force)
 
 
 @app.command()
@@ -209,15 +265,14 @@ def extract(
         None, "--pages", help="Limit extraction to pages, e.g. '1-26' or '5,10-12'"
     ),
 ) -> None:
-    """Stage 3 extraction → work/<name>/03_extract/."""
-    cfg = _get_config(ctx)
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
+    """Legacy extraction stage; use segment for the default workflow."""
+    _run_logged_stage(
+        ctx,
+        pdf_path,
+        pipeline.run_extract,
+        force=force,
+        pages=_parse_pages(pages),
     )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_extract(pdf_path, cfg, force=force, pages=_parse_pages(pages))
 
 
 @app.command()
@@ -226,15 +281,8 @@ def assemble(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
-    """Stage 4 — merge into Semantic IR → work/<name>/05_semantic_raw.json."""
-    cfg = _get_config(ctx)
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
-    )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_assemble(pdf_path, cfg, force=force)
+    """Legacy Semantic IR assembly; use prepare for the default workflow."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_assemble, force=force)
 
 
 @app.command()
@@ -243,12 +291,5 @@ def build(
     pdf_path: Path = typer.Argument(..., help="Input PDF file"),
     force: bool = typer.Option(False, "--force-rerun", "-f"),
 ) -> None:
-    """Stage 5 — generate EPUB from edit_state/book.json or 05_semantic.json."""
-    cfg = _get_config(ctx)
-    app_ctx = ctx.find_root().obj
-    log_file_override = (
-        app_ctx.log_file_override if isinstance(app_ctx, AppContext) else None
-    )
-    log_path = _init_logging(cfg, pdf_path, log_file_override)
-    _log_startup_banner(cfg, log_path)
-    pipeline.run_build(pdf_path, cfg, force=force)
+    """Legacy EPUB build from Semantic IR."""
+    _run_logged_stage(ctx, pdf_path, pipeline.run_build, force=force)

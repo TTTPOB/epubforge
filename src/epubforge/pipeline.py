@@ -1,4 +1,4 @@
-"""Pipeline orchestration for stages 1-4 plus explicit build."""
+"""Pipeline orchestration for the five-stage chapter workflow."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import pymupdf
 from filelock import FileLock, Timeout
 
 from epubforge.config import Config
+from epubforge.llm.client import LLMClient
 from epubforge.mineru import MineruClient, MineruDownloadResult
 from epubforge.observability import get_tracker, stage_timer
 
@@ -94,6 +95,16 @@ def _skip(path: Path, force: bool, label: str) -> bool:
         log.info("skip %s — reusing %s (pass --force-rerun to re-run)", label, path)
         return True
     return False
+
+
+def _require_stage_file(work: Path, relative_path: str, stage: int) -> Path:
+    path = work / relative_path
+    if not path.is_file():
+        raise RuntimeError(
+            f"Stage {stage} requires {relative_path} to exist in {work}. "
+            "Run earlier pipeline stages first."
+        )
+    return path
 
 
 def _sha256_file(path: Path) -> str:
@@ -778,21 +789,26 @@ def run_all(
     *,
     force: bool = False,
     from_stage: int = 1,
-    pages: set[int] | None = None,
+    continue_on_error: bool = False,
 ) -> None:
+    if not 1 <= from_stage <= 5:
+        raise ValueError("from_stage must be between 1 and 5")
+
     # stages < from_stage use normal skip; stages >= from_stage are controlled by --force-rerun
     def _f(stage: int) -> bool:
         return force if stage >= from_stage else False
 
     with stage_timer(log, "pipeline"):
         run_parse(pdf_path, cfg, force=_f(1))
-        run_classify(pdf_path, cfg, force=_f(2))
-        if from_stage >= 4:
-            # run --from 4: only validate active artifact exists, never create a new one
-            run_extract(pdf_path, cfg, force=False, pages=pages, reuse_only=True)
-        else:
-            run_extract(pdf_path, cfg, force=_f(3), pages=pages)
-        run_assemble(pdf_path, cfg, force=_f(4))
+        run_normalize(pdf_path, cfg, force=_f(2))
+        run_segment(pdf_path, cfg, force=_f(3))
+        run_prepare(pdf_path, cfg, force=_f(4))
+        run_revise(
+            pdf_path,
+            cfg,
+            force=_f(5),
+            continue_on_error=continue_on_error,
+        )
 
     log.info("pipeline total: %s", get_tracker().summary_line())
 
@@ -889,6 +905,133 @@ def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
                         staging_dir,
                         cleanup_error,
                     )
+
+
+def run_normalize(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+    """Run Stage 2, normalizing the immutable MinerU archive."""
+    from epubforge.mineru_content import normalize_mineru_content
+
+    work = cfg.book_work_dir(pdf_path)
+    raw_archive = _require_stage_file(work, "01_raw.zip", 2)
+    source_pdf = _require_stage_file(work, "source/source.pdf", 2)
+    output_dir = work / "02_content"
+    log.info("Stage 2: normalizing MinerU content...")
+    with stage_timer(log, "2 normalize"):
+        normalize_mineru_content(
+            raw_archive,
+            output_dir,
+            source_pdf=source_pdf,
+            force=force,
+        )
+    log.info("  -> %s", output_dir)
+
+
+def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+    """Run Stage 3, detecting chapter boundaries with the configured LLM."""
+    from epubforge.chapter_segmentation import (
+        is_chapter_segmentation_fresh,
+        segment_chapters,
+    )
+
+    work = cfg.book_work_dir(pdf_path)
+    content_path = _require_stage_file(work, "02_content/content.json", 3)
+    output_dir = work / "03_chapters"
+    with stage_timer(log, "3 segment"):
+        if not force and is_chapter_segmentation_fresh(
+            content_path,
+            output_dir,
+            model=cfg.llm.model,
+        ):
+            log.info("skip segment — reusing fresh %s", output_dir / "chapters.json")
+            return
+
+        cfg.require_llm()
+        client = LLMClient(cfg)
+        log.info("Stage 3: segmenting chapters with model=%s...", client.model)
+        segment_chapters(content_path, output_dir, client, force=force)
+        log.info("  -> %s", output_dir / "chapters.json")
+
+
+def run_prepare(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
+    """Run Stage 4, rendering deterministic chapter editing workspaces."""
+    from epubforge.chapter_workspace import build_chapter_workspace
+
+    work = cfg.book_work_dir(pdf_path)
+    _require_stage_file(work, "02_content/content.json", 4)
+    _require_stage_file(work, "03_chapters/chapters.json", 4)
+    _require_stage_file(work, "source/source.pdf", 4)
+    output_dir = work / "04_edit"
+    log.info(
+        "Stage 4: preparing chapter workspaces (dpi=%d quality=%d)...",
+        cfg.chapters.render_dpi,
+        cfg.chapters.jpeg_quality,
+    )
+    with stage_timer(log, "4 prepare"):
+        build_chapter_workspace(
+            work,
+            force=force,
+            dpi=cfg.chapters.render_dpi,
+            quality=cfg.chapters.jpeg_quality,
+        )
+    log.info("  -> %s", output_dir)
+
+
+def run_revise(
+    pdf_path: Path,
+    cfg: Config,
+    *,
+    force: bool = False,
+    continue_on_error: bool = False,
+) -> None:
+    """Run Stage 5 and fail clearly after preserving successful chapters."""
+    from epubforge.chapter_revision import (
+        is_chapter_revision_fresh,
+        revise_all_chapters,
+    )
+
+    work = cfg.book_work_dir(pdf_path)
+    edit_dir = work / "04_edit"
+    if not edit_dir.is_dir():
+        raise RuntimeError(
+            f"Stage 5 requires 04_edit to exist in {work}. "
+            "Run earlier pipeline stages first."
+        )
+    _require_stage_file(work, "04_edit/manifest.json", 5)
+    with stage_timer(log, "5 revise"):
+        if not force and is_chapter_revision_fresh(edit_dir, model=cfg.llm.model):
+            log.info(
+                "skip revise — reusing fresh corrected chapter outputs in %s", edit_dir
+            )
+            return
+
+        cfg.require_llm()
+        client = LLMClient(cfg)
+        log.info(
+            "Stage 5: revising chapters with model=%s (continue_on_error=%s)...",
+            client.model,
+            continue_on_error,
+        )
+        report = revise_all_chapters(
+            edit_dir,
+            client,
+            force=force,
+            continue_on_error=continue_on_error,
+        )
+        log.info(
+            "Stage 5 report: completed=%d skipped=%d failed=%d",
+            len(report.completed),
+            len(report.skipped),
+            len(report.failed),
+        )
+        if report.failed:
+            details = "; ".join(
+                f"{chapter}: {report.errors.get(chapter, 'unknown error')}"
+                for chapter in report.failed
+            )
+            raise RuntimeError(
+                "Stage 5 chapter revision failed; successful chapters were preserved. "
+                f"Failures: {details}"
+            )
 
 
 def run_classify(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:

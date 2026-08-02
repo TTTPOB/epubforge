@@ -1032,6 +1032,36 @@ def _load_chapter(
     )
 
 
+def is_chapter_revision_fresh(
+    edit_dir: str | Path,
+    *,
+    model: str,
+) -> bool:
+    """Return whether every chapter has a valid current revision.
+
+    The preflight reuses the workspace, chapter, and revision validators used
+    by :func:`revise_all_chapters`. It performs no provider or network work.
+    """
+    if not isinstance(model, str) or not model.strip():
+        raise ChapterRevisionError("an LLM model is required for freshness checks")
+    workspace = _load_workspace(_resolve_edit_dir(Path(edit_dir)))
+    prompt_hash = _prompt_sha256()
+    contract_hash = _contract_sha256()
+    for entry in workspace.entries:
+        chapter_path = workspace.root / PurePosixPath(cast(str, entry["path"]))
+        chapter = _load_chapter(workspace, entry, chapter_path)
+        if not _fresh_output(
+            chapter,
+            chapter_path / "corrected.html",
+            chapter_path / "revision.json",
+            model=model,
+            prompt_hash=prompt_hash,
+            contract_hash=contract_hash,
+        ):
+            return False
+    return True
+
+
 def _validate_chapter_manifest(
     workspace: _WorkspaceInput,
     entry: Mapping[str, Any],
@@ -1826,6 +1856,7 @@ __all__ = [
     "ChapterRevisionRecord",
     "ChapterRevisionReport",
     "ChapterRevisionResponse",
+    "is_chapter_revision_fresh",
     "MAX_HTML_BYTES",
     "MAX_HTML_ELEMENTS",
     "MAX_IMAGE_BYTES",

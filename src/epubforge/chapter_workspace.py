@@ -1568,6 +1568,15 @@ def _fresh_output_matches(
             return False
         actual = _tree_file_hashes(output)
         actual.pop("manifest.json", None)
+        # Chapter revision owns these files after workspace publication. Keep
+        # them outside the base workspace hash comparison so a fresh prepare
+        # cannot erase valid or pending revision outputs.
+        for chapter in ranges:
+            for generated in ("corrected.html", "revision.json"):
+                actual.pop(
+                    f"chapters/{chapter.ordinal:04d}/{generated}",
+                    None,
+                )
         if set(files) != set(actual):
             return False
         for relative, digest in files.items():
