@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "LLM-assisted PDF to EPUB converter for books and theses"
 readme = "README.md"
 requires-python = ">=3.13"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: POSIX",
+]
 dependencies = [
     "docling>=2.0",
     "openai>=1.54",
@@ -20,6 +25,7 @@ dependencies = [
     "pymupdf>=1.24",
     "paddlepaddle==3.2.2",
     "paddleocr[doc-parser]==3.3.2",
+    "filelock>=3.29",
 ]
 
 [project.optional-dependencies]

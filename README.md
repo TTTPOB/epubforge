@@ -2,13 +2,28 @@
 
 MinerU-based PDF → EPUB conversion with agentic editing support.
 
-Stage 1 stores the original MinerU API archive at `work/<book>/01_raw.zip` and
-keeps the source PDF at `work/<book>/source/source.pdf`. Set
+Stage 1 stores the MinerU API archive at `work/<book>/01_raw.zip` and keeps the
+source PDF at `work/<book>/source/source.pdf`. Stage 1 reads the full PDF page
+count before any MinerU API request, accepts at most 1000 pages, and sends at
+most 200 pages per MinerU upload. Set
 `EPUBFORGE_MINERU_API_KEY` or `[mineru].api_key`, then run:
 
 ```bash
 uv run epubforge --config config.example.toml parse input.pdf
 ```
 
+Stage 1 requires a POSIX runtime and a local filesystem that supports durable
+directory `fsync` and atomic rename. The command rejects unsupported runtimes
+before it calls MinerU or changes published Stage 1 files. Network filesystems
+can expose different `fsync` and rename behavior, so epubforge does not extend
+the crash-consistency guarantee to them.
+
 Stages 2-4 still consume the legacy `01_raw.json` boundary while downstream
 MinerU archive support is pending.
+
+For PDFs up to 200 pages, `01_raw.zip` remains the original MinerU response ZIP.
+For PDFs from 201 through 1000 pages, `01_raw.zip` is an outer ZIP with stable
+member ordering and headers. It contains `manifest.json` and ordered
+`segments/segment-NNN-pages-FFFF-LLLL.zip` members. Each segment member
+preserves one complete MinerU response ZIP without flattening its files. Batch
+IDs and response hashes in the manifest vary between MinerU runs.

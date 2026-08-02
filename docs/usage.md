@@ -22,6 +22,13 @@ Stage 1 会写入：
 - `work/example/01_raw.zip`，原始 MinerU API ZIP 归档
 
 已有 `01_raw.zip` 时，parse 会复用归档。传入 `--force-rerun` 才会重新调用 MinerU。
+Stage 1 会先读取完整页数，超过 1000 页的 PDF 会在请求 MinerU 前拒绝。201 至
+1000 页的 PDF 会按每段最多 200 页切分；外层 `01_raw.zip` 包含
+`manifest.json` 和按页码排序的 `segments/segment-NNN-pages-FFFF-LLLL.zip`，每个
+segment 保留一份完整的 MinerU 响应 ZIP。200 页以内继续直接保存单份原始响应 ZIP。
+Stage 1 的崩溃一致性发布要求 POSIX 运行时，以及支持目录 `fsync` 和原子重命名的本地
+文件系统。Windows 会在调用 MinerU 或修改 Stage 1 文件前拒绝执行。网络文件系统的
+`fsync` 和重命名语义可能不同，项目不承诺其崩溃一致性。
 
 ## Pipeline
 

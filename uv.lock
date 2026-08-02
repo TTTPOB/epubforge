@@ -597,6 +597,7 @@ source = { editable = "." }
 dependencies = [
     { name = "docling" },
     { name = "ebooklib" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "openai" },
     { name = "paddleocr", extra = ["doc-parser"] },
@@ -625,6 +626,7 @@ dev = [
 requires-dist = [
     { name = "docling", specifier = ">=2.0" },
     { name = "ebooklib", specifier = ">=0.18" },
+    { name = "filelock", specifier = ">=3.29" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.16" },
     { name = "openai", specifier = ">=1.54" },
