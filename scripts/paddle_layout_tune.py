@@ -797,6 +797,105 @@ _COLORS = {
     "FORMULA": (190 / 255, 24 / 255, 93 / 255),
 }
 
+# Keep annotation geometry explicit so visual review and tests share one contract.
+ANNOTATED_BBOX_STROKE_WIDTH = 4.0
+ANNOTATED_LABEL_FONT_NAME = "helv"
+ANNOTATED_LABEL_FONT_SIZE = 12.0
+ANNOTATED_LABEL_PADDING = 2.0
+ANNOTATED_LABEL_GAP = 2.0
+ANNOTATED_LABEL_FILL_OPACITY = 0.5
+ANNOTATED_LABEL_BLACK = (0.0, 0.0, 0.0)
+ANNOTATED_LABEL_WHITE = (1.0, 1.0, 1.0)
+
+
+def _label_text_color(color: Sequence[float]) -> tuple[float, float, float]:
+    luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+    return ANNOTATED_LABEL_BLACK if luminance > 0.5 else ANNOTATED_LABEL_WHITE
+
+
+def _label_geometry(
+    label: str,
+    candidate_rect: fitz.Rect,
+    *,
+    page_width: float,
+    page_height: float,
+) -> tuple[fitz.Rect, tuple[float, float], float] | None:
+    font = fitz.Font(fontname=ANNOTATED_LABEL_FONT_NAME)
+    label_width = (
+        fitz.get_text_length(
+            label,
+            fontname=ANNOTATED_LABEL_FONT_NAME,
+            fontsize=ANNOTATED_LABEL_FONT_SIZE,
+        )
+        + 2.0 * ANNOTATED_LABEL_PADDING
+    )
+    label_height = (
+        ANNOTATED_LABEL_FONT_SIZE * (font.ascender - font.descender)
+        + 2.0 * ANNOTATED_LABEL_PADDING
+    )
+    if label_width > page_width or label_height > page_height:
+        return None
+
+    label_x = min(
+        max(0.0, float(candidate_rect.x0)),
+        max(0.0, page_width - label_width),
+    )
+    above_y = float(candidate_rect.y0) - ANNOTATED_LABEL_GAP - label_height
+    below_y = float(candidate_rect.y1) + ANNOTATED_LABEL_GAP
+    if above_y >= 0.0:
+        label_y = above_y
+    elif below_y + label_height <= page_height:
+        label_y = below_y
+    else:
+        label_y = min(max(0.0, above_y), page_height - label_height)
+
+    rect = fitz.Rect(label_x, label_y, label_x + label_width, label_y + label_height)
+    origin = (
+        label_x + ANNOTATED_LABEL_PADDING,
+        label_y + ANNOTATED_LABEL_PADDING + ANNOTATED_LABEL_FONT_SIZE * font.ascender,
+    )
+    return rect, origin, ANNOTATED_LABEL_FONT_SIZE
+
+
+def _draw_annotated_candidate(
+    page: fitz.Page,
+    box: dict[str, Any],
+    *,
+    page_width: float,
+    page_height: float,
+) -> None:
+    color = _COLORS.get(str(box["type"]), (0.1, 0.1, 0.1))
+    candidate_rect = fitz.Rect(box["x0"], box["y0"], box["x1"], box["y1"])
+    page.draw_rect(
+        candidate_rect,
+        color=color,
+        width=ANNOTATED_BBOX_STROKE_WIDTH,
+    )
+    label = f"{box['reading_order']} {box['id']} {box['type']}"
+    geometry = _label_geometry(
+        label,
+        candidate_rect,
+        page_width=page_width,
+        page_height=page_height,
+    )
+    if geometry is None:
+        return
+    label_rect, text_origin, font_size = geometry
+    page.draw_rect(
+        label_rect,
+        color=None,
+        fill=color,
+        fill_opacity=ANNOTATED_LABEL_FILL_OPACITY,
+        width=0,
+    )
+    page.insert_text(
+        text_origin,
+        label,
+        fontname=ANNOTATED_LABEL_FONT_NAME,
+        fontsize=font_size,
+        color=_label_text_color(color),
+    )
+
 
 def draw_annotated_jpeg(
     source_path: Path,
@@ -809,18 +908,20 @@ def draw_annotated_jpeg(
         raise TuneError(f"source JPEG is missing: {source_path}")
     pixmap = fitz.Pixmap(str(source_path))
     doc = fitz.open()
-    page = doc.new_page(width=pixmap.width, height=pixmap.height)
-    page.insert_image(page.rect, filename=str(source_path))
-    for box in boxes:
-        color = _COLORS.get(str(box["type"]), (0.1, 0.1, 0.1))
-        rect = fitz.Rect(box["x0"], box["y0"], box["x1"], box["y1"])
-        page.draw_rect(rect, color=color, width=2)
-        label = f"{box['reading_order']} {box['id']} {box['type']}"
-        label_y = max(10.0, float(box["y0"]) - 3.0)
-        page.insert_text((float(box["x0"]), label_y), label, fontsize=8, color=color)
-    rendered = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
-    _atomic_write_bytes(output_path, rendered.tobytes("jpeg", jpg_quality=quality))
-    doc.close()
+    try:
+        page = doc.new_page(width=pixmap.width, height=pixmap.height)
+        page.insert_image(page.rect, filename=str(source_path))
+        for box in boxes:
+            _draw_annotated_candidate(
+                page,
+                box,
+                page_width=float(pixmap.width),
+                page_height=float(pixmap.height),
+            )
+        rendered = page.get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+        _atomic_write_bytes(output_path, rendered.tobytes("jpeg", jpg_quality=quality))
+    finally:
+        doc.close()
 
 
 def draw_raw_evidence_jpeg(

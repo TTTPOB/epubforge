@@ -20,10 +20,16 @@ SPEC.loader.exec_module(tune)
 PADDLEOCR_IMPORTED_BY_SCRIPT = not PADDLEOCR_WAS_IMPORTED and "paddleocr" in sys.modules
 
 
-def _write_jpeg(path: Path, width: int = 100, height: int = 120) -> None:
+def _write_jpeg(
+    path: Path,
+    width: int = 100,
+    height: int = 120,
+    *,
+    fill: tuple[float, float, float] = (1, 1, 1),
+) -> None:
     document = fitz.open()
     page = document.new_page(width=width, height=height)
-    page.draw_rect(page.rect, fill=(1, 1, 1))
+    page.draw_rect(page.rect, fill=fill)
     path.write_bytes(page.get_pixmap(alpha=False).tobytes("jpeg", jpg_quality=82))
     document.close()
 
@@ -585,6 +591,166 @@ def test_candidate_schema_and_annotated_jpeg(tmp_path: Path) -> None:
     restored = json.loads(candidate_path.read_text(encoding="utf-8"))
     assert restored["boxes"][0]["reading_order"] == 1
     assert restored["coordinate_space"]["source"] == "PDF CropBox"
+
+
+def test_annotated_candidate_uses_fixed_visual_contract() -> None:
+    class RecordingPage:
+        def __init__(self) -> None:
+            self.rects: list[tuple[fitz.Rect, dict[str, Any]]] = []
+            self.text: list[tuple[tuple[float, float], str, dict[str, Any]]] = []
+
+        def draw_rect(self, rect: fitz.Rect, **kwargs: Any) -> None:
+            self.rects.append((rect, kwargs))
+
+        def insert_text(
+            self, origin: tuple[float, float], text: str, **kwargs: Any
+        ) -> None:
+            self.text.append((origin, text, kwargs))
+
+    page = RecordingPage()
+    tune._draw_annotated_candidate(
+        page,  # type: ignore[arg-type]
+        {
+            "id": "p0001-body-deadbeef00",
+            "type": "BODY",
+            "x0": 40.0,
+            "y0": 100.0,
+            "x1": 180.0,
+            "y1": 150.0,
+            "reading_order": 1,
+        },
+        page_width=400.0,
+        page_height=300.0,
+    )
+
+    candidate_rect, candidate_kwargs = page.rects[0]
+    label_rect, label_kwargs = page.rects[1]
+    assert candidate_rect == fitz.Rect(40.0, 100.0, 180.0, 150.0)
+    assert candidate_kwargs == {"color": tune._COLORS["BODY"], "width": 4.0}
+    assert label_kwargs == {
+        "color": None,
+        "fill": tune._COLORS["BODY"],
+        "fill_opacity": 0.5,
+        "width": 0,
+    }
+    assert len(page.text) == 1
+    _, text, text_kwargs = page.text[0]
+    assert text == "1 p0001-body-deadbeef00 BODY"
+    assert text_kwargs == {
+        "fontname": "helv",
+        "fontsize": 12.0,
+        "color": tune.ANNOTATED_LABEL_WHITE,
+    }
+    assert label_rect.width > 0
+    assert label_rect.height > 0
+
+
+def test_annotated_jpeg_preserves_dimensions_and_blends_label_fill(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.jpg"
+    output = tmp_path / "annotated.jpg"
+    _write_jpeg(source, width=400, height=300)
+    box = {
+        "id": "p0001-body-deadbeef00",
+        "type": "BODY",
+        "x0": 40.0,
+        "y0": 100.0,
+        "x1": 180.0,
+        "y1": 150.0,
+        "reading_order": 1,
+    }
+
+    tune.draw_annotated_jpeg(source, output, [box], quality=100)
+
+    geometry = tune._label_geometry(
+        "1 p0001-body-deadbeef00 BODY",
+        fitz.Rect(40.0, 100.0, 180.0, 150.0),
+        page_width=400.0,
+        page_height=300.0,
+    )
+    assert geometry is not None
+    label_rect = geometry[0]
+    rendered = fitz.Pixmap(str(output))
+    assert (rendered.width, rendered.height) == (400, 300)
+    fill_pixel = rendered.pixel(int(label_rect.x0 + 1), int(label_rect.y0 + 1))
+    assert fill_pixel[1] < 230
+    assert fill_pixel[1] > fill_pixel[0]
+    assert all(channel > 230 for channel in rendered.pixel(300, 250))
+
+
+@pytest.mark.parametrize(
+    "candidate_rect",
+    [
+        fitz.Rect(10.0, 0.0, 90.0, 20.0),
+        fitz.Rect(230.0, 30.0, 240.0, 55.0),
+        fitz.Rect(20.0, 275.0, 80.0, 300.0),
+    ],
+)
+def test_label_geometry_stays_inside_page_edges(candidate_rect: fitz.Rect) -> None:
+    geometry = tune._label_geometry(
+        "1 p0001-body-deadbeef00 BODY",
+        candidate_rect,
+        page_width=240.0,
+        page_height=300.0,
+    )
+
+    assert geometry is not None
+    label_rect, origin, font_size = geometry
+    assert 0.0 <= label_rect.x0
+    assert label_rect.x1 <= 240.0
+    assert 0.0 <= label_rect.y0
+    assert label_rect.y1 <= 300.0
+    assert label_rect.x0 <= origin[0] < label_rect.x1
+    assert label_rect.y0 < origin[1] <= label_rect.y1
+    assert font_size == 12.0
+
+
+def test_label_geometry_skips_tiny_page() -> None:
+    assert (
+        tune._label_geometry(
+            "1 p0001-body-deadbeef00 BODY",
+            fitz.Rect(0.0, 0.0, 3.0, 3.0),
+            page_width=3.0,
+            page_height=3.0,
+        )
+        is None
+    )
+
+
+def test_draw_annotated_jpeg_closes_document_when_rendering_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.jpg"
+    _write_jpeg(source)
+    opened: list[Any] = []
+    real_open = tune.fitz.open
+
+    def tracked_open(*args: Any, **kwargs: Any) -> Any:
+        document = real_open(*args, **kwargs)
+        opened.append(document)
+        return document
+
+    monkeypatch.setattr(tune.fitz, "open", tracked_open)
+    with pytest.raises(KeyError):
+        tune.draw_annotated_jpeg(
+            source,
+            tmp_path / "annotated.jpg",
+            [
+                {
+                    "id": "missing-reading-order",
+                    "type": "BODY",
+                    "x0": 1,
+                    "y0": 1,
+                    "x1": 2,
+                    "y1": 2,
+                }
+            ],
+            quality=90,
+        )
+
+    assert len(opened) == 1
+    assert opened[0].is_closed
 
 
 @pytest.mark.parametrize(("rotation", "expected"), [(0, (200, 300)), (90, (300, 200))])
