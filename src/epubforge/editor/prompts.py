@@ -107,21 +107,10 @@ def _chapter_page_coverage(chapter: Chapter) -> list[int]:
 def _extraction_context_block(
     stage3: "Stage3EditorMeta",
     chapter: Chapter,
-    work_dir: Path,
 ) -> str:
     """Build a prose extraction-context section for injection into prompts."""
     chapter_pages = _chapter_page_coverage(chapter)
     chapter_complex = [p for p in stage3.complex_pages if p in set(chapter_pages)]
-    work_dir_abs = str(work_dir.resolve())
-    # Use first page of chapter for the command examples; fall back to first selected page.
-    example_page = (
-        chapter_pages[0]
-        if chapter_pages
-        else (stage3.selected_pages[0] if stage3.selected_pages else 1)
-    )
-
-    start_page = chapter_pages[0] if chapter_pages else example_page
-    end_page = chapter_pages[-1] if chapter_pages else example_page
 
     lines = [
         "## Extraction context (Stage 3)",
@@ -133,10 +122,6 @@ def _extraction_context_block(
         f"- complex_pages (all): {stage3.complex_pages}",
         f"- this chapter page coverage: {chapter_pages}",
         f"- complex pages in this chapter: {chapter_complex}",
-        "",
-        "### Page inspection tools",
-        "  # render whole page as JPEG:",
-        f"  epubforge editor render-page {work_dir_abs} --page {example_page}",
         "",
         "### Candidate roles note",
         "  Blocks with roles matching `docling_*_candidate` (e.g. `docling_heading_candidate`,",
@@ -176,7 +161,7 @@ def render_prompt(
     )
 
     if stage3 is not None:
-        extraction_ctx = _extraction_context_block(stage3, chapter, work_dir)
+        extraction_ctx = _extraction_context_block(stage3, chapter)
         rendered = rendered + "\n\n" + extraction_ctx
 
     return rendered

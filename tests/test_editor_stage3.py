@@ -548,8 +548,7 @@ class TestRenderPromptExtractionContext:
 
         assert "Extraction context" in prompt
         assert "mode:" in prompt
-        assert "render-page" in prompt
-        assert "--page" in prompt
+        assert "render-page" not in prompt
         # skipped_vlm field no longer exists
         assert "skipped_vlm" not in prompt
 
@@ -603,7 +602,7 @@ class TestRenderPromptExtractionContext:
 
         assert "page coverage" in prompt or "selected_pages" in prompt
 
-    def test_render_prompt_uses_absolute_work_dir_in_commands(
+    def test_scanner_prompt_uses_work_dir_in_script_commands(
         self, tmp_path: Path
     ) -> None:
         work_dir = tmp_path / "book"
@@ -617,7 +616,7 @@ class TestRenderPromptExtractionContext:
                 "render-prompt",
                 str(work_dir),
                 "--kind",
-                "reviewer",
+                "scanner",
                 "--chapter",
                 chapter_uid,
             ],
