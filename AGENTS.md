@@ -136,3 +136,34 @@ code or test complexity relative to its likely impact, record the residual
 risk and ask the user before implementing it. This standard is
 proportionality, not permission to skip evidence: keep review strict for
 realistic correctness and security regressions.
+
+Apply filesystem defenses to the operation that creates the risk. Archive
+extraction, workspace boundaries, recursive deletion, permission changes, and
+publication-directory selection need no-follow checks because following the
+wrong path can read, overwrite, chmod, or delete content outside the intended
+root. Keep descriptor-backed reads and before/after snapshot checks where a
+path can change during an operation.
+
+Do not reject links by category without showing how the supported workflow
+turns the link into harm. In particular:
+
+- An atomic `os.replace` changes one directory entry; it does not modify the
+  old inode reached through another hard link. Do not require `st_nlink == 1`
+  for an atomic publication solely to protect external hard links.
+- Require a single-link inode when code modifies that inode in place, or when
+  accepting a hard-linked file would cross a concrete workspace or output
+  ownership boundary. State that boundary in the code or test.
+- A user-selected input path may traverse symlinks when the program resolves
+  it to a regular file, reads a stable descriptor snapshot, and copies or
+  hashes that snapshot. Keep stricter checks for files already published under
+  the managed work directory.
+- Prefer one descriptor-based `O_NOFOLLOW` check over repeated
+  `Path.is_symlink()` prechecks. Add a precheck only when it improves a useful
+  error or protects an operation that cannot use a descriptor.
+
+Before adding a filesystem hardening branch, name the actor, the supported
+entry point, the exact file operation, and the resulting user impact. A test
+should reproduce that path. Treat narrow same-UID inode races and behavior
+that requires an intentionally malicious trusted development agent as
+documented residual risks unless they produce a realistic failure under the
+normal pipeline.
