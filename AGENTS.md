@@ -97,7 +97,6 @@ model authentication and provider configuration. Logs go to
 ```bash
 uv sync
 uv run pytest
-uv run pytest -n 0
 uv run pyrefly check
 uv run python -m compileall -q src tests scripts
 uv lock --check
