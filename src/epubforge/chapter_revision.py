@@ -19,6 +19,7 @@ import tempfile
 from typing import Any, Literal, cast
 
 from filelock import FileLock
+import pymupdf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from epubforge.agent_runner import (
@@ -31,6 +32,8 @@ from epubforge.agent_runner import (
 )
 from epubforge.agent_journal import record_accepted, record_rejected
 from epubforge.chapter_workspace import (
+    MAX_SOURCE_PDF_BYTES,
+    PAGE_GEOMETRY_TOLERANCE,
     PAGE_GEOMETRY_SCHEMA,
     PAGE_GEOMETRY_SCHEMA_VERSION,
     workspace_contract_sha256,
@@ -51,8 +54,8 @@ from epubforge.strict_json import StrictJsonError, parse_json_document
 WORKSPACE_SCHEMA = "epubforge.chapter-workspace"
 WORKSPACE_SCHEMA_VERSION = 1
 REVISION_SCHEMA = "epubforge.chapter-revision"
-REVISION_SCHEMA_VERSION = 3
-REVISION_CONTRACT_VERSION = 3
+REVISION_SCHEMA_VERSION = 4
+REVISION_CONTRACT_VERSION = 4
 
 MAX_WORKSPACE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_CHAPTER_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -70,9 +73,14 @@ MAX_WORKSPACE_DEPTH = 8
 MAX_CHAPTER_COUNT = 4096
 MAX_BBOX_REPAIRS_BYTES = 4 * 1024 * 1024
 MAX_PADDLE_EVIDENCE_BYTES = 32 * 1024 * 1024
+MAX_ASSET_CLAIMS_BYTES = 4 * 1024 * 1024
 MAX_REPAIRS = 2048
+MAX_ASSET_CLAIMS = 256
 MAX_REPAIR_REASON_CHARS = 500
 MAX_EVIDENCE_PAGES = 512
+MAX_GENERATED_ASSET_PIXELS = 25_000_000
+MAX_TOTAL_GENERATED_ASSET_BYTES = 256 * 1024 * 1024
+GENERATED_ASSET_DPI = 300
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _SHA256_RE = re.compile(_SHA256_PATTERN)
@@ -83,15 +91,21 @@ _PAGE_RE = re.compile(r"^pages/page-([0-9]{4,})\.jpg$")
 _ANNOTATED_PAGE_RE = re.compile(r"^pages/page-([0-9]{4,})\.annotated\.jpg$")
 _PAGE_META_RE = re.compile(r"^pages/page-([0-9]{4,})\.meta\.json$")
 _CANDIDATE_ID_RE = re.compile(r"^p[0-9]{4,}-[a-z0-9_]+-[0-9a-f]{10}$")
+_CLAIM_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_GENERATED_ASSET_RE = re.compile(
+    r"^assets/generated/page-([0-9]{4,})-([0-9a-f]{16})\.png$"
+)
 _NUMBER_RE = re.compile(r"^[0-9]+$")
 _DIMENSION_RE = re.compile(r"^(?:[1-9][0-9]*)(?:\.[0-9]+)?$")
 _BBOX_REPAIRS_SCHEMA_VERSION = 1
 _PADDLE_EVIDENCE_SCHEMA_VERSION = 1
+_ASSET_CLAIMS_SCHEMA_VERSION = 1
 
 _LOCK_FILENAME = ".chapter-revision.lock"
 _STAGING_PREFIX = ".revision-staging-"
 _BACKUP_PREFIX = ".revision-backup-"
 _RECOVERY_PREFIX = ".revision-recovery-"
+_GENERATED_TEMP_PREFIX = ".generated-asset-"
 _log = logging.getLogger(__name__)
 
 _VOID_TAGS = frozenset({"br", "col", "hr", "img", "meta"})
@@ -157,6 +171,7 @@ _GLOBAL_ATTRS = frozenset(
         "data-bbox-status",
         "data-content-part",
         "data-uncertain",
+        "data-asset-claim",
     }
 )
 _TAG_ATTRS: dict[str, frozenset[str]] = {
@@ -315,6 +330,46 @@ If you did not run Paddle, write `{"schema_version": 1, "pages": []}`. Do not
 change `data-bbox` values in HTML, invent candidate IDs, or create a new
 `data-bbox` on an element that lacks one.
 
+## New image assets
+
+When MinerU omitted an image or cropped it incorrectly, you may claim a new
+image from the source page. First use the Paddle workflow until its final
+candidate covers exactly the pixels the image asset should contain. Add one
+claim to `asset-claims.json`, then reference it from one figure in
+`corrected.html`:
+
+```html
+<figure data-asset-claim="figure-1" data-page-idx="12">
+  <img src="claimed-assets/figure-1.png" alt="Describe the image">
+</figure>
+```
+
+Do not add `data-bbox` to the claimed figure. Python will render the selected
+region from the source PDF, replace the placeholder `src`, and add the
+canonical bbox. You may remove a bad MinerU image when replacing it.
+
+`asset-claims.json` has this shape:
+
+```json
+{
+  "schema_version": 1,
+  "claims": [
+    {
+      "id": "figure-1",
+      "page_idx": 12,
+      "candidate_ids": ["p0012-figure-3f2a9c1d4e"],
+      "operation": "replace",
+      "reason": "MinerU cropped the right side of the diagram."
+    }
+  ]
+}
+```
+
+Use `replace` with exactly one candidate or `union` with one or more final
+candidates. Each claim ID must be unique and use lowercase letters, digits,
+and hyphens. If no new image is needed, write
+`{"schema_version": 1, "claims": []}`.
+
 Correct headings, blocks, and text as usual: mark uncertain text with
 `<span data-uncertain="true">...</span>`. Keep each retained local image's
 asset `src` value unchanged.
@@ -372,6 +427,43 @@ class AppliedBBoxRepair(BaseModel):
         return self
 
 
+class GeneratedAssetRecord(BaseModel):
+    """One source-PDF image crop claimed by the revision agent."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    claim_id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    path: str = Field(pattern=r"^assets/generated/page-[0-9]{4,}-[0-9a-f]{16}\.png$")
+    page_idx: int = Field(ge=0)
+    operation: Literal["replace", "union"]
+    candidate_ids: list[str] = Field(min_length=1)
+    bbox: list[str] = Field(min_length=4, max_length=4)
+    media_type: Literal["image/png"] = "image/png"
+    size_bytes: int = Field(gt=0, le=MAX_ASSET_BYTES)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    reason: str = Field(min_length=1, max_length=MAX_REPAIR_REASON_CHARS)
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> GeneratedAssetRecord:
+        if len(set(self.candidate_ids)) != len(self.candidate_ids) or any(
+            _CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+            for candidate_id in self.candidate_ids
+        ):
+            raise ValueError("candidate_ids must be valid and unique")
+        if self.operation == "replace" and len(self.candidate_ids) != 1:
+            raise ValueError("replace must use exactly one candidate")
+        if _bbox(",".join(self.bbox)) is None:
+            raise ValueError("bbox must contain four coordinates")
+        match = _GENERATED_ASSET_RE.fullmatch(self.path)
+        if (
+            match is None
+            or int(match.group(1)) != self.page_idx
+            or match.group(2) != self.sha256[:16]
+        ):
+            raise ValueError("path must match the generated asset provenance")
+        return self
+
+
 class ChapterRevisionRecord(BaseModel):
     """Metadata proving which inputs produced ``corrected.html``."""
 
@@ -380,7 +472,7 @@ class ChapterRevisionRecord(BaseModel):
     schema_name: Literal["epubforge.chapter-revision"] = Field(
         default=REVISION_SCHEMA, alias="schema"
     )
-    schema_version: Literal[3] = REVISION_SCHEMA_VERSION
+    schema_version: Literal[4] = REVISION_SCHEMA_VERSION
     agent_name: str = Field(min_length=1)
     agent_model: str = Field(min_length=1)
     agent_variant: str = Field(min_length=1)
@@ -397,7 +489,9 @@ class ChapterRevisionRecord(BaseModel):
     source_assets_sha256: dict[str, str]
     paddle_evidence_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     bbox_repairs_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    asset_claims_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     applied_bbox_repairs: list[AppliedBBoxRepair] = Field(default_factory=list)
+    generated_assets: list[GeneratedAssetRecord] = Field(default_factory=list)
     corrected_html_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -412,6 +506,15 @@ class ChapterRevisionRecord(BaseModel):
             )
         ):
             raise ValueError("source file hashes must be lowercase SHA-256 values")
+        claim_ids = [asset.claim_id for asset in self.generated_assets]
+        if len(claim_ids) != len(set(claim_ids)):
+            raise ValueError("generated asset claim IDs must be unique")
+        if self.generated_assets and (
+            self.asset_claims_sha256 is None or self.paddle_evidence_sha256 is None
+        ):
+            raise ValueError(
+                "generated assets require claim and Paddle evidence hashes"
+            )
         return self
 
 
@@ -508,6 +611,19 @@ class _SeedInfo:
     source: dict[str, _SourceElement]
     assets: frozenset[str]
     referenced_assets: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _AssetClaimExpectation:
+    page_idx: int
+    asset_path: str
+    bbox: tuple[str, str, str, str] | None
+
+
+@dataclass(frozen=True)
+class _GeneratedAssetOutput:
+    record: GeneratedAssetRecord
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -735,6 +851,7 @@ def _revise_one_locked(
                     "corrected.html": MAX_HTML_BYTES,
                     "bbox-repairs.json": MAX_BBOX_REPAIRS_BYTES,
                     "paddle-evidence.json": MAX_PADDLE_EVIDENCE_BYTES,
+                    "asset-claims.json": MAX_ASSET_CLAIMS_BYTES,
                 },
                 forbidden_roots=(workspace.root.parent,),
             )
@@ -747,19 +864,36 @@ def _revise_one_locked(
             corrected_html = corrected_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ChapterRevisionError("corrected HTML is not UTF-8") from exc
-        _validate_corrected_html(corrected_html, chapter.seed)
+        claims_bytes = result.outputs.get("asset-claims.json")
+        claims = _load_asset_claims(claims_bytes)
+        pending_claims = _pending_claim_expectations(claims)
+        _validate_corrected_html(
+            corrected_html,
+            chapter.seed,
+            asset_claims=pending_claims,
+        )
         final_html, applied_repairs = _apply_bbox_repairs(
             corrected_html,
             chapter,
             result.outputs.get("bbox-repairs.json"),
             result.outputs.get("paddle-evidence.json"),
+            extra_assets=frozenset(
+                expectation.asset_path for expectation in pending_claims.values()
+            ),
         )
-        if final_html != corrected_html:
-            _validate_corrected_html(
-                final_html,
-                chapter.seed,
-                expected_repairs=_applied_repairs_map(applied_repairs),
-            )
+        final_html, generated_assets = _apply_asset_claims(
+            final_html,
+            chapter,
+            claims,
+            result.outputs.get("paddle-evidence.json"),
+        )
+        final_claims = _generated_claim_expectations(generated_assets)
+        _validate_corrected_html(
+            final_html,
+            chapter.seed,
+            expected_repairs=_applied_repairs_map(applied_repairs),
+            asset_claims=final_claims,
+        )
         corrected_bytes = final_html.encode("utf-8")
     except ChapterRevisionError as exc:
         record_rejected(journal, exc)
@@ -777,6 +911,10 @@ def _revise_one_locked(
         corrected_hash = _sha256_bytes(corrected_bytes)
         repairs_bytes = result.outputs.get("bbox-repairs.json")
         evidence_bytes = result.outputs.get("paddle-evidence.json")
+        claims_bytes = result.outputs.get("asset-claims.json")
+        generated_asset_paths = _publish_generated_assets(
+            chapter_path, generated_assets
+        )
         record = ChapterRevisionRecord(
             agent_name=identity.name,
             agent_model=identity.model,
@@ -812,7 +950,11 @@ def _revise_one_locked(
                 if isinstance(repairs_bytes, bytes)
                 else None
             ),
+            asset_claims_sha256=(
+                _sha256_bytes(claims_bytes) if isinstance(claims_bytes, bytes) else None
+            ),
             applied_bbox_repairs=applied_repairs,
+            generated_assets=[asset.record for asset in generated_assets],
             corrected_html_sha256=corrected_hash,
         )
         _publish_pair(
@@ -820,6 +962,7 @@ def _revise_one_locked(
             corrected_bytes,
             (record.model_dump_json(indent=2, by_alias=True) + "\n").encode("utf-8"),
         )
+        _cleanup_unreferenced_generated_assets(chapter_path, generated_asset_paths)
     except Exception as exc:
         record_rejected(journal, exc)
         raise
@@ -845,7 +988,7 @@ def _revision_task(chapter: _ChapterInput) -> str:
         + ordered_pages
         + "\n\nYou may create temporary files and scripts while investigating. "
         "The required final outputs are `corrected.html`, `bbox-repairs.json`, "
-        "and `paddle-evidence.json`.\n"
+        "`paddle-evidence.json`, and `asset-claims.json`.\n"
     )
 
 
@@ -890,6 +1033,7 @@ def _contract_sha256() -> str:
                 "corrected": "corrected.html",
                 "bbox_repairs": "bbox-repairs.json",
                 "paddle_evidence": "paddle-evidence.json",
+                "asset_claims": "asset-claims.json",
             },
             "html_tags": sorted(_ALLOWED_TAGS),
             "html_attributes": sorted(_GLOBAL_ATTRS),
@@ -916,6 +1060,13 @@ def _contract_sha256() -> str:
                 "requires_page_meta": "raster dimensions must match pages/page-NNNN.meta.json",
             },
             "paddle_guide_sha256": _sha256_bytes(PADDLE_GUIDE.encode("utf-8")),
+            "asset_claims_contract": {
+                "schema_version": _ASSET_CLAIMS_SCHEMA_VERSION,
+                "placeholder": "claimed-assets/<claim-id>.png",
+                "output": "assets/generated/page-NNNN-<content-hash>.png",
+                "render_owner": "Python renders source PDF crops",
+                "render_dpi": GENERATED_ASSET_DPI,
+            },
         }
     )
 
@@ -1126,6 +1277,122 @@ def _validate_repairs_document(payload: Any) -> list[dict[str, Any]]:
             }
         )
     return validated
+
+
+def _load_asset_claims(claims_bytes: bytes | None) -> list[dict[str, Any]]:
+    if claims_bytes is None:
+        return []
+    try:
+        payload = parse_json_document(
+            claims_bytes,
+            label="asset-claims.json",
+            max_bytes=MAX_ASSET_CLAIMS_BYTES,
+        )
+    except StrictJsonError as exc:
+        raise ChapterRevisionError(f"asset-claims.json is invalid: {exc}") from exc
+    return _validate_asset_claims_document(payload)
+
+
+def _validate_asset_claims_document(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != (
+        _ASSET_CLAIMS_SCHEMA_VERSION
+    ):
+        raise ChapterRevisionError("asset-claims.json has an invalid schema")
+    claims = payload.get("claims")
+    if not isinstance(claims, list):
+        raise ChapterRevisionError("asset-claims.json claims must be a list")
+    if len(claims) > MAX_ASSET_CLAIMS:
+        raise ChapterRevisionError("asset-claims.json contains too many claims")
+    expected_keys = {
+        "candidate_ids",
+        "id",
+        "operation",
+        "page_idx",
+        "reason",
+    }
+    validated: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(claims):
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise ChapterRevisionError(f"asset claim {index} has an invalid contract")
+        claim_id = item.get("id")
+        if not isinstance(claim_id, str) or not _CLAIM_ID_RE.fullmatch(claim_id):
+            raise ChapterRevisionError(f"asset claim {index} has an invalid id")
+        if claim_id in seen_ids:
+            raise ChapterRevisionError(f"asset claim repeats id: {claim_id}")
+        seen_ids.add(claim_id)
+        page_idx = item.get("page_idx")
+        if not isinstance(page_idx, int) or isinstance(page_idx, bool) or page_idx < 0:
+            raise ChapterRevisionError(f"asset claim {index} has an invalid page_idx")
+        operation = item.get("operation")
+        if operation not in {"replace", "union"}:
+            raise ChapterRevisionError(
+                f"asset claim {index} has an unsupported operation"
+            )
+        candidate_ids = item.get("candidate_ids")
+        if not isinstance(candidate_ids, list) or not candidate_ids:
+            raise ChapterRevisionError(
+                f"asset claim {index} candidate_ids must be a non-empty list"
+            )
+        if not all(
+            isinstance(candidate_id, str) and _CANDIDATE_ID_RE.fullmatch(candidate_id)
+            for candidate_id in candidate_ids
+        ):
+            raise ChapterRevisionError(f"asset claim {index} has invalid candidate IDs")
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ChapterRevisionError(f"asset claim {index} repeats a candidate ID")
+        if operation == "replace" and len(candidate_ids) != 1:
+            raise ChapterRevisionError(
+                f"asset claim {index} replace must use exactly one candidate"
+            )
+        reason = item.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > MAX_REPAIR_REASON_CHARS
+        ):
+            raise ChapterRevisionError(f"asset claim {index} has an invalid reason")
+        validated.append(
+            {
+                "id": claim_id,
+                "page_idx": page_idx,
+                "operation": operation,
+                "candidate_ids": list(candidate_ids),
+                "reason": reason.strip(),
+            }
+        )
+    return validated
+
+
+def _claim_placeholder(claim_id: str) -> str:
+    return f"claimed-assets/{claim_id}.png"
+
+
+def _pending_claim_expectations(
+    claims: Sequence[Mapping[str, Any]],
+) -> dict[str, _AssetClaimExpectation]:
+    return {
+        cast(str, claim["id"]): _AssetClaimExpectation(
+            page_idx=cast(int, claim["page_idx"]),
+            asset_path=_claim_placeholder(cast(str, claim["id"])),
+            bbox=None,
+        )
+        for claim in claims
+    }
+
+
+def _generated_claim_expectations(
+    assets: Sequence[_GeneratedAssetOutput] | Sequence[GeneratedAssetRecord],
+) -> dict[str, _AssetClaimExpectation]:
+    result: dict[str, _AssetClaimExpectation] = {}
+    for asset in assets:
+        record = asset.record if isinstance(asset, _GeneratedAssetOutput) else asset
+        result[record.claim_id] = _AssetClaimExpectation(
+            page_idx=record.page_idx,
+            asset_path=record.path,
+            bbox=(record.bbox[0], record.bbox[1], record.bbox[2], record.bbox[3]),
+        )
+    return result
 
 
 def _validate_evidence_document(payload: Any) -> dict[int, dict[str, Any]]:
@@ -1589,6 +1856,8 @@ def _apply_bbox_repairs(
     chapter: _ChapterInput,
     repairs_bytes: bytes | None,
     evidence_bytes: bytes | None,
+    *,
+    extra_assets: frozenset[str] = frozenset(),
 ) -> tuple[str, list[AppliedBBoxRepair]]:
     """Validate and apply the agent's bbox repair manifest.
 
@@ -1627,7 +1896,9 @@ def _apply_bbox_repairs(
             raise ChapterRevisionError(f"invalid clean page path: {relative}")
         clean_page_digests[int(match.group(1))] = digest
     root = _parse_and_validate_html(
-        corrected_html, chapter.seed.assets, label="corrected HTML"
+        corrected_html,
+        chapter.seed.assets | extra_assets,
+        label="corrected HTML",
     )
     spans = _scan_start_tags(corrected_html)
     nodes = [node for node in _walk_nodes(root)]
@@ -1736,6 +2007,227 @@ def _apply_bbox_repairs(
     return final_html, applied
 
 
+def _apply_asset_claims(
+    corrected_html: str,
+    chapter: _ChapterInput,
+    claims: Sequence[Mapping[str, Any]],
+    evidence_bytes: bytes | None,
+) -> tuple[str, list[_GeneratedAssetOutput]]:
+    if not claims:
+        return corrected_html, []
+    if evidence_bytes is None:
+        raise ChapterRevisionError("asset-claims.json requires paddle-evidence.json")
+    try:
+        evidence_payload = parse_json_document(
+            evidence_bytes,
+            label="paddle-evidence.json",
+            max_bytes=MAX_PADDLE_EVIDENCE_BYTES,
+        )
+    except StrictJsonError as exc:
+        raise ChapterRevisionError(f"paddle-evidence.json is invalid: {exc}") from exc
+    evidence_pages = _validate_evidence_document(evidence_payload)
+    clean_page_digests: dict[int, str] = {}
+    for relative, _data, digest in chapter.page_bytes:
+        match = _PAGE_RE.fullmatch(relative)
+        if match is None:
+            raise ChapterRevisionError(f"invalid clean page path: {relative}")
+        clean_page_digests[int(match.group(1))] = digest
+    geometry = _chapter_page_geometry(chapter)
+
+    root = _parse_and_validate_html(
+        corrected_html,
+        chapter.seed.assets
+        | frozenset(_claim_placeholder(cast(str, claim["id"])) for claim in claims),
+        label="corrected HTML",
+    )
+    nodes = list(_walk_nodes(root))
+    spans = _scan_start_tags(corrected_html)
+    if len(nodes) != len(spans) or any(
+        node.tag != span.tag for node, span in zip(nodes, spans, strict=True)
+    ):
+        raise ChapterRevisionError("corrected HTML tag scan disagrees with its tree")
+    claim_nodes: dict[str, int] = {}
+    placeholder_nodes: dict[str, int] = {}
+    for index, node in enumerate(nodes):
+        claim_id = node.attrs.get("data-asset-claim")
+        if claim_id is not None:
+            claim_nodes[claim_id] = index
+        src = node.attrs.get("src") if node.tag == "img" else None
+        if src is not None and src.startswith("claimed-assets/"):
+            placeholder_nodes[src] = index
+
+    prepared: list[tuple[Mapping[str, Any], tuple[str, str, str, str]]] = []
+    for claim in claims:
+        claim_id = cast(str, claim["id"])
+        page_idx = cast(int, claim["page_idx"])
+        candidate_boxes = _repair_candidate_boxes(claim, evidence_pages, page_idx)
+        clean_digest = clean_page_digests.get(page_idx)
+        if clean_digest is None:
+            raise ChapterRevisionError(
+                f"chapter has no clean page image for asset claim {claim_id}"
+            )
+        if evidence_pages[page_idx]["source_image_sha256"] != clean_digest:
+            raise ChapterRevisionError(
+                f"paddle evidence for asset claim {claim_id} does not match the "
+                "chapter's clean page image snapshot"
+            )
+        prepared.append(
+            (
+                claim,
+                _canonical_bbox_strings(
+                    candidate_boxes,
+                    page_idx,
+                    chapter,
+                    evidence_pages,
+                    geometry,
+                ),
+            )
+        )
+
+    rendered = _render_claimed_assets(chapter, prepared, geometry)
+    replacements: list[tuple[int, int, str]] = []
+    for output in rendered:
+        record = output.record
+        figure_index = claim_nodes.get(record.claim_id)
+        if figure_index is None:
+            raise ChapterRevisionError(
+                f"asset claim {record.claim_id} has no figure in corrected HTML"
+            )
+        figure_span = spans[figure_index]
+        replacements.append(
+            (
+                figure_span.end - 1,
+                figure_span.end - 1,
+                f' data-bbox="{",".join(record.bbox)}"',
+            )
+        )
+        placeholder = _claim_placeholder(record.claim_id)
+        image_index = placeholder_nodes.get(placeholder)
+        if image_index is None:
+            raise ChapterRevisionError(
+                f"asset claim {record.claim_id} has no placeholder image"
+            )
+        src_span = spans[image_index].attr_spans.get("src")
+        if src_span is None:
+            raise ChapterRevisionError(
+                f"asset claim {record.claim_id} placeholder has no src"
+            )
+        replacements.append((src_span[0], src_span[1], record.path))
+
+    final_html = corrected_html
+    for start, end, value in sorted(
+        replacements, key=lambda item: item[0], reverse=True
+    ):
+        final_html = final_html[:start] + value + final_html[end:]
+    return final_html, rendered
+
+
+def _render_claimed_assets(
+    chapter: _ChapterInput,
+    prepared: Sequence[tuple[Mapping[str, Any], tuple[str, str, str, str]]],
+    geometry: Mapping[int, Mapping[str, Any]],
+) -> list[_GeneratedAssetOutput]:
+    source_path = chapter.workspace_dir.parent / "source" / "source.pdf"
+    source_bytes = _read_snapshot(
+        source_path,
+        "source PDF for generated assets",
+        max_bytes=MAX_SOURCE_PDF_BYTES,
+    )
+    if _sha256_bytes(source_bytes) != chapter.chapter_manifest.source_pdf_sha256:
+        raise ChapterRevisionError(
+            "source PDF hash does not match the chapter asset-claim source"
+        )
+    outputs: list[_GeneratedAssetOutput] = []
+    total_bytes = 0
+    try:
+        with pymupdf.open(stream=source_bytes, filetype="pdf") as document:
+            if document.page_count != chapter.chapter_manifest.source_page_count:
+                raise ChapterRevisionError(
+                    "source PDF page count does not match the chapter manifest"
+                )
+            for claim, bbox in prepared:
+                claim_id = cast(str, claim["id"])
+                page_idx = cast(int, claim["page_idx"])
+                if page_idx < 0 or page_idx >= document.page_count:
+                    raise ChapterRevisionError(
+                        f"asset claim {claim_id} page is outside the source PDF"
+                    )
+                page = document[page_idx]
+                meta = geometry.get(page_idx)
+                canonical = meta.get("canonical") if isinstance(meta, Mapping) else None
+                if not isinstance(canonical, Mapping):
+                    raise ChapterRevisionError(
+                        f"page metadata is missing for asset claim {claim_id}"
+                    )
+                canonical_width = float(canonical.get("width", 0.0))
+                canonical_height = float(canonical.get("height", 0.0))
+                if (
+                    abs(float(page.rect.width) - canonical_width)
+                    > PAGE_GEOMETRY_TOLERANCE
+                    or abs(float(page.rect.height) - canonical_height)
+                    > PAGE_GEOMETRY_TOLERANCE
+                ):
+                    raise ChapterRevisionError(
+                        f"source PDF geometry does not match asset claim {claim_id}"
+                    )
+                x0, y0, x1, y1 = (float(value) for value in bbox)
+                scale = GENERATED_ASSET_DPI / 72.0
+                expected_width = max(1, math.ceil((x1 - x0) * scale))
+                expected_height = max(1, math.ceil((y1 - y0) * scale))
+                if expected_width * expected_height > MAX_GENERATED_ASSET_PIXELS:
+                    raise ChapterRevisionError(
+                        f"asset claim {claim_id} exceeds the pixel limit"
+                    )
+                pixmap = page.get_pixmap(
+                    matrix=pymupdf.Matrix(scale, scale),
+                    clip=pymupdf.Rect(x0, y0, x1, y1),
+                    alpha=False,
+                )
+                if (
+                    pixmap.width <= 0
+                    or pixmap.height <= 0
+                    or pixmap.width * pixmap.height > MAX_GENERATED_ASSET_PIXELS
+                ):
+                    raise ChapterRevisionError(
+                        f"asset claim {claim_id} produced an invalid image"
+                    )
+                data = pixmap.tobytes("png")
+                if not data or len(data) > MAX_ASSET_BYTES:
+                    raise ChapterRevisionError(
+                        f"asset claim {claim_id} exceeds the asset size limit"
+                    )
+                total_bytes += len(data)
+                if total_bytes > MAX_TOTAL_GENERATED_ASSET_BYTES:
+                    raise ChapterRevisionError(
+                        "generated assets exceed the total size limit"
+                    )
+                digest = _sha256_bytes(data)
+                path = f"assets/generated/page-{page_idx:04d}-{digest[:16]}.png"
+                outputs.append(
+                    _GeneratedAssetOutput(
+                        record=GeneratedAssetRecord(
+                            claim_id=claim_id,
+                            path=path,
+                            page_idx=page_idx,
+                            operation=cast(
+                                Literal["replace", "union"], claim["operation"]
+                            ),
+                            candidate_ids=list(cast(list[str], claim["candidate_ids"])),
+                            bbox=list(bbox),
+                            size_bytes=len(data),
+                            sha256=digest,
+                            reason=cast(str, claim["reason"]),
+                        ),
+                        data=data,
+                    )
+                )
+    except ChapterRevisionError:
+        raise
+    except Exception as exc:
+        raise ChapterRevisionError("cannot render claimed image assets") from exc
+    return outputs
+
+
 @contextmanager
 def _chapter_lock(chapter_dir: Path) -> Iterator[None]:
     """Serialize every public read and publication for one chapter."""
@@ -1808,6 +2300,32 @@ def _cleanup_orphans(chapter_dir: Path) -> None:
             raise
         except OSError as exc:
             _log.warning("could not clean revision leftover %s: %s", path, exc)
+    _cleanup_generated_asset_temps(chapter_dir)
+
+
+def _cleanup_generated_asset_temps(chapter_dir: Path) -> None:
+    generated_dir = chapter_dir / "assets" / "generated"
+    try:
+        entries = list(os.scandir(generated_dir))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ChapterRevisionError(
+            f"cannot inspect generated asset directory: {generated_dir}"
+        ) from exc
+    for entry in entries:
+        if not entry.name.startswith(_GENERATED_TEMP_PREFIX):
+            continue
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise ChapterRevisionError(
+                f"generated asset temporary path is unsafe: {entry.path}"
+            )
+        try:
+            os.unlink(entry.path)
+        except OSError as exc:
+            _log.warning(
+                "could not clean generated asset temporary %s: %s", entry.path, exc
+            )
 
 
 def _revision_pair_complete(chapter_dir: Path) -> bool:
@@ -1970,11 +2488,23 @@ def _fresh_output(
             or record.corrected_html_sha256 != _sha256_bytes(corrected_bytes)
         ):
             return False
+        for asset in record.generated_assets:
+            match = _GENERATED_ASSET_RE.fullmatch(asset.path)
+            if match is None or match.group(2) != asset.sha256[:16]:
+                return False
+            data = _read_snapshot(
+                chapter.chapter_dir / PurePosixPath(asset.path),
+                f"generated asset {asset.path}",
+                max_bytes=MAX_ASSET_BYTES,
+            )
+            if len(data) != asset.size_bytes or _sha256_bytes(data) != asset.sha256:
+                return False
         corrected_html = corrected_bytes.decode("utf-8")
         _validate_corrected_html(
             corrected_html,
             chapter.seed,
             expected_repairs=_applied_repairs_map(record.applied_bbox_repairs),
+            asset_claims=_generated_claim_expectations(record.generated_assets),
         )
     except (
         ChapterRevisionError,
@@ -2146,6 +2676,10 @@ def _is_revision_auxiliary(
             continue
         remainder = relative[len(prefix) :]
         if remainder == _LOCK_FILENAME:
+            return True
+        if _GENERATED_ASSET_RE.fullmatch(remainder):
+            return True
+        if remainder.startswith(f"assets/generated/{_GENERATED_TEMP_PREFIX}"):
             return True
         first_component = remainder.split("/", 1)[0]
         if first_component.startswith(
@@ -2413,10 +2947,18 @@ def _validate_corrected_html(
     seed: _SeedInfo,
     expected_repairs: Mapping[tuple[str, str | None], tuple[str, str, str, str]]
     | None = None,
+    asset_claims: Mapping[str, _AssetClaimExpectation] | None = None,
 ) -> None:
     if len(html_text.encode("utf-8")) > MAX_HTML_BYTES:
         raise ChapterRevisionError("corrected HTML exceeds the size limit")
-    root = _parse_and_validate_html(html_text, seed.assets, label="corrected HTML")
+    asset_claims = asset_claims or {}
+    root = _parse_and_validate_html(
+        html_text,
+        seed.assets
+        | frozenset(expectation.asset_path for expectation in asset_claims.values()),
+        label="corrected HTML",
+    )
+    _validate_claim_markup(root, asset_claims)
     occurrences: dict[str, list[tuple[_HTMLNode, str | None]]] = {
         content_id: [] for content_id in seed.source
     }
@@ -2424,7 +2966,9 @@ def _validate_corrected_html(
     for node in _walk_nodes(root):
         raw = node.attrs.get("data-content-idx")
         if raw is None:
-            if "data-content-part" in node.attrs or "data-bbox" in node.attrs:
+            if "data-content-part" in node.attrs or (
+                "data-bbox" in node.attrs and "data-asset-claim" not in node.attrs
+            ):
                 raise ChapterRevisionError(
                     "unreferenced element carries source metadata"
                 )
@@ -2444,7 +2988,8 @@ def _validate_corrected_html(
             raise ChapterRevisionError("merged elements cannot carry split metadata")
         for token in tokens:
             occurrences[token].append((node, part))
-        _validate_output_bbox(node, tokens, seed.source, expected_repairs)
+        if "data-asset-claim" not in node.attrs:
+            _validate_output_bbox(node, tokens, seed.source, expected_repairs)
 
     for content_id in seed.source:
         values = occurrences[content_id]
@@ -2471,6 +3016,70 @@ def _validate_corrected_html(
         node.tag in {"img", "table"} for node in _walk_nodes(body)
     ):
         raise ChapterRevisionError("corrected HTML has no substantive visible content")
+
+
+def _validate_claim_markup(
+    root: _HTMLNode,
+    expectations: Mapping[str, _AssetClaimExpectation],
+) -> None:
+    claim_nodes: dict[str, list[_HTMLNode]] = {
+        claim_id: [] for claim_id in expectations
+    }
+    asset_uses: dict[str, int] = {
+        expectation.asset_path: 0 for expectation in expectations.values()
+    }
+    for node in _walk_nodes(root):
+        claim_id = node.attrs.get("data-asset-claim")
+        if claim_id is not None:
+            if claim_id not in claim_nodes:
+                raise ChapterRevisionError(
+                    f"corrected HTML references unknown asset claim: {claim_id}"
+                )
+            claim_nodes[claim_id].append(node)
+        if node.tag == "img":
+            src = node.attrs.get("src")
+            if src in asset_uses:
+                asset_uses[cast(str, src)] += 1
+
+    for claim_id, expectation in expectations.items():
+        nodes = claim_nodes[claim_id]
+        if len(nodes) != 1:
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} must identify exactly one figure"
+            )
+        node = nodes[0]
+        if node.attrs.get("data-page-idx") != str(expectation.page_idx):
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} page does not match its figure"
+            )
+        if node.attrs.get("data-bbox-status") is not None:
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} cannot carry data-bbox-status"
+            )
+        bbox = _bbox(node.attrs.get("data-bbox"))
+        if expectation.bbox is None:
+            if bbox is not None:
+                raise ChapterRevisionError(
+                    f"agent must not set data-bbox for asset claim {claim_id}"
+                )
+        elif bbox != expectation.bbox:
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} bbox does not match its generated crop"
+            )
+        nested_asset_uses = sum(
+            1
+            for descendant in _walk_nodes(node)
+            if descendant.tag == "img"
+            and descendant.attrs.get("src") == expectation.asset_path
+        )
+        if nested_asset_uses != 1:
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} image must be inside its figure"
+            )
+        if asset_uses[expectation.asset_path] != 1:
+            raise ChapterRevisionError(
+                f"asset claim {claim_id} must have exactly one image reference"
+            )
 
 
 def _validate_output_bbox(
@@ -2623,6 +3232,14 @@ def _validate_node_attributes(
     if "data-uncertain" in node.attrs:
         if node.tag != "span" or node.attrs["data-uncertain"] != "true":
             raise ChapterRevisionError(f"{label} has invalid uncertainty marker")
+    if "data-asset-claim" in node.attrs:
+        claim_id = node.attrs["data-asset-claim"]
+        if (
+            node.tag != "figure"
+            or not _CLAIM_ID_RE.fullmatch(claim_id)
+            or "data-page-idx" not in node.attrs
+        ):
+            raise ChapterRevisionError(f"{label} has an invalid asset claim marker")
     if node.tag == "img":
         src = node.attrs.get("src")
         if src is None or src not in assets or "alt" not in node.attrs:
@@ -2989,6 +3606,107 @@ def _list_files(root: Path) -> set[str]:
     return files
 
 
+def _publish_generated_assets(
+    chapter_dir: Path,
+    assets: Sequence[_GeneratedAssetOutput],
+) -> frozenset[str]:
+    if not assets:
+        return frozenset()
+    assets_dir = chapter_dir / "assets"
+    _ensure_directory(assets_dir, "chapter asset directory")
+    generated_dir = assets_dir / "generated"
+    try:
+        os.mkdir(generated_dir, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ChapterRevisionError(
+            f"cannot create generated asset directory: {generated_dir}"
+        ) from exc
+    _ensure_directory(generated_dir, "generated asset directory")
+
+    published: set[str] = set()
+    for asset in assets:
+        record = asset.record
+        if _GENERATED_ASSET_RE.fullmatch(record.path) is None:
+            raise ChapterRevisionError(
+                f"generated asset has an unsafe publication path: {record.path}"
+            )
+        target = chapter_dir / PurePosixPath(record.path)
+        if _target_exists(target):
+            existing = _read_snapshot(
+                target,
+                f"generated asset {record.path}",
+                max_bytes=MAX_ASSET_BYTES,
+            )
+            if existing != asset.data:
+                raise ChapterRevisionError(
+                    f"generated asset content-address collision: {record.path}"
+                )
+            published.add(record.path)
+            continue
+
+        descriptor: int | None = None
+        temporary: Path | None = None
+        try:
+            descriptor, raw_temporary = tempfile.mkstemp(
+                prefix=_GENERATED_TEMP_PREFIX,
+                dir=generated_dir,
+            )
+            temporary = Path(raw_temporary)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(asset.data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            temporary = None
+            _fsync_directory(generated_dir)
+        except OSError as exc:
+            raise ChapterRevisionError(
+                f"cannot publish generated asset: {record.path}"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        published.add(record.path)
+    return frozenset(published)
+
+
+def _cleanup_unreferenced_generated_assets(
+    chapter_dir: Path,
+    referenced: frozenset[str],
+) -> None:
+    generated_dir = chapter_dir / "assets" / "generated"
+    try:
+        entries = list(os.scandir(generated_dir))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _log.warning("could not inspect generated assets for cleanup: %s", exc)
+        return
+    for entry in entries:
+        relative = f"assets/generated/{entry.name}"
+        if relative in referenced or not _GENERATED_ASSET_RE.fullmatch(relative):
+            continue
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            _log.warning("could not clean unsafe generated asset: %s", entry.path)
+            continue
+        try:
+            os.unlink(entry.path)
+        except OSError as exc:
+            _log.warning("could not clean generated asset %s: %s", entry.path, exc)
+    try:
+        _fsync_directory(generated_dir)
+    except ChapterRevisionError as exc:
+        _log.warning("could not sync generated asset cleanup: %s", exc)
+
+
 def _publish_pair(chapter_dir: Path, corrected: bytes, revision: bytes) -> None:
     targets = (chapter_dir / "corrected.html", chapter_dir / "revision.json")
     for target in targets:
@@ -3152,6 +3870,8 @@ __all__ = [
     "ChapterRevisionPublicationError",
     "ChapterRevisionRecord",
     "ChapterRevisionReport",
+    "GeneratedAssetRecord",
+    "MAX_ASSET_CLAIMS_BYTES",
     "MAX_BBOX_REPAIRS_BYTES",
     "MAX_HTML_BYTES",
     "MAX_HTML_ELEMENTS",

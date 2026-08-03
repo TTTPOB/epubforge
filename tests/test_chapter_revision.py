@@ -93,6 +93,7 @@ def test_multimodal_request_contains_complete_html_and_ordered_images(
     task = request.files["TASK.md"].decode("utf-8")
     assert "You own the final quality" in task
     assert "You may create temporary files" in task
+    assert "asset-claims.json" in request.output_limits
     assert [name for name in request.files if name.startswith("pages/")] == [
         "pages/page-0001.jpg",
         "pages/page-0001.annotated.jpg",
@@ -127,7 +128,7 @@ def test_valid_heading_header_removal_and_bbox_marker_publish(
 
     assert (chapter / "corrected.html").read_text() == corrected
     record = json.loads((chapter / "revision.json").read_text())
-    assert record["schema_version"] == 3
+    assert record["schema_version"] == 4
     assert record["agent_name"] == "book-editor"
     assert record["agent_model"] == "openai/gpt-5.6-luna"
     assert record["agent_variant"] == "medium"
@@ -498,12 +499,14 @@ class _RepairAgentRunner:
         *,
         repairs=None,
         evidence=None,
+        claims=None,
         failure: str | None = None,
     ) -> None:
         self.identity = book_editor_identity()
         self.transform = transform
         self.repairs = repairs
         self.evidence = evidence
+        self.claims = claims
         self.failure = failure
         self.calls: list[AgentRunRequest] = []
 
@@ -521,6 +524,10 @@ class _RepairAgentRunner:
         if self.evidence is not None:
             outputs["paddle-evidence.json"] = json.dumps(
                 self.evidence, ensure_ascii=False
+            ).encode("utf-8")
+        if self.claims is not None:
+            outputs["asset-claims.json"] = json.dumps(
+                self.claims, ensure_ascii=False
             ).encode("utf-8")
         return AgentRunResult(outputs=outputs, session_id="ses_repair_test")
 
@@ -627,6 +634,161 @@ def _expected_canonical(
     ]
 
 
+def _claimed_figure_html(seed: str, claim_id: str = "figure-1") -> str:
+    corrected = seed.replace(
+        'data-type="image" data-bbox="5,45,75,80"',
+        f'data-type="image" data-asset-claim="{claim_id}"',
+        1,
+    )
+    return corrected.replace(
+        'src="assets/abc-cover.png"',
+        f'src="claimed-assets/{claim_id}.png"',
+        1,
+    )
+
+
+def _asset_claims(candidate_box: dict[str, Any], claim_id: str = "figure-1") -> dict:
+    return {
+        "schema_version": 1,
+        "claims": [
+            {
+                "id": claim_id,
+                "page_idx": 1,
+                "candidate_ids": [candidate_box["id"]],
+                "operation": "replace",
+                "reason": "MinerU cropped the diagram incorrectly.",
+            }
+        ],
+    }
+
+
+def test_asset_claim_renders_source_pdf_crop_and_rewrites_html(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    candidate_box = _candidate(1, 40, 100, 150, 160)
+    evidence = _evidence_payload(workspace, 1, [candidate_box])
+    runner = _RepairAgentRunner(
+        transform=_claimed_figure_html,
+        claims=_asset_claims(candidate_box),
+        evidence=evidence,
+    )
+
+    revise_chapter(chapter, runner)
+
+    corrected = (chapter / "corrected.html").read_text(encoding="utf-8")
+    assert 'src="claimed-assets/figure-1.png"' not in corrected
+    assert 'data-asset-claim="figure-1"' in corrected
+    record = json.loads((chapter / "revision.json").read_text(encoding="utf-8"))
+    assert record["asset_claims_sha256"] is not None
+    assert len(record["generated_assets"]) == 1
+    generated = record["generated_assets"][0]
+    assert generated["claim_id"] == "figure-1"
+    assert generated["page_idx"] == 1
+    assert generated["candidate_ids"] == [candidate_box["id"]]
+    assert f'src="{generated["path"]}"' in corrected
+    expected_bbox = _expected_canonical(workspace, 1, [40, 100, 150, 160])
+    assert [float(value) for value in generated["bbox"]] == pytest.approx(
+        expected_bbox, abs=1e-5
+    )
+    assert _bbox_attr(corrected, 5) == pytest.approx(expected_bbox, abs=1e-5)
+    generated_path = chapter / generated["path"]
+    generated_bytes = generated_path.read_bytes()
+    assert generated_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    assert hashlib.sha256(generated_bytes).hexdigest() == generated["sha256"]
+    assert len(generated_bytes) == generated["size_bytes"]
+
+    skipped = _RepairAgentRunner(failure="fresh generated asset should skip")
+    revise_chapter(chapter, skipped)
+    assert skipped.calls == []
+
+    generated_path.write_bytes(b"tampered")
+    rerun = _RepairAgentRunner(failure="tampered generated asset must rerun")
+    with pytest.raises(
+        ChapterRevisionError, match="tampered generated asset must rerun"
+    ):
+        revise_chapter(chapter, rerun)
+    assert len(rerun.calls) == 1
+
+
+def test_asset_claim_may_replace_mineru_figure_with_new_figure(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    candidate_box = _candidate(1, 40, 100, 150, 160)
+
+    def replace_figure(seed: str) -> str:
+        start = seed.index('<figure id="content-00000005"')
+        end = seed.index("</figure>", start) + len("</figure>")
+        replacement = (
+            '<figure data-asset-claim="new-diagram" data-page-idx="1">'
+            '<img src="claimed-assets/new-diagram.png" alt="Replacement diagram">'
+            "</figure>"
+        )
+        return seed[:start] + replacement + seed[end:]
+
+    revise_chapter(
+        chapter,
+        _RepairAgentRunner(
+            transform=replace_figure,
+            claims=_asset_claims(candidate_box, "new-diagram"),
+            evidence=_evidence_payload(workspace, 1, [candidate_box]),
+        ),
+    )
+
+    corrected = (chapter / "corrected.html").read_text(encoding="utf-8")
+    assert 'data-content-idx="5"' not in corrected
+    assert 'data-asset-claim="new-diagram" data-page-idx="1" data-bbox=' in corrected
+    assert 'src="assets/generated/' in corrected
+
+
+def test_asset_claim_rejects_unknown_candidate(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    candidate_box = _candidate(1, 40, 100, 150, 160)
+    claims = _asset_claims(candidate_box)
+    claims["claims"][0]["candidate_ids"] = ["p0001-figure-deadbeef00"]
+
+    with pytest.raises(ChapterRevisionError, match="unknown candidate"):
+        revise_chapter(
+            chapter,
+            _RepairAgentRunner(
+                transform=_claimed_figure_html,
+                claims=claims,
+                evidence=_evidence_payload(workspace, 1, [candidate_box]),
+            ),
+        )
+    assert not (chapter / "corrected.html").exists()
+
+
+def test_asset_claim_rejects_changed_source_pdf(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    candidate_box = _candidate(1, 40, 100, 150, 160)
+    source_pdf = workspace.parent / "source/source.pdf"
+    source_pdf.write_bytes(source_pdf.read_bytes() + b"changed")
+
+    with pytest.raises(ChapterRevisionError, match="source PDF hash"):
+        revise_chapter(
+            chapter,
+            _RepairAgentRunner(
+                transform=_claimed_figure_html,
+                claims=_asset_claims(candidate_box),
+                evidence=_evidence_payload(workspace, 1, [candidate_box]),
+            ),
+        )
+    assert not (chapter / "corrected.html").exists()
+
+
+def test_unclaimed_asset_placeholder_is_rejected(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+
+    with pytest.raises(ChapterRevisionError, match="invalid local image reference"):
+        revise_chapter(
+            chapter,
+            _FakeAgentRunner(_claimed_figure_html),
+        )
+
+
 def test_valid_replace_repair_applies_canonical_bbox(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
@@ -658,7 +820,7 @@ def test_valid_replace_repair_applies_canonical_bbox(tmp_path: Path) -> None:
     assert applied != [5.0, 45.0, 75.0, 80.0]
 
     record = json.loads((chapter / "revision.json").read_text(encoding="utf-8"))
-    assert record["schema_version"] == 3
+    assert record["schema_version"] == 4
     assert len(record["applied_bbox_repairs"]) == 1
     applied_record = record["applied_bbox_repairs"][0]
     assert applied_record["data_content_idx"] == 5

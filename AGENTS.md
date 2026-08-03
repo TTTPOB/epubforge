@@ -24,7 +24,7 @@ fresh result. Use `--force-rerun` to rebuild the selected stage.
 | 2 normalize | `normalize` / `run --from 2` | Stage 1 archive and source PDF | `02_content/content.json`, `02_content/assets/` |
 | 3 segment | `segment` / `run --from 3` | normalized content | `03_chapters/chapters.json` |
 | 4 prepare | `prepare` / `run --from 4` | normalized content, chapter plan, source PDF | `04_edit/manifest.json`, chapter HTML, clean and annotated page JPEGs, per-page geometry |
-| 5 revise | `revise` / `run --from 5` | chapter workspaces | `corrected.html`, `revision.json`, applied bbox repairs in each completed chapter |
+| 5 revise | `revise` / `run --from 5` | chapter workspaces | `corrected.html`, `revision.json`, generated assets, and applied bbox repairs in each completed chapter |
 
 `run` executes all five stages in order. `--from N` reuses earlier outputs and
 allows `--force-rerun` to affect stage N and later stages. Stage 1 accepts at
@@ -40,10 +40,15 @@ one clean JPEG and one annotated JPEG per page, and a per-page geometry
 contract with the raster/canonical conversion. Stage 5 lets the same agent
 edit a pre-seeded `corrected.html`; the agent may call the local Paddle
 page-image CLI on clean page images and writes `bbox-repairs.json` referencing
-candidate IDs only. Python converts candidates to canonical coordinates,
-applies every `data-bbox` change itself, validates the result, and publishes
-the corrected pair atomically. `revision.json` records the repair input
-hashes and every applied repair.
+candidate IDs only. The agent may also claim new or replacement image assets
+with `asset-claims.json` and matching `claimed-assets/<id>.png` HTML
+placeholders. Python validates the final Paddle candidates, converts them to
+canonical coordinates, renders content-addressed PNG crops from the managed
+source PDF, replaces claim placeholders, applies every `data-bbox` change,
+validates the result, and publishes the corrected pair after every referenced
+generated asset exists. `revision.json` records the repair and claim input
+hashes, every applied repair, and every generated asset's provenance and
+digest.
 
 Agent workspaces use mode 0700 system temporary directories outside the
 repository and book workspace. The runner disables project config and external

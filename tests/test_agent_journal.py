@@ -163,6 +163,9 @@ elif mode == "revision-ok":
     (workspace / "paddle-evidence.json").write_text(
         json.dumps({"schema_version": 1, "pages": []}), encoding="utf-8"
     )
+    (workspace / "asset-claims.json").write_text(
+        json.dumps({"schema_version": 1, "claims": []}), encoding="utf-8"
+    )
     print(json.dumps({"type": "text", "sessionID": "ses_revision_ok"}))
 elif mode == "revision-bad":
     (workspace / "corrected.html").write_text(
@@ -174,6 +177,9 @@ elif mode == "revision-bad":
     )
     (workspace / "paddle-evidence.json").write_text(
         json.dumps({"schema_version": 1, "pages": []}), encoding="utf-8"
+    )
+    (workspace / "asset-claims.json").write_text(
+        json.dumps({"schema_version": 1, "claims": []}), encoding="utf-8"
     )
     print(json.dumps({"type": "text", "sessionID": "ses_revision_bad"}))
 else:
