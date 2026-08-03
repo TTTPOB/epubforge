@@ -23,11 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from epubforge.agent_runner import (
     AgentIdentity,
+    AgentRunJournalHandle,
     AgentRunRequest,
     AgentRunner,
     AgentRunnerError,
     BOOK_EDITOR_PROMPT,
 )
+from epubforge.agent_journal import record_accepted, record_rejected
 from epubforge.chapter_workspace import (
     PAGE_GEOMETRY_SCHEMA,
     PAGE_GEOMETRY_SCHEMA_VERSION,
@@ -661,6 +663,7 @@ def _revise_one_locked(
     ):
         return corrected_path, True
 
+    journal: AgentRunJournalHandle | None = None
     try:
         files = _agent_workspace_files(chapter, task)
         result = agent_runner(
@@ -676,6 +679,7 @@ def _revise_one_locked(
                 forbidden_roots=(workspace.root.parent,),
             )
         )
+        journal = result.journal
         corrected_bytes = result.outputs.get("corrected.html")
         if not isinstance(corrected_bytes, bytes):
             raise ChapterRevisionError("agent did not return corrected.html")
@@ -697,55 +701,69 @@ def _revise_one_locked(
                 expected_repairs=_applied_repairs_map(applied_repairs),
             )
         corrected_bytes = final_html.encode("utf-8")
-    except ChapterRevisionError:
+    except ChapterRevisionError as exc:
+        record_rejected(journal, exc)
         raise
     except AgentRunnerError as exc:
         raise ChapterRevisionError(f"chapter revision agent failed: {exc}") from exc
     except Exception as exc:
-        raise ChapterRevisionError(f"chapter revision agent failed: {exc}") from exc
+        error = ChapterRevisionError(f"chapter revision agent failed: {exc}")
+        record_rejected(journal, error)
+        raise error from exc
 
-    if len(corrected_bytes) > MAX_HTML_BYTES:
-        raise ChapterRevisionError("corrected HTML exceeds the size limit")
-    corrected_hash = _sha256_bytes(corrected_bytes)
-    repairs_bytes = result.outputs.get("bbox-repairs.json")
-    evidence_bytes = result.outputs.get("paddle-evidence.json")
-    record = ChapterRevisionRecord(
-        agent_name=identity.name,
-        agent_model=identity.model,
-        agent_variant=identity.variant,
-        agent_fingerprint=identity.fingerprint,
-        prompt_sha256=prompt_hash,
-        contract_sha256=contract_hash,
-        session_id=result.session_id,
-        workspace_manifest_sha256=chapter.root_manifest_sha256,
-        source_chapter_manifest_sha256=chapter.chapter_manifest_sha256,
-        source_chapter_html_sha256=chapter.chapter_html_sha256,
-        source_images_sha256={name: digest for name, _, digest in chapter.page_bytes},
-        source_annotated_pages_sha256={
-            name: digest for name, _, digest in chapter.annotated_page_bytes
-        },
-        source_page_metadata_sha256={
-            name: digest for name, _, digest in chapter.page_metadata_bytes
-        },
-        source_assets_sha256={
-            name: digest
-            for name, _, digest in chapter.asset_bytes
-            if name in chapter.seed.referenced_assets
-        },
-        paddle_evidence_sha256=(
-            _sha256_bytes(evidence_bytes) if isinstance(evidence_bytes, bytes) else None
-        ),
-        bbox_repairs_sha256=(
-            _sha256_bytes(repairs_bytes) if isinstance(repairs_bytes, bytes) else None
-        ),
-        applied_bbox_repairs=applied_repairs,
-        corrected_html_sha256=corrected_hash,
-    )
-    _publish_pair(
-        chapter_path,
-        corrected_bytes,
-        (record.model_dump_json(indent=2, by_alias=True) + "\n").encode("utf-8"),
-    )
+    try:
+        if len(corrected_bytes) > MAX_HTML_BYTES:
+            raise ChapterRevisionError("corrected HTML exceeds the size limit")
+        corrected_hash = _sha256_bytes(corrected_bytes)
+        repairs_bytes = result.outputs.get("bbox-repairs.json")
+        evidence_bytes = result.outputs.get("paddle-evidence.json")
+        record = ChapterRevisionRecord(
+            agent_name=identity.name,
+            agent_model=identity.model,
+            agent_variant=identity.variant,
+            agent_fingerprint=identity.fingerprint,
+            prompt_sha256=prompt_hash,
+            contract_sha256=contract_hash,
+            session_id=result.session_id,
+            workspace_manifest_sha256=chapter.root_manifest_sha256,
+            source_chapter_manifest_sha256=chapter.chapter_manifest_sha256,
+            source_chapter_html_sha256=chapter.chapter_html_sha256,
+            source_images_sha256={
+                name: digest for name, _, digest in chapter.page_bytes
+            },
+            source_annotated_pages_sha256={
+                name: digest for name, _, digest in chapter.annotated_page_bytes
+            },
+            source_page_metadata_sha256={
+                name: digest for name, _, digest in chapter.page_metadata_bytes
+            },
+            source_assets_sha256={
+                name: digest
+                for name, _, digest in chapter.asset_bytes
+                if name in chapter.seed.referenced_assets
+            },
+            paddle_evidence_sha256=(
+                _sha256_bytes(evidence_bytes)
+                if isinstance(evidence_bytes, bytes)
+                else None
+            ),
+            bbox_repairs_sha256=(
+                _sha256_bytes(repairs_bytes)
+                if isinstance(repairs_bytes, bytes)
+                else None
+            ),
+            applied_bbox_repairs=applied_repairs,
+            corrected_html_sha256=corrected_hash,
+        )
+        _publish_pair(
+            chapter_path,
+            corrected_bytes,
+            (record.model_dump_json(indent=2, by_alias=True) + "\n").encode("utf-8"),
+        )
+    except Exception as exc:
+        record_rejected(journal, exc)
+        raise
+    record_accepted(journal)
     return corrected_path, False
 
 

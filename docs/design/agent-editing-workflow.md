@@ -168,6 +168,53 @@ process group, parses bounded JSON events for a session ID, snapshots declared
 regular output files without following symlinks, and removes the workspace in
 `finally`.
 
+Termination is a guarantee, not a best effort: `_terminate_process_group`
+returns only after the leader is reaped and no process remains in the group,
+and otherwise raises a bounded `AgentExecutionError`. When a group cannot be
+cleared, the runner surfaces an `AgentCleanupError` carrying the original run
+error as its cause and the retained workspace/config-home/probe paths that the
+possibly-live process can still access; those directories are never deleted
+and are logged for manual cleanup, and the journal keeps the truthful running
+process entry instead of recording a finish that never happened. Cleanup
+failures for the config home, the config probe directory, or the main
+workspace never replace an active timeout, parse, journal, or semantic error:
+they add a bounded note and a log line, and raise normally only when they are
+the sole failure. The config probe runs under its own fixed timeout bound,
+independent of the main task timeout, so a tiny task timeout cannot fail the
+probe first.
+
+Raw main-agent stdout/stderr are never journaled by default: the development
+bash profile can echo inherited environment or provider credentials into
+either stream, so persisting them without an explicit caller decision risks
+credential or content exposure. `OpenCodeAgentRunner` exposes a constructor-only
+debug opt-in, `capture_raw_main_streams=True`, that persists the bounded raw
+streams under `logs/agent-runs/<run-id>/`; the production pipeline stages and
+direct runners keep the safe default, where the manifest records the main
+agent process with `capture: "disabled"` and no stream files. The config probe
+always runs capture-disabled with no opt-in. Session IDs, output hashes,
+process outcomes, and the semantic accepted/rejected status stay durable in
+both modes; accepted/rejected marks require complete stream records only when
+streams are captured, and otherwise rely on strict session parsing. Every
+atomically persisted running manifest passes strict validation: stream-capture
+processes carry zero-byte stream records from start and keep
+`capture_complete` pending until the process finishes, so a host crash between
+start and finish leaves a readable incomplete/running capture.
+
+Every terminal transition (accepted, rejected, failed) is two-phase. The
+journal first persists a pending `finalization` intent — target status,
+attempt timestamp, and the bounded validation or runner-error payload — and
+only then atomically writes the terminal manifest and marks the intent
+completed. If the terminal write fails or the host crashes between the two
+writes, the last durable manifest stays non-terminal (`final_status:
+"started"` with pending validation) while carrying the pending intent, so it
+never reads like an ordinary running record and a strict reader can see
+exactly which terminal target the run was transitioning to. A plain running
+manifest carries `finalization: null`; a terminal manifest carries the
+completed intent (or none, for records predating the intent). This matters
+when publication already succeeded but the accepted marking failed: the
+published artifact stays in place, the manifest never claims acceptance, and
+the pending intent documents the attempted accepted transition.
+
 ## Freshness And Failure Handling
 
 Stage freshness derives from source hashes, the packaged agent fingerprint,

@@ -1184,7 +1184,12 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             log.info("skip segment — reusing fresh %s", output_dir / "chapters.json")
             return
 
-        agent_runner = OpenCodeAgentRunner(execution_profile="restricted")
+        agent_runner = OpenCodeAgentRunner(
+            execution_profile="restricted",
+            journal_root=work / "logs" / "agent-runs",
+            # Raw main-agent streams stay uncaptured: development bash can echo
+            # inherited or provider credentials into stdout/stderr.
+        )
         log.info("Stage 3: segmenting chapters with agent=%s...", identity.name)
         segment_chapters(content_path, output_dir, agent_runner, force=force)
         log.info("  -> %s", output_dir / "chapters.json")
@@ -1244,7 +1249,10 @@ def run_revise(
             return
 
         agent_runner = OpenCodeAgentRunner(
-            execution_profile=cfg.runtime.execution_profile
+            execution_profile=cfg.runtime.execution_profile,
+            journal_root=work / "logs" / "agent-runs",
+            # Raw main-agent streams stay uncaptured: development bash can echo
+            # inherited or provider credentials into stdout/stderr.
         )
         log.info(
             "Stage 5: revising chapters with agent=%s (continue_on_error=%s)...",

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 from importlib import resources
@@ -15,6 +16,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from types import MappingProxyType
@@ -55,6 +57,8 @@ _MAX_CONFIG_PROBE_STDERR_BYTES = 256 * 1024
 _RUNNER_CONTRACT_VERSION = 2
 _READ_CHUNK_BYTES = 64 * 1024
 _SESSION_KEYS = frozenset({"sessionID", "sessionId", "session_id"})
+_PROBE_LABEL = "config-probe"
+_AGENT_LABEL = "agent"
 _OPENCODE_PROVIDER_CONFIG_ENV_KEYS = frozenset(
     {
         "OPENCODE_CONFIG",
@@ -155,6 +159,11 @@ class AgentRunnerError(RuntimeError):
 class AgentExecutionError(AgentRunnerError):
     """Raised when OpenCode fails, times out, or violates output limits."""
 
+    # Set by _communicate_bounded when communication is interrupted: the
+    # bounded stdout bytes accepted before the failure, so recovery parsing
+    # reads only already-complete JSONL lines.
+    partial_stdout: bytes | None = None
+
     def __init__(
         self,
         message: str,
@@ -164,6 +173,23 @@ class AgentExecutionError(AgentRunnerError):
     ) -> None:
         self.returncode = returncode
         self.session_id = session_id
+        # Set by _BoundedBytes.add when a byte or line limit rejects part of
+        # one chunk: the accepted prefix stored before the raise, so stream
+        # capture persists the exact bytes recovery parsing reads.
+        self.accepted_prefix: bytes = b""
+        super().__init__(message)
+
+
+class AgentCleanupError(AgentRunnerError):
+    """Raised when an OpenCode process group cannot be guaranteed dead.
+
+    The process may still run and can access ``retained_paths``, so callers
+    must not delete those directories and should surface them for manual
+    cleanup.  The original run error is attached as the cause.
+    """
+
+    def __init__(self, message: str, *, retained_paths: tuple[Path, ...] = ()) -> None:
+        self.retained_paths = tuple(retained_paths)
         super().__init__(message)
 
 
@@ -204,12 +230,66 @@ class AgentRunRequest:
     forbidden_roots: tuple[Path, ...] = ()
 
 
+class AgentRunJournalHandle(Protocol):
+    """Caller-facing marks on the durable record of one agent run.
+
+    Stages record semantic validation and publication outcome without knowing
+    journal internals; test fakes may attach a real journal or leave None.
+    """
+
+    def mark_accepted(self) -> None: ...
+
+    def mark_rejected(self, error_type: str, message: str) -> None: ...
+
+
+class AgentRunRecorder(AgentRunJournalHandle, Protocol):
+    """Runner-facing journal operations implemented by AgentRunJournal."""
+
+    def record_workspace(self, workspace: str | Path) -> None: ...
+
+    def record_input(self, name: str, size_bytes: int, sha256: str) -> None: ...
+
+    def process_started(self, label: str, *, capture_streams: bool = False) -> None: ...
+
+    def process_pid(self, label: str, pid: int) -> None: ...
+
+    def write_chunk(self, label: str, stream: str, chunk: bytes) -> None: ...
+
+    def process_finished(self, label: str, returncode: int | None) -> None: ...
+
+    def session_parsed(
+        self,
+        session_id: str | None,
+        *,
+        mode: Literal["strict", "best-effort"],
+    ) -> None: ...
+
+    def capture_interrupted(
+        self, label: str, error_type: str, message: str
+    ) -> None: ...
+
+    def record_output(self, name: str, size_bytes: int, sha256: str) -> None: ...
+
+    def output_collection_complete(self) -> None: ...
+
+    def output_collection_failed(self, error_type: str, message: str) -> None: ...
+
+    def mark_runner_failed(self, error_type: str, message: str) -> None: ...
+
+    def close(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
-    """Bounded output snapshots collected before workspace cleanup."""
+    """Bounded output snapshots collected before workspace cleanup.
+
+    ``journal`` exposes the caller-facing marks on the durable run record;
+    it is None when journaling is disabled.
+    """
 
     outputs: Mapping[str, bytes]
     session_id: str | None = None
+    journal: AgentRunJournalHandle | None = None
 
 
 class AgentRunner(Protocol):
@@ -229,38 +309,82 @@ class _AgentDefinition:
 
 @dataclass
 class _BoundedBytes:
+    """Collector that always accepts the maximal valid prefix of each chunk.
+
+    ``add`` stores and returns the longest prefix of the incoming chunk that
+    fits the total byte budget without containing an over-limit line, then
+    raises ``AgentExecutionError`` if the rejected remainder is non-empty.
+    The accepted prefix is persisted before the raise and carried back on the
+    error so the caller can forward the identical bytes to stream capture;
+    recovery parsing then reads only complete JSONL lines from that prefix.
+    """
+
     label: str
     maximum: int
     maximum_line: int
     data: bytearray
     current_line: int = 0
 
-    def add(self, chunk: bytes) -> None:
-        if len(self.data) + len(chunk) > self.maximum:
-            raise AgentExecutionError(f"OpenCode {self.label} exceeded its byte limit")
-        parts = chunk.split(b"\n")
-        if len(parts) == 1:
-            self.current_line += len(parts[0])
-            self._check_line()
-        else:
-            self.current_line += len(parts[0])
-            self._check_line()
-            for part in parts[1:-1]:
-                if len(part) > self.maximum_line:
-                    raise AgentExecutionError(
-                        f"OpenCode {self.label} exceeded its line limit"
-                    )
-            self.current_line = len(parts[-1])
-            self._check_line()
-        self.data.extend(chunk)
+    def add(self, chunk: bytes) -> bytes:
+        """Store and return the maximal valid prefix of *chunk*.
 
-    def _check_line(self) -> None:
-        if self.current_line > self.maximum_line:
-            raise AgentExecutionError(f"OpenCode {self.label} exceeded its line limit")
+        A single linear scan bounds the prefix by both the remaining total
+        byte budget and the per-line limit, so a 64KiB chunk costs one pass
+        regardless of how many bytes were accepted before.  Line accounting
+        carries across chunks: ``current_line`` counts the bytes of the
+        unfinished line, and a newline closes it.  On a byte-limit failure the
+        prefix ends exactly at the remaining budget; on a line-limit failure
+        it ends before the first byte that would push a line over the limit,
+        so the stored line is never over-limit.  The prefix is always stored
+        before the raise and the raised error carries it in
+        ``accepted_prefix``.
+        """
+        budget = self.maximum - len(self.data)
+        if budget <= 0:
+            error = AgentExecutionError(
+                f"OpenCode {self.label} exceeded its byte limit"
+            )
+            error.accepted_prefix = b""
+            raise error
+        limit = budget if len(chunk) > budget else len(chunk)
+        line_bytes = self.current_line
+        accepted = limit
+        for index in range(limit):
+            if chunk[index] == 0x0A:
+                line_bytes = 0
+            elif line_bytes + 1 > self.maximum_line:
+                accepted = index
+                break
+            else:
+                line_bytes += 1
+        self.data.extend(chunk[:accepted])
+        self.current_line = line_bytes
+        if accepted < limit:
+            error = AgentExecutionError(
+                f"OpenCode {self.label} exceeded its line limit"
+            )
+            error.accepted_prefix = chunk[:accepted]
+            raise error
+        if limit < len(chunk):
+            error = AgentExecutionError(
+                f"OpenCode {self.label} exceeded its byte limit"
+            )
+            error.accepted_prefix = chunk[:accepted]
+            raise error
+        return chunk
 
 
 class OpenCodeAgentRunner:
-    """Invoke OpenCode without exposing the repository or book workspace."""
+    """Invoke OpenCode without exposing the repository or book workspace.
+
+    ``capture_raw_main_streams`` is a dangerous debug-only opt-in: when True
+    the run journal persists the main agent's bounded raw stdout/stderr bytes
+    to disk, which may echo inherited environment or provider credentials.
+    Production pipeline stages and direct journal-enabled runners must leave
+    it False; the config probe never captures streams regardless of this
+    flag.  Session parsing, process outcome, output hashes, and semantic
+    status stay durable in both modes.
+    """
 
     def __init__(
         self,
@@ -276,6 +400,8 @@ class OpenCodeAgentRunner:
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         execution_profile: str = DEFAULT_EXECUTION_PROFILE,
         temp_root: Path | None = None,
+        journal_root: Path | None = None,
+        capture_raw_main_streams: bool = False,
     ) -> None:
         if timeout_seconds <= 0 or terminate_grace_seconds <= 0:
             raise ValueError("agent timeouts must be positive")
@@ -309,57 +435,110 @@ class OpenCodeAgentRunner:
         self._max_input_files = max_input_files
         self._max_output_bytes = max_output_bytes
         self._temp_root = temp_root
+        self._journal_root = journal_root
+        self._capture_raw_main_streams = capture_raw_main_streams
 
     def __call__(self, request: AgentRunRequest) -> AgentRunResult:
         normalized_files, normalized_outputs = self._validate_request(request)
-        workspace = self._create_workspace(request.forbidden_roots)
-        active_error: BaseException | None = None
+        from epubforge.agent_journal import AgentRunJournalError
+
         try:
-            self._write_inputs(workspace, normalized_files, normalized_outputs)
-            stdout, stderr = self._invoke(workspace, request)
+            journal = self._begin_journal(request, normalized_outputs)
+        except AgentRunJournalError as exc:
+            raise AgentRunnerError(f"agent run journaling failed: {exc}") from exc
+
+        workspace: Path | None = None
+        try:
+            workspace = self._create_workspace(request.forbidden_roots)
+            if journal is not None:
+                journal.record_workspace(workspace)
+            self._write_inputs(
+                workspace, normalized_files, normalized_outputs, journal=journal
+            )
+            stdout, stderr = self._invoke(workspace, request, journal)
             session_id = _parse_session_id(stdout)
             outputs: dict[str, bytes] = {}
             total_output_bytes = 0
-            for relative, maximum in normalized_outputs.items():
-                remaining = self._max_output_bytes - total_output_bytes
-                if remaining <= 0:
-                    raise AgentRunnerError("agent outputs exceed the total byte limit")
-                try:
-                    data = _read_regular_output(
-                        workspace,
-                        relative,
-                        max_bytes=min(maximum, remaining),
-                    )
-                except AgentRunnerError as exc:
-                    if remaining < maximum and "exceeds its byte limit" in str(exc):
+            try:
+                for relative, maximum in normalized_outputs.items():
+                    remaining = self._max_output_bytes - total_output_bytes
+                    if remaining <= 0:
                         raise AgentRunnerError(
                             "agent outputs exceed the total byte limit"
-                        ) from exc
-                    raise
-                total_output_bytes += len(data)
-                if total_output_bytes > self._max_output_bytes:
-                    raise AgentRunnerError("agent outputs exceed the total byte limit")
-                outputs[relative] = data
+                        )
+                    try:
+                        data = _read_regular_output(
+                            workspace,
+                            relative,
+                            max_bytes=min(maximum, remaining),
+                        )
+                    except AgentRunnerError as exc:
+                        if remaining < maximum and "exceeds its byte limit" in str(exc):
+                            raise AgentRunnerError(
+                                "agent outputs exceed the total byte limit"
+                            ) from exc
+                        raise
+                    total_output_bytes += len(data)
+                    if total_output_bytes > self._max_output_bytes:
+                        raise AgentRunnerError(
+                            "agent outputs exceed the total byte limit"
+                        )
+                    outputs[relative] = data
+                    if journal is not None:
+                        journal.record_output(
+                            relative,
+                            len(data),
+                            hashlib.sha256(data).hexdigest(),
+                        )
+            except BaseException as exc:
+                if journal is not None:
+                    journal.output_collection_failed(type(exc).__name__, str(exc))
+                raise
+            if journal is not None:
+                journal.output_collection_complete()
             if stderr:
                 _log.debug("OpenCode book-editor emitted %d stderr bytes", len(stderr))
-            return AgentRunResult(
+            result = AgentRunResult(
                 outputs=MappingProxyType(outputs),
                 session_id=session_id,
+                journal=journal,
             )
+            if workspace is not None:
+                # Clean up before returning: a cleanup failure on this
+                # otherwise-successful path is itself a run failure, so the
+                # journal must be finalized as failed before the cleanup error
+                # propagates.  This never leaves a started manifest or open
+                # run/root descriptors behind.
+                _remove_workspace_preserving(workspace, "isolated agent workspace")
+                workspace = None
+            return result
         except BaseException as exc:
-            active_error = exc
+            if journal is not None:
+                if workspace is None:
+                    # Workspace creation failed before any child ran: close out
+                    # the run record without masking the workspace error.
+                    _mark_run_failed_best_effort(journal, exc)
+                else:
+                    _mark_runner_failed_preserving(journal, exc)
             raise
         finally:
-            try:
-                _remove_workspace(workspace)
-            except Exception as cleanup_error:
-                message = f"cannot remove isolated agent workspace: {workspace}"
-                error = AgentRunnerError(message)
-                if active_error is not None:
-                    error.add_note(
-                        f"The agent run also failed with {type(active_error).__name__}."
-                    )
-                raise error from cleanup_error
+            if workspace is not None:
+                _remove_workspace_preserving(workspace, "isolated agent workspace")
+
+    def _begin_journal(
+        self, request: AgentRunRequest, normalized_outputs: Mapping[str, int]
+    ) -> AgentRunRecorder | None:
+        if self._journal_root is None:
+            return None
+        from epubforge.agent_journal import create_agent_run_journal
+
+        return create_agent_run_journal(
+            self._journal_root,
+            title=request.title,
+            identity=self.identity,
+            execution_profile=self._execution_profile,
+            declared_outputs=normalized_outputs,
+        )
 
     def _validate_request(
         self, request: AgentRunRequest
@@ -450,7 +629,7 @@ class OpenCodeAgentRunner:
                 )
             return workspace
         except BaseException:
-            _remove_workspace(workspace)
+            _remove_workspace_preserving(workspace, "isolated agent workspace")
             raise
 
     def _write_inputs(
@@ -458,6 +637,8 @@ class OpenCodeAgentRunner:
         workspace: Path,
         files: Mapping[str, bytes],
         outputs: Mapping[str, int],
+        *,
+        journal: AgentRunRecorder | None = None,
     ) -> None:
         for relative in outputs:
             output_path = workspace / PurePosixPath(relative)
@@ -468,8 +649,17 @@ class OpenCodeAgentRunner:
             _write_new_file(path, data)
             if relative not in outputs:
                 os.chmod(path, 0o400)
+            if journal is not None:
+                journal.record_input(
+                    relative, len(data), hashlib.sha256(data).hexdigest()
+                )
 
-    def _invoke(self, workspace: Path, request: AgentRunRequest) -> tuple[bytes, bytes]:
+    def _invoke(
+        self,
+        workspace: Path,
+        request: AgentRunRequest,
+        journal: AgentRunRecorder | None,
+    ) -> tuple[bytes, bytes]:
         argv = [
             self._executable,
             "run",
@@ -492,7 +682,7 @@ class OpenCodeAgentRunner:
             inherited_environment, self._permissions
         )
         provider_config = self._resolve_provider_config(
-            workspace.parent, provider_probe_environment
+            workspace.parent, provider_probe_environment, journal
         )
         config_home: Path | None = None
         try:
@@ -521,46 +711,80 @@ class OpenCodeAgentRunner:
 
         try:
             environment["XDG_CONFIG_HOME"] = str(config_home)
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    cwd=workspace,
-                    env=environment,
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
+            if journal is not None:
+                # Record the attempt before Popen: the process entry never
+                # claims a PID until process_pid runs after a live child.
+                # Raw main streams are persisted only under the dangerous
+                # debug opt-in; the safe default keeps them in memory.
+                journal.process_started(
+                    _AGENT_LABEL, capture_streams=self._capture_raw_main_streams
                 )
-            except OSError as exc:
-                raise AgentExecutionError(f"cannot start OpenCode: {exc}") from exc
-
             try:
-                stdout, stderr = self._communicate_bounded(process)
+                try:
+                    process = subprocess.Popen(
+                        argv,
+                        cwd=workspace,
+                        env=environment,
+                        shell=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    raise AgentExecutionError(f"cannot start OpenCode: {exc}") from exc
             except BaseException:
-                _terminate_process_group(process, self._terminate_grace_seconds)
+                # Popen failed: no child exists, so there is no process group
+                # to terminate; record the failed attempt and let the caller
+                # mark the run failed.
+                _record_process_finished(journal, _AGENT_LABEL, None)
                 raise
-            finally:
-                if process.stdout is not None:
-                    process.stdout.close()
-                if process.stderr is not None:
-                    process.stderr.close()
+            with _child_process_guard(
+                process,
+                grace_seconds=self._terminate_grace_seconds,
+                journal=journal,
+                label=_AGENT_LABEL,
+                retain_paths=(config_home, workspace),
+            ) as record_finish:
+                if journal is not None:
+                    journal.process_pid(_AGENT_LABEL, process.pid)
+                try:
+                    stdout, stderr = self._communicate_bounded(
+                        process,
+                        journal=journal,
+                        label=_AGENT_LABEL,
+                        capture_streams=self._capture_raw_main_streams,
+                    )
+                except AgentExecutionError as exc:
+                    # Timeout, byte/line limit, reader failure, or any other
+                    # interrupted main-agent communication: persist bounded
+                    # recovery facts (truncated capture plus one best-effort
+                    # session ID) without ever masking the original error.
+                    _record_interrupted_capture(journal, exc, exc.partial_stdout or b"")
+                    raise
+                record_finish()
+                session_id = _parse_session_id(stdout)
+                if journal is not None:
+                    journal.session_parsed(session_id, mode="strict")
+                if process.returncode != 0:
+                    raise AgentExecutionError(
+                        f"OpenCode exited with status {process.returncode} "
+                        f"and emitted {len(stderr)} stderr bytes",
+                        returncode=process.returncode,
+                        session_id=session_id,
+                    )
+                return stdout, stderr
         finally:
             if config_home is not None:
-                _remove_workspace(config_home)
-
-        session_id = _parse_session_id(stdout)
-        if process.returncode != 0:
-            raise AgentExecutionError(
-                f"OpenCode exited with status {process.returncode} "
-                f"and emitted {len(stderr)} stderr bytes",
-                returncode=process.returncode,
-                session_id=session_id,
-            )
-        return stdout, stderr
+                _remove_workspace_preserving(
+                    config_home, "private OpenCode config home"
+                )
 
     def _resolve_provider_config(
-        self, parent: Path, environment: Mapping[str, str]
+        self,
+        parent: Path,
+        environment: Mapping[str, str],
+        journal: AgentRunRecorder | None,
     ) -> dict[str, Any]:
         """Read only provider settings before entering the private config home."""
         try:
@@ -575,48 +799,72 @@ class OpenCodeAgentRunner:
 
         process: subprocess.Popen[bytes] | None = None
         try:
+            if journal is not None:
+                # Record the attempt before Popen: the process entry never
+                # claims a PID until process_pid runs after a live child.
+                journal.process_started(_PROBE_LABEL, capture_streams=False)
             try:
-                process = subprocess.Popen(
-                    [self._executable, "debug", "config", "--pure"],
-                    cwd=probe_dir,
-                    env=dict(environment),
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                )
-            except OSError as exc:
-                raise AgentExecutionError("cannot start OpenCode config probe") from exc
-
-            try:
-                stdout, _ = self._communicate_bounded(
-                    process,
-                    timeout_seconds=min(
-                        self._timeout_seconds, _CONFIG_PROBE_TIMEOUT_SECONDS
-                    ),
-                    max_stdout_bytes=_MAX_CONFIG_PROBE_STDOUT_BYTES,
-                    max_stderr_bytes=_MAX_CONFIG_PROBE_STDERR_BYTES,
-                )
+                try:
+                    process = subprocess.Popen(
+                        [self._executable, "debug", "config", "--pure"],
+                        cwd=probe_dir,
+                        env=dict(environment),
+                        shell=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                except OSError as exc:
+                    raise AgentExecutionError(
+                        "cannot start OpenCode config probe"
+                    ) from exc
             except BaseException:
-                _terminate_process_group(process, self._terminate_grace_seconds)
-                raise AgentExecutionError("OpenCode config probe failed") from None
-            finally:
-                if process.stdout is not None:
-                    process.stdout.close()
-                if process.stderr is not None:
-                    process.stderr.close()
-
-            if process.returncode != 0:
-                raise AgentExecutionError("OpenCode config probe exited unsuccessfully")
-            return _parse_provider_config(stdout)
+                # Popen failed: no child exists, so there is no process group
+                # to terminate; record the failed attempt and let the caller
+                # mark the run failed.
+                _record_process_finished(journal, _PROBE_LABEL, None)
+                raise
+            with _child_process_guard(
+                process,
+                grace_seconds=self._terminate_grace_seconds,
+                journal=journal,
+                label=_PROBE_LABEL,
+                retain_paths=(probe_dir,),
+            ) as record_finish:
+                if journal is not None:
+                    journal.process_pid(_PROBE_LABEL, process.pid)
+                try:
+                    # The probe's raw streams may contain provider credentials,
+                    # so only its metadata is journaled; the bytes stay in
+                    # memory for allowlist parsing and are never persisted.
+                    # The probe keeps its own fixed bound: a tiny main-agent
+                    # task timeout never shortens the independent config probe
+                    # window, so a slow probe cannot masquerade as a fast
+                    # task timeout.
+                    stdout, _ = self._communicate_bounded(
+                        process,
+                        timeout_seconds=_CONFIG_PROBE_TIMEOUT_SECONDS,
+                        max_stdout_bytes=_MAX_CONFIG_PROBE_STDOUT_BYTES,
+                        max_stderr_bytes=_MAX_CONFIG_PROBE_STDERR_BYTES,
+                        journal=journal,
+                        label=_PROBE_LABEL,
+                        capture_streams=False,
+                    )
+                except BaseException:
+                    raise AgentExecutionError("OpenCode config probe failed") from None
+                record_finish()
+                if process.returncode != 0:
+                    raise AgentExecutionError(
+                        "OpenCode config probe exited unsuccessfully"
+                    )
+                return _parse_provider_config(stdout)
         finally:
-            try:
-                _remove_workspace(probe_dir)
-            except Exception as exc:
-                raise AgentExecutionError(
-                    "cannot remove neutral OpenCode config probe directory"
-                ) from exc
+            _remove_workspace_preserving(
+                probe_dir,
+                "neutral OpenCode config probe directory",
+                error_type=AgentExecutionError,
+            )
 
     def _communicate_bounded(
         self,
@@ -625,6 +873,9 @@ class OpenCodeAgentRunner:
         timeout_seconds: float | None = None,
         max_stdout_bytes: int | None = None,
         max_stderr_bytes: int | None = None,
+        journal: AgentRunRecorder | None = None,
+        label: str = _AGENT_LABEL,
+        capture_streams: bool = False,
     ) -> tuple[bytes, bytes]:
         if process.stdout is None or process.stderr is None:
             raise AgentExecutionError("OpenCode output pipes are unavailable")
@@ -665,13 +916,31 @@ class OpenCodeAgentRunner:
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
-                    collectors[str(key.data)].add(chunk)
+                    accepted: bytes = b""
+                    try:
+                        accepted = collectors[str(key.data)].add(chunk)
+                    except AgentExecutionError as exc:
+                        # The collector stored the maximal valid prefix of
+                        # *chunk* before raising; forward the identical
+                        # prefix so the durable capture matches the accepted
+                        # bytes recovery parsing reads.
+                        accepted = exc.accepted_prefix
+                        raise
+                    finally:
+                        if accepted and journal is not None and capture_streams:
+                            journal.write_chunk(label, str(key.data), accepted)
             try:
                 process.wait(timeout=max(0.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired as exc:
                 raise AgentExecutionError(
                     f"OpenCode timed out after {effective_timeout:g}s"
                 ) from exc
+        except AgentExecutionError as exc:
+            # Interrupted communication: expose the bounded stdout bytes
+            # accepted before the failure so the caller can run recovery
+            # parsing over already-complete JSONL lines only.
+            exc.partial_stdout = bytes(collectors["stdout"].data)
+            raise
         finally:
             selector.close()
         return bytes(collectors["stdout"].data), bytes(collectors["stderr"].data)
@@ -1047,9 +1316,163 @@ def _open_workspace_fd(workspace: Path) -> int:
         raise
 
 
+def _record_process_finished(
+    journal: AgentRunRecorder | None,
+    label: str,
+    returncode: int | None,
+) -> None:
+    """Best-effort finish recording that never masks the primary error."""
+    if journal is None:
+        return
+    try:
+        journal.process_finished(label, returncode)
+    except BaseException:
+        _log.exception("cannot record agent run process finish for %s", label)
+
+
+@contextmanager
+def _child_process_guard(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float,
+    journal: AgentRunRecorder | None,
+    label: str,
+    retain_paths: tuple[Path, ...] = (),
+) -> Iterator[Callable[[], None]]:
+    """Guard every step that follows a successful Popen of one agent process.
+
+    Once ``Popen`` returns a live child, every recorder call, communication
+    step, parse, and the finish recording runs inside this guard: any
+    ``BaseException`` terminates and reaps the whole process group and closes
+    the output pipes, so a journaling failure can never orphan the child.
+
+    The yielded ``record_finish`` callback is the normal-path finish record:
+    it is strict and raises on journal failure, so a stream sync, close, or
+    final metadata failure fails the run immediately instead of being
+    swallowed.  On its own error path the guard records the finish best
+    effort only, so cleanup never masks the primary error.  The shared
+    ``finished`` flag guarantees exactly one recording attempt either way.
+
+    When termination or reaping itself fails, the process may still be live
+    and can access ``retain_paths``: the guard raises ``AgentCleanupError``
+    with the original error as its cause and the retained paths attached, so
+    outer cleanup never deletes a directory a possibly-live process can
+    still reach.  The process is not recorded as finished: the journal keeps
+    the truthful running entry and the run is marked failed by the caller.
+    """
+    finished = False
+
+    def record_finish() -> None:
+        nonlocal finished
+        if finished:
+            return
+        finished = True
+        if journal is not None:
+            journal.process_finished(label, process.returncode)
+
+    def record_finish_best_effort() -> None:
+        nonlocal finished
+        if finished:
+            return
+        finished = True
+        if journal is not None:
+            try:
+                journal.process_finished(label, process.returncode)
+            except BaseException:
+                _log.exception("cannot record agent run process finish for %s", label)
+
+    try:
+        yield record_finish
+    except BaseException as primary_error:
+        try:
+            _terminate_process_group(process, grace_seconds)
+        except BaseException:
+            _log.exception(
+                "cannot guarantee termination of the %s process group", label
+            )
+            retained = tuple(retain_paths)
+            if retained:
+                _log.error(
+                    "retaining paths for possibly-live %s process: %s",
+                    label,
+                    ", ".join(str(path) for path in retained),
+                )
+            raise AgentCleanupError(
+                f"cannot guarantee cleanup of the {label} process group",
+                retained_paths=retained,
+            ) from primary_error
+        record_finish_best_effort()
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
+def _bounded_text(value: object, limit: int = 2000) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _mark_runner_failed_preserving(
+    journal: AgentRunRecorder | None, error: BaseException
+) -> None:
+    """Mark a run failed without ever masking the primary run error.
+
+    A secondary journaling failure adds a bounded note and a log line to
+    *error* so the original runner error still propagates.  When *error*
+    itself is a journaling failure it is the primary failure and stays
+    untouched.
+    """
+    if journal is None:
+        return
+    try:
+        journal.mark_runner_failed(type(error).__name__, str(error))
+    except BaseException as journal_error:
+        from epubforge.agent_journal import AgentRunJournalError
+
+        if isinstance(error, AgentRunJournalError):
+            return
+        _log.error("cannot record agent run failure: %s", journal_error)
+        error.add_note(
+            f"agent run journaling also failed: {_bounded_text(journal_error)}"
+        )
+
+
+def _mark_run_failed_best_effort(
+    journal: AgentRunRecorder | None, error: BaseException
+) -> None:
+    """Mark a run failed when its workspace never existed.
+
+    The run record must not stay ``started``, but journaling is only best
+    effort here so the original workspace error always propagates; the
+    journal is closed if the failed mark cannot be persisted.
+    """
+    if journal is None:
+        return
+    try:
+        journal.mark_runner_failed(type(error).__name__, str(error))
+    except BaseException:
+        _log.exception("cannot record agent run failure")
+        try:
+            journal.close()
+        except BaseException:
+            pass
+
+
 def _terminate_process_group(
     process: subprocess.Popen[bytes], grace_seconds: float
 ) -> None:
+    """Terminate and reap *process* and its whole group, or raise.
+
+    Returns only when the leader is reaped and no process remains in the
+    group.  Otherwise it raises a bounded ``AgentExecutionError`` stating
+    that cleanup could not be guaranteed, so callers never proceed as if the
+    process group were dead while a possibly-live process still runs.
+    """
     process_group = process.pid
     group_found = _signal_process_group(process_group, signal.SIGTERM, "terminate")
     if process.poll() is None:
@@ -1067,7 +1490,19 @@ def _terminate_process_group(
         try:
             process.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
-            _log.warning("OpenCode process leader did not exit after SIGKILL")
+            pass
+    # Give SIGKILL a bounded grace period to take effect and let the group
+    # leader's reaper clear any lingering members before judging the outcome.
+    deadline = time.monotonic() + grace_seconds
+    while _process_group_exists(process_group) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    leader_reaped = process.poll() is not None
+    group_remaining = _process_group_exists(process_group)
+    if not leader_reaped or group_remaining:
+        raise AgentExecutionError(
+            "cannot guarantee OpenCode process group cleanup: "
+            f"leader_reaped={leader_reaped}, group_remaining={group_remaining}"
+        )
 
 
 def _signal_process_group(process_group: int, signal_number: int, action: str) -> bool:
@@ -1089,6 +1524,15 @@ def _process_group_exists(process_group: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _is_valid_session_id(value: str) -> bool:
+    return (
+        bool(value)
+        and len(value) <= 256
+        and all(ord(ch) >= 32 for ch in value)
+        and value.isprintable()
+    )
 
 
 def _parse_session_id(stdout: bytes) -> str | None:
@@ -1126,12 +1570,7 @@ def _parse_session_id(stdout: bytes) -> str | None:
             if isinstance(current, dict):
                 for key, value in current.items():
                     if key in _SESSION_KEYS and isinstance(value, str):
-                        if (
-                            not value
-                            or len(value) > 256
-                            or any(ord(ch) < 32 for ch in value)
-                            or not value.isprintable()
-                        ):
+                        if not _is_valid_session_id(value):
                             raise AgentExecutionError(
                                 "OpenCode emitted an invalid session ID"
                             )
@@ -1143,6 +1582,89 @@ def _parse_session_id(stdout: bytes) -> str | None:
     if len(session_ids) > 1:
         raise AgentExecutionError("OpenCode emitted conflicting session IDs")
     return next(iter(session_ids), None)
+
+
+def _parse_session_id_best_effort(stdout: bytes) -> str | None:
+    """Recover at most one session ID from already-accepted stdout bytes.
+
+    Error-only recovery path for interrupted agent communication: never
+    raises.  An incomplete trailing fragment and malformed complete lines are
+    ignored; invalid session ID values are skipped; two distinct valid IDs
+    yield None so nothing unverified is recorded.  Successful runs never use
+    this function.
+    """
+    if not stdout:
+        return None
+    text = stdout.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if lines and not text.endswith("\n"):
+        lines = lines[:-1]
+    session_ids: set[str] = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        pending: list[object] = [event]
+        visited = 0
+        while pending:
+            current = pending.pop()
+            visited += 1
+            if visited > 20_000:
+                break
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    if key in _SESSION_KEYS and isinstance(value, str):
+                        if _is_valid_session_id(value):
+                            session_ids.add(value)
+                    elif isinstance(value, (dict, list)):
+                        pending.append(value)
+            elif isinstance(current, list):
+                pending.extend(current)
+    if len(session_ids) > 1:
+        return None
+    return next(iter(session_ids), None)
+
+
+def _record_interrupted_capture(
+    journal: AgentRunRecorder | None,
+    error: AgentExecutionError,
+    partial_stdout: bytes,
+) -> None:
+    """Persist bounded recovery facts after interrupted agent communication.
+
+    Runs only on the error path so the original timeout, limit, or reader
+    error always propagates untouched.  The best-effort session parse reads
+    only complete JSONL lines already accepted into the bounded collector;
+    the capture is marked truncated with the bounded non-secret reason.
+    Journaling failures here only log.
+    """
+    if journal is None:
+        return
+    session_id = _parse_session_id_best_effort(partial_stdout)
+    try:
+        journal.session_parsed(session_id, mode="best-effort")
+    except BaseException:
+        _log.exception("cannot record interrupted agent run session")
+    from epubforge.agent_journal import AgentRunJournalError
+
+    try:
+        journal.capture_interrupted(_AGENT_LABEL, type(error).__name__, str(error))
+    except AgentRunJournalError:
+        # The safe default keeps raw streams in memory, so there is no stream
+        # capture to mark truncated; the best-effort session record above
+        # stays durable.
+        _log.debug("no main agent stream capture to interrupt")
+    except BaseException:
+        _log.exception("cannot record interrupted agent run capture")
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1169,9 +1691,46 @@ def _remove_workspace(workspace: Path) -> None:
     shutil.rmtree(workspace, onexc=make_writable)
 
 
+def _remove_workspace_preserving(
+    path: Path,
+    label: str,
+    *,
+    error_type: type[AgentRunnerError] = AgentRunnerError,
+) -> None:
+    """Remove *path* from a cleanup ``finally`` without masking primary errors.
+
+    When the propagating error is an ``AgentCleanupError`` that retains
+    *path*, the removal is skipped and the path is logged: a possibly-live
+    process may still access it, and deleting it could destroy evidence of
+    the run.  A removal failure with any other active error adds a bounded
+    note and a log line so the timeout, parse, journal, or semantic error
+    keeps propagating.  Without an active error the removal failure raises
+    *error_type* normally.
+    """
+    active_error = sys.exc_info()[1]
+    if (
+        isinstance(active_error, AgentCleanupError)
+        and path in active_error.retained_paths
+    ):
+        _log.error("retaining %s for possibly-live process: %s", label, path)
+        return
+    try:
+        _remove_workspace(path)
+    except Exception as cleanup_error:
+        message = f"cannot remove {label}: {path}"
+        if active_error is not None:
+            _log.error("%s: %s", message, cleanup_error)
+            active_error.add_note(f"{message}: {_bounded_text(cleanup_error)}")
+            return
+        raise error_type(message) from cleanup_error
+
+
 __all__ = [
+    "AgentCleanupError",
     "AgentExecutionError",
     "AgentIdentity",
+    "AgentRunJournalHandle",
+    "AgentRunRecorder",
     "AgentRunRequest",
     "AgentRunResult",
     "AgentRunner",

@@ -110,6 +110,16 @@ question。`[runtime] execution_profile` 控制工作区内的 bash：Stage 3 se
 可用更强的沙盒替换。Runner 限制运行时间、stdout、stderr、单行和输出文件大小，
 失败时终止进程组并清理目录。
 
+进程组清理是保证而非尽力而为：只有 leader 已被收割且组内没有残留进程时，
+`_terminate_process_group` 才返回，否则抛出有界的 `AgentExecutionError`。当
+进程组无法清空时，runner 抛出 `AgentCleanupError`，携带原始运行错误作为原因，
+以及可能仍被存活的进程访问的工作区、config home 与 probe 目录路径；这些目录
+**不会被删除**，会记录日志供人工清理，journal 也保留真实的运行中进程记录，
+不谎报结束。config home、config probe 目录或主工作区的清理失败不会覆盖已有
+的超时、解析、journal 或语义错误——它们只添加有界说明和日志，仅当它是唯一
+错误时才正常抛出。正常（成功）路径上如果工作区清理单独失败，运行记录会先标记
+为 `failed` 再传播清理错误，绝不留下 `started` 的 manifest 或未关闭的描述符。
+
 ## 配置与日志
 
 ```toml
@@ -146,3 +156,67 @@ endpoint、model 或 API key。OpenCode 从自己的配置与认证存储中取�
 ```bash
 uv run epubforge -L DEBUG parse fixtures/bmsf.pdf
 ```
+
+## Agent 运行记录
+
+Stage 3 的每次分割调用与 Stage 5 的每个章节调用都会在
+`work/<name>/logs/agent-runs/<run-id>/` 留下持久化运行记录（run-id 由
+UTC 时间戳加随机十六进制组成，并发运行互不冲突）。目录内包含：
+
+- `stdout.jsonl` 与 `stderr.bin`：主 agent 进程的有界原始输出（边接收边
+  落盘，不会产生无限缓冲），**仅当调用方在构造 runner 时显式传入危险的
+  调试 opt-in**（`OpenCodeAgentRunner(..., capture_raw_main_streams=True)`）
+  才存在。默认一律关闭：development profile 的工作区 bash 可能把继承的
+  环境变量或提供商凭据回显到 stdout/stderr，未经明确选择就落盘会引入
+  凭据/内容泄漏风险；生产管道与直接构造 runner 的脚本都使用默认关闭。
+  关闭时主 agent 在 manifest 中标记为 `capture: "disabled"`（无流文件、
+  大小或哈希），会话解析、进程结果、输出哈希与语义状态不受影响。config
+  probe 进程的原始输出**从不落盘**，且没有 opt-in——它可能包含提供商
+  凭据，journal 只记录该进程的时间戳、PID、返回码与通用结果（manifest
+  中标记为 `capture: "disabled"`，无流文件、大小或哈希）。
+- `manifest.json`：原子替换、严格版本化的 JSON 清单（
+  `schema`/`schema_version`/`run_id`/`title`/agent 身份与执行 profile/UTC
+  起止时间/工作区路径/输入输出元数据（名称、大小、SHA-256 与上限，绝不含
+  输入内容）/每个进程的开始、结果与返回码（config probe 为
+   `capture: "disabled"`，无流元数据；主 agent 默认同为 `capture: "disabled"`，
+   捕获开启时含 stdout、stderr 的文件名、大小与 SHA-256）/`session_id`（解析
+   到后立即记录）/输出收集状态/最终语义校验与发布状态/`finalization`（终态
+   转换意图，运行中为 `null`，详见下段））。运行中与运行后的每个持久化
+   manifest 都满足严格校验：流捕获开启时进程从开始即带零字节
+   流记录，`capture_complete` 在进程结束前保持待定（`null`），因此宿主进程
+   在开始与结束之间崩溃时，最后一份 manifest 仍是合法的“运行中/不完整捕获”
+   记录。
+
+主 agent 通信被中断时（超时、stdout/stderr 字节或行长超限、读取失败等），
+manifest 会用尽力解析已接收的完整 JSONL 行来抢救 session ID（
+`session_parse_mode: "best-effort"`，从不记录半行、畸形行或相互冲突的 ID）；
+捕获开启时会额外把流捕获标记为不完整（`capture_complete: false` 加上限长
+的非敏感原因），捕获关闭时没有流可标记，仅保留 session 抢救结果。
+正常运行固定为 `session_parse_mode: "strict"`。标记 accepted/rejected 的
+前提：捕获开启的运行必须捕获完整且严格解析；捕获关闭的运行依靠严格会话
+解析与成功进程结果，不要求流记录。
+
+终态取 `started`、`failed`、`rejected`、`accepted` 之一：agent 进程本身
+失败（非零退出、JSON 解析失败、输出收集失败等）记为 `failed`；运行成功但
+语义校验或原子发布失败记为 `rejected`（带限长的错误类型与消息）；只有
+当前校验与原子发布都成功后记为 `accepted`。每次终态转换都是两阶段写入：
+先原子持久化一条 `finalization` 意图（`status: "pending"`、目标终态、
+尝试时间戳与有界的校验/runner 错误载荷），再原子写入终态 manifest 并把
+意图标记为 `status: "completed"`。若第二次写入失败或宿主进程在两次写入
+之间崩溃，最后一份持久化 manifest 保持非终态（`final_status: "started"`、
+语义校验仍为 `pending`），但携带 pending 意图，明确暴露被中断的终态
+目标；运行中的普通记录 `finalization` 为 `null`，因此这类记录不会被误读
+为普通运行中运行。已发布的工件（如 `chapters.json`）不会因此回滚，但
+manifest 绝不谎报 accepted。失败运行同样保留 manifest 与
+流文件，不依赖 `chapters.json` 或 `revision.json` 是否存在。目录与文件
+权限为 0700/0600，路径全程不跟随符号链接；journal 写入失败会使本次运行
+明确失败，而不是悄悄丢失诊断。
+
+直接构造 runner 的脚本或测试默认不启用记录（`journal_root` 缺省为
+None）；生产管道自动指向书本的 `logs/agent-runs`。即使配置了
+`journal_root`，主 agent 原始流默认也不落盘——只有构造 runner 时显式传入
+`capture_raw_main_streams=True` 的调试 opt-in 才持久化流文件。运行开始时
+日志会打印 manifest 路径，`session_id` 解析到后立即打印。agent 工作区在
+运行结束后立即清理；当进程组无法保证清空或目录删除失败时，工作区、config
+home 与 probe 路径会按上文规则保留并记录日志，供人工清理（工作区保留策略
+在后续版本提供）。

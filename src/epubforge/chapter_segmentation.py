@@ -18,11 +18,13 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from epubforge.agent_runner import (
     AgentIdentity,
+    AgentRunJournalHandle,
     AgentRunRequest,
     AgentRunner,
     AgentRunnerError,
     BOOK_EDITOR_PROMPT,
 )
+from epubforge.agent_journal import record_accepted, record_rejected
 from epubforge.mineru_content import CONTENT_SCHEMA, CONTENT_SCHEMA_VERSION
 from epubforge.page_geometry import (
     PageGeometryError,
@@ -383,6 +385,7 @@ def segment_chapters(
         if existing is not None:
             return output_path
 
+    journal: AgentRunJournalHandle | None = None
     try:
         result = agent_runner(
             AgentRunRequest(
@@ -396,6 +399,7 @@ def segment_chapters(
                 forbidden_roots=(source_path.parent.parent, output_path.parent.parent),
             )
         )
+        journal = result.journal
         response = _parse_agent_response(result.outputs.get("boundaries.json"))
         outcome = response.root
         if isinstance(outcome, SegmentationFailure):
@@ -408,15 +412,20 @@ def segment_chapters(
         validate_coverage_acknowledgement(outcome.coverage, source_items)
         validate_boundaries(outcome.boundaries, source_items)
     except ValidationError as exc:
-        raise ChapterSegmentationError(
+        error = ChapterSegmentationError(
             f"agent chapter boundary response failed schema validation: {exc}"
-        ) from exc
-    except ChapterSegmentationError:
+        )
+        record_rejected(journal, error)
+        raise error from exc
+    except ChapterSegmentationError as exc:
+        record_rejected(journal, exc)
         raise
     except AgentRunnerError as exc:
         raise ChapterSegmentationError(f"book-editor agent failed: {exc}") from exc
     except Exception as exc:
-        raise ChapterSegmentationError(f"book-editor agent failed: {exc}") from exc
+        error = ChapterSegmentationError(f"book-editor agent failed: {exc}")
+        record_rejected(journal, error)
+        raise error from exc
 
     artifact = ChapterSegmentationArtifact(
         source_content_sha256=source_sha256,
@@ -429,7 +438,12 @@ def segment_chapters(
         session_id=result.session_id,
         boundaries=outcome.boundaries,
     )
-    _write_artifact_atomic(output_path, artifact)
+    try:
+        _write_artifact_atomic(output_path, artifact)
+    except Exception as exc:
+        record_rejected(journal, exc)
+        raise
+    record_accepted(journal)
     return output_path
 
 

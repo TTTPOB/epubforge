@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,11 @@ from typing import Any
 
 import pytest
 
+from epubforge import agent_journal as journal_module
 from epubforge import agent_runner as runner_module
+from epubforge.agent_journal import AgentRunJournalError, read_agent_run_manifest
 from epubforge.agent_runner import (
+    AgentCleanupError,
     AgentExecutionError,
     AgentRunRequest,
     AgentRunnerError,
@@ -125,6 +129,77 @@ elif mode == "timeout":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     while True:
         time.sleep(1)
+elif mode == "session-timeout":
+    print(json.dumps({"type": "text", "sessionID": "ses_interrupted"}), flush=True)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+elif mode == "session-stdout-limit":
+    print(json.dumps({"type": "text", "sessionID": "ses_interrupted"}), flush=True)
+    time.sleep(0.2)
+    os.write(sys.stdout.fileno(), b"x" * 4096)
+    while True:
+        time.sleep(1)
+elif mode == "session-single-chunk-total":
+    # one atomic write delivers a complete event plus oversized data in a
+    # single os.read chunk: the byte limit must keep the event prefix
+    os.write(
+        sys.stdout.fileno(),
+        json.dumps({"type": "text", "sessionID": "ses_prefix"}).encode()
+        + b"\n"
+        + b"x" * 4096,
+    )
+    while True:
+        time.sleep(1)
+elif mode == "session-single-chunk-line":
+    # one atomic write delivers a complete event plus an over-limit line in
+    # a single os.read chunk: the line limit must keep the event prefix
+    os.write(
+        sys.stdout.fileno(),
+        json.dumps({"type": "text", "sessionID": "ses_prefix"}).encode()
+        + b"\n"
+        + b"x" * 100,
+    )
+    while True:
+        time.sleep(1)
+elif mode == "session-cross-chunk-line":
+    # sleeps longer than the runner's 0.25s select timeout force separate
+    # os.read chunks, so the over-limit line spans chunk boundaries
+    os.write(
+        sys.stdout.fileno(),
+        json.dumps({"type": "text", "sessionID": "ses_prefix"}).encode() + b"\n",
+    )
+    time.sleep(0.5)
+    os.write(sys.stdout.fileno(), b"a" * 40)
+    time.sleep(0.5)
+    os.write(sys.stdout.fileno(), b"b" * 40)
+    while True:
+        time.sleep(1)
+elif mode == "session-bad-tail":
+    print(json.dumps({"type": "text", "sessionID": "ses_interrupted"}), flush=True)
+    sys.stdout.write('{"type": "partial')
+    sys.stdout.flush()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+elif mode == "session-malformed-then-valid":
+    print("not-json")
+    print(json.dumps({"type": "text", "sessionID": "ses_interrupted"}), flush=True)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+elif mode == "session-invalid-then-valid":
+    print(json.dumps({"type": "text", "sessionID": ""}))
+    print(json.dumps({"type": "text", "sessionID": "ses_interrupted"}), flush=True)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+elif mode == "session-conflict":
+    print(json.dumps({"type": "text", "sessionID": "ses_first"}), flush=True)
+    print(json.dumps({"type": "text", "sessionID": "ses_second"}), flush=True)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
 elif mode == "orphan-timeout":
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -213,6 +288,16 @@ def _request(mode: str = "inspect") -> AgentRunRequest:
         files={"TASK.md": b"test task\n", "nested/evidence.txt": b"evidence\n"},
         output_limits={"result.json": 64 * 1024},
     )
+
+
+def _single_run_dir(root: Path) -> Path:
+    runs = sorted(root.glob("*"))
+    assert len(runs) == 1, f"expected one run dir, found {runs}"
+    return runs[0]
+
+
+def _agent_process(manifest: Any) -> Any:
+    return next(process for process in manifest.processes if process.label == "agent")
 
 
 def test_command_environment_permissions_session_and_cleanup(
@@ -483,8 +568,11 @@ def test_config_probe_is_bounded_and_terminates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, debug_mode: str
 ) -> None:
     monkeypatch.setenv("EPUBFORGE_TEST_DEBUG_MODE", debug_mode)
+    # The probe keeps its own fixed timeout bound, independent of the main
+    # agent task timeout; shrink the module bound for a fast deterministic
+    # test.
+    monkeypatch.setattr(runner_module, "_CONFIG_PROBE_TIMEOUT_SECONDS", 0.1)
     runner = _runner(tmp_path)
-    runner._timeout_seconds = 0.1
 
     with pytest.raises(AgentExecutionError, match="config probe"):
         runner(_request())
@@ -527,6 +615,267 @@ def test_timeout_terminates_process_group_and_cleans_workspace(tmp_path: Path) -
         runner(_request("timeout"))
 
     assert time.monotonic() - started < 2
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "match"),
+    [
+        ("session-timeout", "timed out"),
+        ("session-stdout-limit", "stdout exceeded its byte"),
+    ],
+)
+def test_interrupted_communication_persists_capture_and_session(
+    tmp_path: Path, mode: str, match: str
+) -> None:
+    """A session event accepted before a timeout or byte limit survives."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        max_stdout_bytes=128,
+        capture_raw_main_streams=True,
+    )
+    if mode == "session-timeout":
+        runner._timeout_seconds = 0.1
+
+    with pytest.raises(AgentExecutionError, match=match) as caught:
+        runner(_request(mode))
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    # the original communication error is untouched and finalizes the run
+    assert manifest.final_status == "failed"
+    assert manifest.validation.status == "pending"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    assert manifest.runner_error.error_message == str(caught.value)
+    # the early session ID survived through the error-only best-effort parse
+    assert manifest.session_parsed is True
+    assert manifest.session_parse_mode == "best-effort"
+    assert manifest.session_id == "ses_interrupted"
+    # capture is explicitly truncated with a bounded non-secret reason
+    agent = _agent_process(manifest)
+    assert agent.capture == "streams"
+    assert agent.capture_complete is False
+    assert agent.capture_error_type == "AgentExecutionError"
+    assert agent.capture_error_message == str(caught.value)
+    # streams hold exactly the bounded bytes accepted before the failure
+    expected = b'{"type": "text", "sessionID": "ses_interrupted"}\n'
+    if mode == "session-stdout-limit":
+        # the byte limit rejects only the bytes past the accepted prefix,
+        # which fills the exact remaining stdout byte budget
+        expected = expected + b"x" * (128 - len(expected))
+    stdout = (run_dir / agent.stdout.filename).read_bytes()
+    assert stdout == expected
+    assert agent.stdout.size_bytes == len(stdout)
+    assert agent.stdout.sha256 == hashlib.sha256(stdout).hexdigest()
+    assert agent.stderr is not None and agent.stderr.size_bytes == 0
+    # no accepted/rejected semantic status anywhere
+    assert manifest.final_status == "failed"
+    assert manifest.validation.status == "pending"
+
+
+@pytest.mark.parametrize(
+    ("mode", "options", "match"),
+    [
+        (
+            "session-single-chunk-total",
+            {"max_stdout_bytes": 128},
+            "stdout exceeded its byte",
+        ),
+        (
+            "session-single-chunk-line",
+            {"max_stdout_bytes": 1024, "max_line_bytes": 64},
+            "stdout exceeded its line",
+        ),
+        (
+            "session-cross-chunk-line",
+            {"max_line_bytes": 64},
+            "stdout exceeded its line",
+        ),
+    ],
+)
+def test_limit_error_keeps_maximal_valid_prefix_for_recovery(
+    tmp_path: Path, mode: str, options: dict[str, int], match: str
+) -> None:
+    """A complete event followed by limit-violating data in the same chunk
+    (or across chunks) stays available to best-effort recovery parsing."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        capture_raw_main_streams=True,
+        **options,
+    )
+    if mode == "session-cross-chunk-line":
+        # the helper sleeps 0.5s between writes to force separate reads
+        runner._timeout_seconds = 5
+
+    with pytest.raises(AgentExecutionError, match=match) as caught:
+        runner(_request(mode))
+
+    event = b'{"type": "text", "sessionID": "ses_prefix"}\n'
+    accepted = {
+        # byte limit: the prefix fills the exact remaining stdout budget
+        "session-single-chunk-total": event + b"x" * (128 - len(event)),
+        # line limit: bytes before the first byte that would push the line
+        # over the limit; the stored line ends exactly at the limit
+        "session-single-chunk-line": event + b"x" * 64,
+        "session-cross-chunk-line": event + b"a" * 40 + b"b" * 24,
+    }[mode]
+    # the recovery parse reads exactly the accepted prefix from the error
+    assert caught.value.partial_stdout == accepted
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    # the original limit error is untouched and finalizes the run
+    assert manifest.final_status == "failed"
+    assert manifest.validation.status == "pending"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    assert manifest.runner_error.error_message == str(caught.value)
+    # the complete event inside the accepted prefix recovered the session
+    assert manifest.session_parsed is True
+    assert manifest.session_parse_mode == "best-effort"
+    assert manifest.session_id == "ses_prefix"
+    # capture is explicitly truncated with the original bounded reason
+    agent = _agent_process(manifest)
+    assert agent.capture == "streams"
+    assert agent.capture_complete is False
+    assert agent.capture_error_type == "AgentExecutionError"
+    assert agent.capture_error_message == str(caught.value)
+    # the persisted stream is byte-identical to the accepted prefix
+    stdout = (run_dir / agent.stdout.filename).read_bytes()
+    assert stdout == accepted
+    assert agent.stdout.size_bytes == len(accepted)
+    assert agent.stdout.sha256 == hashlib.sha256(accepted).hexdigest()
+    assert agent.stderr is not None and agent.stderr.size_bytes == 0
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_bounded_bytes_carries_line_accounting_across_chunks() -> None:
+    """Partial lines continue into the next chunk and reset at newlines."""
+    collector = runner_module._BoundedBytes(
+        "stdout", maximum=1024, maximum_line=64, data=bytearray()
+    )
+    # chunk 1 ends mid-line; its 40 bytes carry into the next chunk
+    assert collector.add(b"a" * 40) == b"a" * 40
+    assert collector.current_line == 40
+    # chunk 2 pushes the carried line over the limit: keep bytes before the
+    # first violating byte, never an over-limit stored line
+    with pytest.raises(AgentExecutionError, match="line limit") as caught:
+        collector.add(b"b" * 40)
+    assert caught.value.accepted_prefix == b"b" * 24
+    assert bytes(collector.data) == b"a" * 40 + b"b" * 24
+    assert collector.current_line == 64
+    assert len(collector.data) == 64
+
+
+def test_bounded_bytes_line_resets_on_newline_across_chunks() -> None:
+    collector = runner_module._BoundedBytes(
+        "stdout", maximum=1024, maximum_line=64, data=bytearray()
+    )
+    # a newline closes the carried partial line and starts a fresh one
+    assert collector.add(b"a" * 40 + b"\nb") == b"a" * 40 + b"\nb"
+    assert collector.current_line == 1
+    # chunk 3 pushes the fresh line over the limit after exactly 63 bytes
+    with pytest.raises(AgentExecutionError, match="line limit") as caught:
+        collector.add(b"x" * 70)
+    assert caught.value.accepted_prefix == b"x" * 63
+    assert bytes(collector.data) == b"a" * 40 + b"\nb" + b"x" * 63
+    assert collector.current_line == 64
+
+
+def test_bounded_bytes_rejects_chunk_starting_over_limit_line() -> None:
+    collector = runner_module._BoundedBytes(
+        "stdout", maximum=1024, maximum_line=64, data=bytearray()
+    )
+    # a partial line exactly at the limit is still accepted
+    assert collector.add(b"a" * 64) == b"a" * 64
+    assert collector.current_line == 64
+    # the first byte of the next chunk is the first violating byte
+    with pytest.raises(AgentExecutionError, match="line limit") as caught:
+        collector.add(b"b")
+    assert caught.value.accepted_prefix == b""
+    assert bytes(collector.data) == b"a" * 64
+    assert collector.current_line == 64
+
+
+def test_bounded_bytes_total_budget_accepts_exact_remaining_bytes() -> None:
+    collector = runner_module._BoundedBytes(
+        "stdout", maximum=128, maximum_line=1024, data=bytearray()
+    )
+    assert collector.add(b"a" * 50) == b"a" * 50
+    with pytest.raises(AgentExecutionError, match="byte limit") as caught:
+        collector.add(b"b" * 100)
+    assert caught.value.accepted_prefix == b"b" * 78
+    assert bytes(collector.data) == b"a" * 50 + b"b" * 78
+    assert len(collector.data) == 128
+    # once the budget is exhausted the next chunk accepts nothing
+    with pytest.raises(AgentExecutionError, match="byte limit") as caught:
+        collector.add(b"c")
+    assert caught.value.accepted_prefix == b""
+    assert bytes(collector.data) == b"a" * 50 + b"b" * 78
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_session"),
+    [
+        ("session-bad-tail", "ses_interrupted"),
+        ("session-malformed-then-valid", "ses_interrupted"),
+        ("session-invalid-then-valid", "ses_interrupted"),
+        ("session-conflict", None),
+    ],
+)
+def test_interrupted_capture_best_effort_session_recovery(
+    tmp_path: Path, mode: str, expected_session: str | None
+) -> None:
+    """Recovery parsing ignores fragments and malformed lines; never conflicts."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        capture_raw_main_streams=True,
+    )
+    runner._timeout_seconds = 0.1
+
+    with pytest.raises(AgentExecutionError, match="timed out"):
+        runner(_request(mode))
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.session_parsed is True
+    assert manifest.session_parse_mode == "best-effort"
+    assert manifest.session_id == expected_session
+    agent = _agent_process(manifest)
+    assert agent.capture_complete is False
+    assert agent.capture_error_type == "AgentExecutionError"
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_interrupted_run_without_stream_capture_is_readable(tmp_path: Path) -> None:
+    """Safe default: an interrupted run keeps best-effort session, no streams."""
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+    runner._timeout_seconds = 0.1
+
+    with pytest.raises(AgentExecutionError, match="timed out"):
+        runner(_request("session-timeout"))
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    assert sorted(path.name for path in run_dir.iterdir()) == ["manifest.json"]
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    assert manifest.session_parsed is True
+    assert manifest.session_parse_mode == "best-effort"
+    assert manifest.session_id == "ses_interrupted"
+    agent = _agent_process(manifest)
+    assert agent.capture == "disabled"
+    assert agent.stdout is None and agent.stderr is None
+    assert agent.capture_complete is None
+    assert agent.capture_error_type is None
+    assert agent.result == "error"
+    assert agent.ended_at_utc is not None
     assert list((tmp_path / "isolated").iterdir()) == []
 
 
@@ -746,3 +1095,310 @@ def test_temp_parent_symlink_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(AgentRunnerError, match="temp root"):
         runner(_request())
+
+
+def _assert_process_reaped(pid: int) -> None:
+    """Poll /proc until the pid is gone or a zombie, then return."""
+    stat_path = Path(f"/proc/{pid}/stat")
+    for _ in range(200):
+        if not stat_path.exists():
+            return
+        fields = stat_path.read_text(encoding="utf-8").split()
+        if len(fields) > 2 and fields[2] == "Z":
+            return
+        time.sleep(0.01)
+    pytest.fail(f"process {pid} remained alive after process-group termination")
+
+
+def _fail_process_pid_for(captured: dict[str, int], target_label: str) -> Any:
+    """Return a process_pid that records and fails for one label only."""
+    real_process_pid = journal_module.AgentRunJournal.process_pid
+
+    def failing_process_pid(self: Any, label: str, pid: int) -> None:
+        if label != target_label:
+            real_process_pid(self, label, pid)
+            return
+        captured["pid"] = pid
+        raise AgentRunJournalError("injected journal failure")
+
+    return failing_process_pid
+
+
+def test_recorder_failure_after_agent_popen_terminates_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A journal failure right after the agent Popen must not orphan it."""
+    captured: dict[str, int] = {}
+    monkeypatch.setattr(
+        journal_module.AgentRunJournal,
+        "process_pid",
+        _fail_process_pid_for(captured, "agent"),
+    )
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+
+    with pytest.raises(AgentRunJournalError, match="injected journal failure"):
+        runner(_request("timeout"))
+
+    assert "pid" in captured
+    _assert_process_reaped(captured["pid"])
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_recorder_failure_after_probe_popen_terminates_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A journal failure right after the probe Popen must not orphan it."""
+    monkeypatch.setenv("EPUBFORGE_TEST_DEBUG_MODE", "timeout")
+    captured: dict[str, int] = {}
+    monkeypatch.setattr(
+        journal_module.AgentRunJournal,
+        "process_pid",
+        _fail_process_pid_for(captured, "config-probe"),
+    )
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+
+    with pytest.raises(AgentRunJournalError, match="injected journal failure"):
+        runner(_request())
+
+    assert "pid" in captured
+    _assert_process_reaped(captured["pid"])
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_popen_failure_records_error_without_claiming_a_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed Popen records an error and never claims a process PID."""
+
+    def failing_popen(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("cannot execute opencode")
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", failing_popen)
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+
+    with pytest.raises(AgentExecutionError, match="cannot start"):
+        runner(_request())
+
+    run_dirs = sorted((tmp_path / "agent-runs").glob("*"))
+    assert len(run_dirs) == 1
+    manifest = read_agent_run_manifest(run_dirs[0] / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    (probe,) = manifest.processes
+    assert probe.label == "config-probe"
+    assert probe.result == "error"
+    assert probe.pid is None
+    assert probe.returncode is None
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def _exited_process() -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "raise SystemExit(9)"],
+        start_new_session=True,
+    )
+    process.wait()
+    return process
+
+
+def test_terminate_process_group_raises_when_group_cannot_be_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reap failure must raise, never warn and return."""
+    process = _exited_process()
+    monkeypatch.setattr(runner_module, "_signal_process_group", lambda *a, **k: True)
+    monkeypatch.setattr(runner_module, "_process_group_exists", lambda *a, **k: True)
+
+    with pytest.raises(AgentExecutionError, match="cannot guarantee") as caught:
+        runner_module._terminate_process_group(process, grace_seconds=0.01)
+
+    assert "leader_reaped=True" in str(caught.value)
+    assert "group_remaining=True" in str(caught.value)
+
+
+def test_terminate_process_group_returns_when_leader_reaped_and_group_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _exited_process()
+    monkeypatch.setattr(runner_module, "_signal_process_group", lambda *a, **k: False)
+    monkeypatch.setattr(runner_module, "_process_group_exists", lambda *a, **k: False)
+
+    runner_module._terminate_process_group(process, grace_seconds=0.01)
+
+
+def test_termination_failure_raises_cleanup_error_and_retains_accessible_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group that cannot be cleared keeps every directory the process can reach."""
+    captured: dict[str, int] = {}
+    monkeypatch.setattr(
+        journal_module.AgentRunJournal,
+        "process_pid",
+        _fail_process_pid_for(captured, "agent"),
+    )
+    # Pretend signals are delivered but the group never clears: termination
+    # cannot be guaranteed, so the workspace and config home must stay for
+    # manual cleanup instead of being deleted under a possibly-live process.
+    monkeypatch.setattr(runner_module, "_signal_process_group", lambda *a, **k: True)
+    monkeypatch.setattr(runner_module, "_process_group_exists", lambda *a, **k: True)
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+
+    with pytest.raises(AgentCleanupError, match="cannot guarantee cleanup") as caught:
+        runner(_request("inspect"))
+
+    assert isinstance(caught.value.__cause__, AgentRunJournalError)
+    assert "pid" in captured
+    retained = sorted(path.name for path in (tmp_path / "isolated").iterdir())
+    assert any(name.startswith("epubforge-agent-") for name in retained)
+    assert any(name.startswith("epubforge-opencode-config-") for name in retained)
+    # the successfully completed probe directory was still removed
+    assert not any(name.startswith("epubforge-opencode-probe-") for name in retained)
+
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "failed"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentCleanupError"
+    # the possibly-live agent was never recorded as finished; the failed
+    # process_pid journal call also never persisted the pid
+    agent = _agent_process(manifest)
+    assert agent.result == "not_run"
+    assert agent.pid is None
+    assert agent.ended_at_utc is None
+
+
+def test_successful_termination_preserves_original_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean termination re-raises the original timeout untouched."""
+    runner = _runner(tmp_path)
+    runner._timeout_seconds = 0.1
+    terminated: list[int] = []
+    real_terminate = runner_module._terminate_process_group
+
+    def recording_terminate(process: Any, grace_seconds: float) -> None:
+        terminated.append(process.pid)
+        real_terminate(process, grace_seconds)
+
+    monkeypatch.setattr(runner_module, "_terminate_process_group", recording_terminate)
+
+    with pytest.raises(AgentExecutionError, match=r"timed out after 0\.1s") as caught:
+        runner(_request("timeout"))
+
+    assert terminated
+    assert caught.value.returncode is None
+    assert not isinstance(caught.value, AgentCleanupError)
+    assert getattr(caught.value, "__notes__", None) is None
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_cleanup_failure_adds_note_and_preserves_primary_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace removal failure never replaces the active timeout."""
+    runner = _runner(tmp_path)
+    runner._timeout_seconds = 0.1
+    real_remove = runner_module._remove_workspace
+
+    def failing_remove(path: Any) -> None:
+        if Path(path).name.startswith("epubforge-agent-"):
+            raise OSError("injected removal failure")
+        real_remove(path)
+
+    monkeypatch.setattr(runner_module, "_remove_workspace", failing_remove)
+
+    with pytest.raises(AgentExecutionError, match="timed out") as caught:
+        runner(_request("timeout"))
+
+    assert caught.value.returncode is None
+    assert not isinstance(caught.value, AgentCleanupError)
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("cannot remove isolated agent workspace" in note for note in notes)
+
+
+def test_standalone_cleanup_failure_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an active run error the workspace removal failure raises."""
+    runner = _runner(tmp_path)
+    real_remove = runner_module._remove_workspace
+
+    def failing_remove(path: Any) -> None:
+        if Path(path).name.startswith("epubforge-agent-"):
+            raise OSError("injected removal failure")
+        real_remove(path)
+
+    monkeypatch.setattr(runner_module, "_remove_workspace", failing_remove)
+
+    with pytest.raises(
+        AgentRunnerError, match="cannot remove isolated agent workspace"
+    ):
+        runner(_request())
+
+
+def test_success_path_cleanup_failure_marks_run_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup failure on the otherwise-successful path fails the run.
+
+    The workspace removal is the sole failure, so the journal must finalize
+    the run as failed before the cleanup error propagates: no started
+    manifest and no open run/root descriptors may survive.
+    """
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+    real_remove = runner_module._remove_workspace
+
+    def failing_remove(path: Any) -> None:
+        if Path(path).name.startswith("epubforge-agent-"):
+            raise OSError("injected removal failure")
+        real_remove(path)
+
+    monkeypatch.setattr(runner_module, "_remove_workspace", failing_remove)
+
+    with pytest.raises(
+        AgentRunnerError, match="cannot remove isolated agent workspace"
+    ):
+        runner(_request())
+
+    # the run was finalized failed with the cleanup error, never left started
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.validation.status == "pending"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentRunnerError"
+    assert manifest.finalization is not None
+    assert manifest.finalization.status == "completed"
+    assert manifest.finalization.target_status == "failed"
+    # a completed finalization released every descriptor; the run directory
+    # holds only the manifest and no crash-left temporary files
+    assert sorted(path.name for path in run_dir.iterdir()) == ["manifest.json"]
+    # the workspace could not be removed and stays for manual cleanup
+    assert any(
+        path.name.startswith("epubforge-agent-")
+        for path in (tmp_path / "isolated").iterdir()
+    )
+    assert not any(
+        path.name.startswith("epubforge-opencode-config-")
+        or path.name.startswith("epubforge-opencode-probe-")
+        for path in (tmp_path / "isolated").iterdir()
+    )
+
+
+def test_main_timeout_reaches_main_agent_while_probe_succeeds(tmp_path: Path) -> None:
+    """A tiny task timeout never shortens the independent config probe window."""
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+    runner._timeout_seconds = 0.01
+
+    with pytest.raises(AgentExecutionError, match=r"timed out after 0\.01s"):
+        runner(_request("timeout"))
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    (probe,) = [p for p in manifest.processes if p.label == "config-probe"]
+    assert probe.result == "success"
+    assert probe.returncode == 0
+    assert manifest.final_status == "failed"
+    assert list((tmp_path / "isolated").iterdir()) == []
