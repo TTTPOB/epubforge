@@ -1,4 +1,4 @@
-"""Run the packaged book editor in a restricted OpenCode workspace."""
+"""Run the packaged book editor in an isolated OpenCode workspace."""
 
 from __future__ import annotations
 
@@ -18,13 +18,27 @@ import subprocess
 import tempfile
 import time
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+from pydantic import TypeAdapter
 
 
 BOOK_EDITOR_AGENT_NAME = "book-editor"
 BOOK_EDITOR_MODEL = "openai/gpt-5.6-luna"
 BOOK_EDITOR_VARIANT = "medium"
 BOOK_EDITOR_PROMPT = "Read TASK.md and complete the requested book-editing task."
+
+# "development" opens local bash inside the isolated workspace so the book
+# editor can run the local Paddle page CLI; "restricted" keeps the legacy
+# command-denied profile.
+EXECUTION_PROFILE_VALUES: tuple[Literal["development", "restricted"], ...] = (
+    "development",
+    "restricted",
+)
+_EXECUTION_PROFILE_ADAPTER: TypeAdapter[Literal["development", "restricted"]] = (
+    TypeAdapter(Literal["development", "restricted"])
+)
+DEFAULT_EXECUTION_PROFILE: Literal["development", "restricted"] = "development"
 
 DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_TERMINATE_GRACE_SECONDS = 3.0
@@ -38,7 +52,7 @@ _CONFIG_PROBE_TIMEOUT_SECONDS = 10.0
 _MAX_CONFIG_PROBE_STDOUT_BYTES = 4 * 1024 * 1024
 _MAX_CONFIG_PROBE_STDERR_BYTES = 256 * 1024
 
-_RUNNER_CONTRACT_VERSION = 1
+_RUNNER_CONTRACT_VERSION = 2
 _READ_CHUNK_BYTES = 64 * 1024
 _SESSION_KEYS = frozenset({"sessionID", "sessionId", "session_id"})
 _OPENCODE_PROVIDER_CONFIG_ENV_KEYS = frozenset(
@@ -62,7 +76,10 @@ _OPENCODE_CONTROLLED_ENV_KEYS = frozenset(
 )
 _log = logging.getLogger(__name__)
 
-_PERMISSIONS: dict[str, str] = {
+# The packaged book-editor frontmatter declares this baseline.  Profiles only
+# widen it (development additionally allows bash); the baseline stays the
+# locked-down legacy contract.
+_RESTRICTED_PERMISSIONS: dict[str, str] = {
     "*": "deny",
     "read": "allow",
     "list": "allow",
@@ -80,11 +97,27 @@ _PERMISSIONS: dict[str, str] = {
     "todowrite": "deny",
 }
 
+_DEVELOPMENT_PERMISSIONS: dict[str, str] = {
+    **_RESTRICTED_PERMISSIONS,
+    # Local commands inside the isolated workspace, e.g. the Paddle page CLI.
+    "bash": "allow",
+}
 
-def _controlled_opencode_environment() -> dict[str, str]:
+
+def _permissions_for(execution_profile: str) -> dict[str, str]:
+    if execution_profile == "development":
+        return dict(_DEVELOPMENT_PERMISSIONS)
+    if execution_profile == "restricted":
+        return dict(_RESTRICTED_PERMISSIONS)
+    raise ValueError(f"unsupported execution profile: {execution_profile!r}")
+
+
+def _controlled_opencode_environment(
+    permissions: Mapping[str, str],
+) -> dict[str, str]:
     return {
         "OPENCODE_PERMISSION": json.dumps(
-            _PERMISSIONS, ensure_ascii=True, separators=(",", ":")
+            permissions, ensure_ascii=True, separators=(",", ":")
         ),
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
         "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
@@ -94,16 +127,20 @@ def _controlled_opencode_environment() -> dict[str, str]:
     }
 
 
-def _agent_environment(inherited: Mapping[str, str]) -> dict[str, str]:
+def _agent_environment(
+    inherited: Mapping[str, str], permissions: Mapping[str, str]
+) -> dict[str, str]:
     environment = dict(inherited)
     for key in _OPENCODE_CONTROLLED_ENV_KEYS:
         environment.pop(key, None)
-    environment.update(_controlled_opencode_environment())
+    environment.update(_controlled_opencode_environment(permissions))
     return environment
 
 
-def _provider_probe_environment(inherited: Mapping[str, str]) -> dict[str, str]:
-    environment = _agent_environment(inherited)
+def _provider_probe_environment(
+    inherited: Mapping[str, str], permissions: Mapping[str, str]
+) -> dict[str, str]:
+    environment = _agent_environment(inherited, permissions)
     for key in _OPENCODE_PROVIDER_CONFIG_ENV_KEYS:
         value = inherited.get(key)
         if value is not None:
@@ -188,7 +225,6 @@ class _AgentDefinition:
     description: str
     prompt: str
     markdown_sha256: str
-    identity: AgentIdentity
 
 
 @dataclass
@@ -238,6 +274,7 @@ class OpenCodeAgentRunner:
         max_input_bytes: int = DEFAULT_MAX_INPUT_BYTES,
         max_input_files: int = DEFAULT_MAX_INPUT_FILES,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        execution_profile: str = DEFAULT_EXECUTION_PROFILE,
         temp_root: Path | None = None,
     ) -> None:
         if timeout_seconds <= 0 or terminate_grace_seconds <= 0:
@@ -255,10 +292,13 @@ class OpenCodeAgentRunner:
         executable_text = os.fspath(executable)
         if not executable_text or "\x00" in executable_text:
             raise ValueError("OpenCode executable must be a safe non-empty path")
+        _validate_execution_profile(execution_profile)
 
         definition = _load_agent_definition()
-        self.identity = definition.identity
+        self.identity = _identity_for(definition, execution_profile)
         self._definition = definition
+        self._execution_profile = execution_profile
+        self._permissions = _permissions_for(execution_profile)
         self._executable = executable_text
         self._timeout_seconds = timeout_seconds
         self._terminate_grace_seconds = terminate_grace_seconds
@@ -447,8 +487,10 @@ class OpenCodeAgentRunner:
             request.prompt,
         ]
         inherited_environment = os.environ.copy()
-        environment = _agent_environment(inherited_environment)
-        provider_probe_environment = _provider_probe_environment(inherited_environment)
+        environment = _agent_environment(inherited_environment, self._permissions)
+        provider_probe_environment = _provider_probe_environment(
+            inherited_environment, self._permissions
+        )
         provider_config = self._resolve_provider_config(
             workspace.parent, provider_probe_environment
         )
@@ -465,7 +507,7 @@ class OpenCodeAgentRunner:
             os.chmod(config_dir, 0o700)
             config_path = config_dir / "opencode.json"
             config_data = _opencode_config_content(
-                self._definition, provider_config
+                self._definition, provider_config, self._permissions
             ).encode("utf-8")
             _write_new_file(config_path, config_data)
         except OSError as exc:
@@ -635,10 +677,51 @@ class OpenCodeAgentRunner:
         return bytes(collectors["stdout"].data), bytes(collectors["stderr"].data)
 
 
-def book_editor_identity() -> AgentIdentity:
-    """Return the packaged identity without constructing a process runner."""
+def book_editor_identity(
+    execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+) -> AgentIdentity:
+    """Return the packaged identity for one execution profile."""
+    _validate_execution_profile(execution_profile)
+    return _identity_for(_load_agent_definition(), execution_profile)
 
-    return _load_agent_definition().identity
+
+def _validate_execution_profile(execution_profile: str) -> None:
+    try:
+        _EXECUTION_PROFILE_ADAPTER.validate_python(execution_profile)
+    except Exception as exc:
+        raise ValueError(
+            f"unsupported execution profile: {execution_profile!r}"
+        ) from exc
+
+
+def _identity_for(
+    definition: _AgentDefinition, execution_profile: str
+) -> AgentIdentity:
+    permissions = _permissions_for(execution_profile)
+    prompt_sha256 = hashlib.sha256(definition.prompt.encode("utf-8")).hexdigest()
+    fingerprint_payload = {
+        "contract_version": _RUNNER_CONTRACT_VERSION,
+        "name": BOOK_EDITOR_AGENT_NAME,
+        "model": BOOK_EDITOR_MODEL,
+        "variant": BOOK_EDITOR_VARIANT,
+        "markdown_sha256": definition.markdown_sha256,
+        "execution_profile": execution_profile,
+        "permissions": permissions,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return AgentIdentity(
+        name=BOOK_EDITOR_AGENT_NAME,
+        model=BOOK_EDITOR_MODEL,
+        variant=BOOK_EDITOR_VARIANT,
+        prompt_sha256=prompt_sha256,
+        fingerprint=fingerprint,
+    )
 
 
 def _load_agent_definition() -> _AgentDefinition:
@@ -693,61 +776,41 @@ def _load_agent_definition() -> _AgentDefinition:
         or metadata["model"] != BOOK_EDITOR_MODEL
         or metadata["variant"] != BOOK_EDITOR_VARIANT
         or not metadata["description"]
-        or permissions != _PERMISSIONS
+        or permissions != _RESTRICTED_PERMISSIONS
         or not prompt.strip()
     ):
         raise AgentRunnerError("packaged book-editor identity is invalid")
 
-    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     markdown_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-    fingerprint_payload = {
-        "contract_version": _RUNNER_CONTRACT_VERSION,
-        "name": BOOK_EDITOR_AGENT_NAME,
-        "model": BOOK_EDITOR_MODEL,
-        "variant": BOOK_EDITOR_VARIANT,
-        "markdown_sha256": markdown_sha256,
-        "permissions": _PERMISSIONS,
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            fingerprint_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    identity = AgentIdentity(
-        name=BOOK_EDITOR_AGENT_NAME,
-        model=BOOK_EDITOR_MODEL,
-        variant=BOOK_EDITOR_VARIANT,
-        prompt_sha256=prompt_sha256,
-        fingerprint=fingerprint,
-    )
     return _AgentDefinition(
         description=metadata["description"],
         prompt=prompt,
         markdown_sha256=markdown_sha256,
-        identity=identity,
     )
 
 
 def _opencode_config_content(
     definition: _AgentDefinition,
     provider_config: Mapping[str, Any] | None = None,
+    permissions: Mapping[str, str] | None = None,
 ) -> str:
+    effective_permissions = dict(
+        permissions if permissions is not None else _RESTRICTED_PERMISSIONS
+    )
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "share": "disabled",
-        "permission": dict(_PERMISSIONS),
+        "permission": dict(effective_permissions),
         "mcp": {},
         "plugin": [],
         "agent": {
-            definition.identity.name: {
+            BOOK_EDITOR_AGENT_NAME: {
                 "description": definition.description,
                 "mode": "primary",
-                "model": definition.identity.model,
-                "variant": definition.identity.variant,
+                "model": BOOK_EDITOR_MODEL,
+                "variant": BOOK_EDITOR_VARIANT,
                 "prompt": definition.prompt,
-                "permission": dict(_PERMISSIONS),
+                "permission": dict(effective_permissions),
             }
         },
     }
@@ -1117,7 +1180,10 @@ __all__ = [
     "BOOK_EDITOR_MODEL",
     "BOOK_EDITOR_PROMPT",
     "BOOK_EDITOR_VARIANT",
+    "DEFAULT_EXECUTION_PROFILE",
     "DEFAULT_MAX_OUTPUT_BYTES",
+    "EXECUTION_PROFILE_VALUES",
     "OpenCodeAgentRunner",
     "book_editor_identity",
+    "_permissions_for",
 ]

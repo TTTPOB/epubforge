@@ -40,6 +40,10 @@ class RuntimeSettings(BaseModel):
     concurrency: int = 4
     work_dir: Path = Path("work")
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
+    # "development" opens local bash inside the isolated agent workspace so the
+    # book editor can run the local Paddle page CLI; "restricted" keeps the
+    # legacy command-denied profile.
+    execution_profile: Literal["development", "restricted"] = "development"
 
 
 class ChaptersSettings(BaseModel):
@@ -113,6 +117,12 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_RUNTIME_CONCURRENCY", "runtime", "concurrency", int),
     ("EPUBFORGE_RUNTIME_WORK_DIR", "runtime", "work_dir", Path),
     ("EPUBFORGE_RUNTIME_LOG_LEVEL", "runtime", "log_level", str),
+    (
+        "EPUBFORGE_RUNTIME_EXECUTION_PROFILE",
+        "runtime",
+        "execution_profile",
+        str,
+    ),
     ("EPUBFORGE_CHAPTERS_RENDER_DPI", "chapters", "render_dpi", int),
     ("EPUBFORGE_CHAPTERS_JPEG_QUALITY", "chapters", "jpeg_quality", int),
 ]

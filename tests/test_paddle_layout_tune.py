@@ -1475,3 +1475,88 @@ def test_annotated_jpeg_contains_visible_bbox_and_label_pixels(tmp_path: Path) -
                 dark_pixels += 1
     assert red_pixels > 20
     assert dark_pixels > 3
+
+
+def test_execute_reuse_raw_rejects_dpi_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "one-page.pdf"
+    pdf = fitz.open()
+    pdf.new_page(width=100, height=120)
+    pdf.save(pdf_path)
+    pdf.close()
+
+    output = tmp_path / "run"
+    page_dir = output / "page-0001"
+    args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(pdf_path),
+            "--pages",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+    inference_params = tune._inference_params(args, tune._file_sha256(pdf_path))
+    _write_reuse_artifacts(page_dir, inference_params)
+
+    def fail_load_models(_args, _source_path, _page_number):
+        raise AssertionError("reuse path loaded Paddle models")
+
+    monkeypatch.setattr(tune, "load_models", fail_load_models)
+    reuse_args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(pdf_path),
+            "--pages",
+            "1",
+            "--output",
+            str(output),
+            "--reuse-raw",
+            "--dpi",
+            "200",
+        ]
+    )
+    with pytest.raises(tune.TuneError, match="raw parameters do not match.*dpi"):
+        tune.execute(reuse_args)
+
+
+def test_execute_reuse_raw_rejects_jpeg_quality_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "one-page.pdf"
+    pdf = fitz.open()
+    pdf.new_page(width=100, height=120)
+    pdf.save(pdf_path)
+    pdf.close()
+
+    output = tmp_path / "run"
+    page_dir = output / "page-0001"
+    args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(pdf_path),
+            "--pages",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+    inference_params = tune._inference_params(args, tune._file_sha256(pdf_path))
+    _write_reuse_artifacts(page_dir, inference_params)
+    reuse_args = tune.build_parser().parse_args(
+        [
+            "--pdf",
+            str(pdf_path),
+            "--pages",
+            "1",
+            "--output",
+            str(output),
+            "--reuse-raw",
+            "--jpeg-quality",
+            "60",
+        ]
+    )
+    with pytest.raises(tune.TuneError, match="raw parameters do not match.*jpeg_quality"):
+        tune.execute(reuse_args)

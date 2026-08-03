@@ -214,6 +214,8 @@ def test_builds_ranges_html_assets_and_annotated_pages(tmp_path: Path) -> None:
     assert first["pages"] == ["pages/page-0000.jpg"]
     assert second["pages"] == ["pages/page-0001.jpg"]
     assert last["pages"] == ["pages/page-0002.jpg"]
+    assert second["annotated_pages"] == ["pages/page-0001.annotated.jpg"]
+    assert second["page_metadata"] == ["pages/page-0001.meta.json"]
     assert second["assets"] == ["assets/abc-cover.png"]
 
     seed = (output / "chapters/0002/chapter.html").read_text(encoding="utf-8")
@@ -234,6 +236,22 @@ def test_builds_ranges_html_assets_and_annotated_pages(tmp_path: Path) -> None:
     assert (
         output / "chapters/0002/assets/abc-cover.png"
     ).read_bytes() == b"synthetic image"
+
+    meta = json.loads((output / "chapters/0002/pages/page-0001.meta.json").read_text())
+    assert meta["schema"] == "epubforge.chapter-page-geometry"
+    assert meta["schema_version"] == 1
+    assert meta["page_idx"] == 1
+    assert meta["canonical"] == {"width": 100.0, "height": 120.0}
+    assert meta["raster"] == {
+        "width": image.width,
+        "height": image.height,
+    }
+    assert meta["conversion"]["scale_x"] == pytest.approx(image.width / 100.0)
+    assert meta["conversion"]["scale_y"] == pytest.approx(image.height / 120.0)
+    annotated = pymupdf.Pixmap(
+        str(output / "chapters/0002/pages/page-0001.annotated.jpg")
+    )
+    assert (annotated.width, annotated.height) == (image.width, image.height)
 
 
 def test_fresh_skip_and_force_rebuild(
@@ -580,6 +598,16 @@ def test_shared_page_boundary_renders_one_full_page_for_both_chapters(
     second = json.loads((output / "chapters/0002/chapter.json").read_text())
     assert first["pages"] == ["pages/page-0000.jpg", "pages/page-0001.jpg"]
     assert second["pages"] == ["pages/page-0001.jpg"]
+    assert first["annotated_pages"] == [
+        "pages/page-0000.annotated.jpg",
+        "pages/page-0001.annotated.jpg",
+    ]
+    assert first["page_metadata"] == [
+        "pages/page-0000.meta.json",
+        "pages/page-0001.meta.json",
+    ]
+    assert second["annotated_pages"] == ["pages/page-0001.annotated.jpg"]
+    assert second["page_metadata"] == ["pages/page-0001.meta.json"]
 
 
 def test_successful_workspace_publish_survives_backup_cleanup_failure(
@@ -632,8 +660,10 @@ def test_rotated_cropbox_page_uses_displayed_pixmap_and_layout_geometry(
     chapters_path.write_text(json.dumps(plan), encoding="utf-8")
 
     output = build_chapter_workspace(work)
-    pixmap = pymupdf.Pixmap(str(output / "chapters/0001/pages/page-0000.jpg"))
+    pixmap = pymupdf.Pixmap(str(output / "chapters/0001/pages/page-0000.annotated.jpg"))
     assert pixmap.width / pixmap.height == pytest.approx(90 / 80, rel=0.03)
+    clean = pymupdf.Pixmap(str(output / "chapters/0001/pages/page-0000.jpg"))
+    assert (clean.width, clean.height) == (pixmap.width, pixmap.height)
     scale = 150 / 72
     expected = {
         "left": round(10 * scale),

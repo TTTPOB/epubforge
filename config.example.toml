@@ -21,9 +21,10 @@ enable_table          = true
 language              = "ch"  # ch | en | korean | japan
 
 [runtime]
-concurrency = 4
-work_dir    = "work"
-log_level   = "INFO"   # DEBUG | INFO | WARNING
+concurrency         = 4
+work_dir            = "work"
+log_level           = "INFO"   # DEBUG | INFO | WARNING
+execution_profile   = "development"  # development (local bash for the Paddle page CLI) | restricted (legacy command-denied profile)
 
 [chapters]
 render_dpi   = 150  # chapter page JPEG rendering DPI; valid range 72-300

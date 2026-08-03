@@ -44,6 +44,8 @@ from epubforge.page_geometry import (
 
 WORKSPACE_SCHEMA = "epubforge.chapter-workspace"
 WORKSPACE_SCHEMA_VERSION = 1
+PAGE_GEOMETRY_SCHEMA = "epubforge.chapter-page-geometry"
+PAGE_GEOMETRY_SCHEMA_VERSION = 1
 DEFAULT_RENDER_DPI = 150
 DEFAULT_JPEG_QUALITY = 92
 MIN_RENDER_DPI = 72
@@ -986,7 +988,7 @@ def _build_staging_output(
                 raise ChapterWorkspaceError(
                     "source PDF changed while building workspace"
                 )
-            page_files: dict[int, Path] = {}
+            page_files: dict[int, tuple[Path, Path, Path]] = {}
             page_indices = sorted(
                 {page_idx for chapter in ranges for page_idx in chapter.page_indices}
             )
@@ -997,23 +999,43 @@ def _build_staging_output(
                     dpi=dpi,
                     max_render_pixels=max_render_pixels_per_page,
                 )
+                page_geometry = content.page_geometry[page_idx]
                 page_boxes = _chapter_page_boxes(
                     content.items,
                     page_idx,
-                    content.page_geometry[page_idx],
+                    page_geometry,
                     pixel_width=pixel_width,
                     pixel_height=pixel_height,
                 )
-                page_path = rendered_pages / f"page-{page_idx:04d}.jpg"
+                clean_path = rendered_pages / f"page-{page_idx:04d}.jpg"
+                annotated_path = rendered_pages / f"page-{page_idx:04d}.annotated.jpg"
+                meta_path = rendered_pages / f"page-{page_idx:04d}.meta.json"
+                _write_clean_jpeg(
+                    clean_path,
+                    png,
+                    pixel_width=pixel_width,
+                    pixel_height=pixel_height,
+                    quality=quality,
+                )
                 _write_annotated_jpeg(
-                    page_path,
+                    annotated_path,
                     png,
                     pixel_width=pixel_width,
                     pixel_height=pixel_height,
                     boxes=page_boxes,
                     quality=quality,
                 )
-                page_files[page_idx] = page_path
+                meta_path.write_text(
+                    _page_geometry_metadata(
+                        page_idx,
+                        page_geometry,
+                        pixel_width=pixel_width,
+                        pixel_height=pixel_height,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                page_files[page_idx] = (clean_path, annotated_path, meta_path)
 
             for chapter, (sanitized_tables, asset_refs) in zip(
                 ranges, prepared, strict=True
@@ -1035,13 +1057,25 @@ def _build_staging_output(
                 chapter_html_path = chapter_dir / "chapter.html"
                 chapter_html_path.write_text(chapter_html, encoding="utf-8")
                 page_names: list[str] = []
+                annotated_page_names: list[str] = []
+                page_metadata_names: list[str] = []
                 for page_idx in chapter.page_indices:
+                    clean_page, annotated_page, page_meta = page_files[page_idx]
                     page_name = f"pages/page-{page_idx:04d}.jpg"
+                    annotated_name = f"pages/page-{page_idx:04d}.annotated.jpg"
+                    metadata_name = f"pages/page-{page_idx:04d}.meta.json"
                     _link_or_copy_page(
-                        page_files[page_idx],
-                        chapter_dir / PurePosixPath(page_name),
+                        clean_page, chapter_dir / PurePosixPath(page_name)
+                    )
+                    _link_or_copy_page(
+                        annotated_page, chapter_dir / PurePosixPath(annotated_name)
+                    )
+                    _link_or_copy_page(
+                        page_meta, chapter_dir / PurePosixPath(metadata_name)
                     )
                     page_names.append(page_name)
+                    annotated_page_names.append(annotated_name)
+                    page_metadata_names.append(metadata_name)
                 chapter_manifest = {
                     "schema": WORKSPACE_SCHEMA,
                     "schema_version": WORKSPACE_SCHEMA_VERSION,
@@ -1059,6 +1093,8 @@ def _build_staging_output(
                     "end_page_idx": chapter.end_page_idx,
                     "chapter_html_sha256": _sha256_file(chapter_html_path),
                     "pages": page_names,
+                    "annotated_pages": annotated_page_names,
+                    "page_metadata": page_metadata_names,
                     "assets": [
                         f"assets/{PurePosixPath(relative).name}"
                         for relative in sorted(asset_refs)
@@ -1449,6 +1485,111 @@ def _render_base_page(
         ) from exc
 
 
+def _jpeg_bytes_from_png(
+    png: bytes,
+    *,
+    pixel_width: int,
+    pixel_height: int,
+    quality: int,
+) -> bytes:
+    try:
+        with pymupdf.open() as document:
+            page = document.new_page(width=pixel_width, height=pixel_height)
+            page.insert_image(page.rect, stream=png)
+            rendered = page.get_pixmap(alpha=False)
+            return rendered.tobytes("jpeg", jpg_quality=quality)
+    except ChapterWorkspaceError:
+        raise
+    except Exception as exc:
+        raise ChapterWorkspaceError(
+            f"cannot encode rendered page JPEG at {pixel_width}x{pixel_height}"
+        ) from exc
+
+
+def _write_clean_jpeg(
+    output: Path,
+    png: bytes,
+    *,
+    pixel_width: int,
+    pixel_height: int,
+    quality: int,
+) -> None:
+    """Write the unannotated page image the Paddle page CLI consumes."""
+    try:
+        output.write_bytes(
+            _jpeg_bytes_from_png(
+                png,
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                quality=quality,
+            )
+        )
+    except ChapterWorkspaceError:
+        raise
+    except Exception as exc:
+        raise ChapterWorkspaceError(f"cannot write clean page: {output.name}") from exc
+
+
+def _page_geometry_metadata(
+    page_idx: int,
+    page_geometry: Mapping[str, Any],
+    *,
+    pixel_width: int,
+    pixel_height: int,
+) -> str:
+    geometry_width = page_geometry.get("width")
+    geometry_height = page_geometry.get("height")
+    if (
+        not isinstance(geometry_width, (int, float))
+        or isinstance(geometry_width, bool)
+        or not isinstance(geometry_height, (int, float))
+        or isinstance(geometry_height, bool)
+        or not math.isfinite(float(geometry_width))
+        or not math.isfinite(float(geometry_height))
+        or float(geometry_width) <= 0
+        or float(geometry_height) <= 0
+    ):
+        raise ChapterWorkspaceError(f"layout page geometry {page_idx} is invalid")
+    canonical_width = float(geometry_width)
+    canonical_height = float(geometry_height)
+    if pixel_width <= 0 or pixel_height <= 0:
+        raise ChapterWorkspaceError(f"rendered page {page_idx} has invalid pixels")
+    metadata = {
+        "schema": PAGE_GEOMETRY_SCHEMA,
+        "schema_version": PAGE_GEOMETRY_SCHEMA_VERSION,
+        "page_idx": page_idx,
+        "canonical": {
+            "width": canonical_width,
+            "height": canonical_height,
+        },
+        "raster": {
+            "width": pixel_width,
+            "height": pixel_height,
+        },
+        "conversion": {
+            "contract": (
+                "canonical page_geometry coordinates map to raster pixels by "
+                "multiplying each axis with raster/canonical"
+            ),
+            "scale_x": pixel_width / canonical_width,
+            "scale_y": pixel_height / canonical_height,
+            "origin": "top-left",
+            "x_axis": "right",
+            "y_axis": "down",
+            "inverse": (
+                "raster pixels map back to canonical coordinates by dividing "
+                "each axis with the same scale"
+            ),
+        },
+        "files": {
+            "clean": f"page-{page_idx:04d}.jpg",
+            "annotated": f"page-{page_idx:04d}.annotated.jpg",
+            "meta": f"page-{page_idx:04d}.meta.json",
+        },
+    }
+    return json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def _write_annotated_jpeg(
     output: Path,
     png: bytes,
@@ -1684,12 +1825,14 @@ def _validate_published_chapter(
     except ChapterWorkspaceError:
         return False
     if not isinstance(chapter, dict) or set(chapter) != {
+        "annotated_pages",
         "assets",
         "chapter_html_sha256",
         "end_content_idx",
         "end_page_idx",
         "kind",
         "ordinal",
+        "page_metadata",
         "pages",
         "schema",
         "schema_version",
@@ -1725,15 +1868,40 @@ def _validate_published_chapter(
         if not _validate_sha_value(chapter.get(name)):
             return False
     pages = chapter.get("pages")
+    annotated_pages = chapter.get("annotated_pages")
+    page_metadata = chapter.get("page_metadata")
     assets = chapter.get("assets")
-    if not isinstance(pages, list) or not isinstance(assets, list):
+    if (
+        not isinstance(pages, list)
+        or not isinstance(annotated_pages, list)
+        or not isinstance(page_metadata, list)
+        or not isinstance(assets, list)
+        or not (len(pages) == len(annotated_pages) == len(page_metadata))
+    ):
         return False
-    for relative in [*pages, *assets]:
+    for relative in [*pages, *annotated_pages, *page_metadata, *assets]:
         if not isinstance(relative, str) or not _validate_workspace_relative(
             f"{chapter_path}/{relative}"
         ):
             return False
-    expected_page_files = {f"{chapter_path}/{relative}" for relative in pages}
+    for position, (page, annotated, meta) in enumerate(
+        zip(pages, annotated_pages, page_metadata, strict=True)
+    ):
+        page_idx = chapter.get("start_page_idx")
+        if not isinstance(page_idx, int) or isinstance(page_idx, bool):
+            return False
+        page_number = page_idx + position
+        expected_page = f"pages/page-{page_number:04d}.jpg"
+        if (
+            page != expected_page
+            or annotated != f"pages/page-{page_number:04d}.annotated.jpg"
+            or meta != f"pages/page-{page_number:04d}.meta.json"
+        ):
+            return False
+    expected_page_files = {
+        f"{chapter_path}/{relative}"
+        for relative in [*pages, *annotated_pages, *page_metadata]
+    }
     expected_asset_files = {f"{chapter_path}/{relative}" for relative in assets}
     expected_html = f"{chapter_path}/chapter.html"
     return (
@@ -1765,14 +1933,23 @@ def _freshness_fingerprint(
     return _sha256_json(payload)
 
 
-def _workspace_contract_sha256() -> str:
+def workspace_contract_sha256() -> str:
+    """Return the deterministic Stage 4 workspace contract hash.
+
+    Stage 5 validates ``04_edit/manifest.json`` against this value, so the
+    function is public: revision must not copy the contract payload.
+    """
     return _sha256_json(
         {
             "schema": WORKSPACE_SCHEMA,
             "schema_version": WORKSPACE_SCHEMA_VERSION,
             "html_filename": "chapter.html",
             "asset_paths": "assets/<stable-basename>",
-            "page_names": "pages/page-NNNN.jpg",
+            "page_names": {
+                "clean": "pages/page-NNNN.jpg",
+                "annotated": "pages/page-NNNN.annotated.jpg",
+                "geometry": "pages/page-NNNN.meta.json",
+            },
             "page_geometry": {
                 "contract": PAGE_GEOMETRY_CONTRACT,
                 "coordinates": "top-left in displayed page orientation",
@@ -1782,6 +1959,14 @@ def _workspace_contract_sha256() -> str:
                 "rotation": "page.rect already includes PDF rotation; no transform",
             },
             "bbox_coordinates": "page_geometry coordinates scaled directly to rendered pixels",
+            "page_image_conversion": {
+                "schema": PAGE_GEOMETRY_SCHEMA,
+                "schema_version": PAGE_GEOMETRY_SCHEMA_VERSION,
+                "canonical": "page_geometry width and height",
+                "raster": "rendered JPEG pixel width and height",
+                "pixel_to_canonical": "divide raster pixels by raster/canonical per axis",
+                "canonical_to_pixel": "multiply canonical coordinates by raster/canonical per axis",
+            },
             "annotation_style": {
                 "stroke_width": 4.0,
                 "label_font_size": 12.0,
@@ -2088,11 +2273,17 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+_workspace_contract_sha256 = workspace_contract_sha256
+
+
 __all__ = [
     "DEFAULT_JPEG_QUALITY",
     "DEFAULT_RENDER_DPI",
+    "PAGE_GEOMETRY_SCHEMA",
+    "PAGE_GEOMETRY_SCHEMA_VERSION",
     "WORKSPACE_SCHEMA",
     "WORKSPACE_SCHEMA_VERSION",
     "ChapterWorkspaceError",
     "build_chapter_workspace",
+    "workspace_contract_sha256",
 ]

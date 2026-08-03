@@ -1161,7 +1161,11 @@ def run_normalize(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 
 
 def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
-    """Run Stage 3 with the isolated book-editor agent."""
+    """Run Stage 3 with the isolated book-editor agent.
+
+    Segmentation always uses the restricted execution profile: it only reads
+    the content projection and writes boundaries, so it never needs bash.
+    """
     from epubforge.chapter_segmentation import (
         is_chapter_segmentation_fresh,
         segment_chapters,
@@ -1171,7 +1175,7 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     content_path = _require_stage_file(work, "02_content/content.json", 3)
     output_dir = work / "03_chapters"
     with stage_timer(log, "3 segment"):
-        identity = book_editor_identity()
+        identity = book_editor_identity("restricted")
         if not force and is_chapter_segmentation_fresh(
             content_path,
             output_dir,
@@ -1180,7 +1184,7 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             log.info("skip segment — reusing fresh %s", output_dir / "chapters.json")
             return
 
-        agent_runner = OpenCodeAgentRunner()
+        agent_runner = OpenCodeAgentRunner(execution_profile="restricted")
         log.info("Stage 3: segmenting chapters with agent=%s...", identity.name)
         segment_chapters(content_path, output_dir, agent_runner, force=force)
         log.info("  -> %s", output_dir / "chapters.json")
@@ -1232,14 +1236,16 @@ def run_revise(
         )
     _require_stage_file(work, "04_edit/manifest.json", 5)
     with stage_timer(log, "5 revise"):
-        identity = book_editor_identity()
+        identity = book_editor_identity(cfg.runtime.execution_profile)
         if not force and is_chapter_revision_fresh(edit_dir, agent_identity=identity):
             log.info(
                 "skip revise — reusing fresh corrected chapter outputs in %s", edit_dir
             )
             return
 
-        agent_runner = OpenCodeAgentRunner()
+        agent_runner = OpenCodeAgentRunner(
+            execution_profile=cfg.runtime.execution_profile
+        )
         log.info(
             "Stage 5: revising chapters with agent=%s (continue_on_error=%s)...",
             identity.name,

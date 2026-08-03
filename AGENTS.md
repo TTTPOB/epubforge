@@ -2,16 +2,16 @@
 
 ## Scope
 
-epubforge converts a PDF through MinerU and a restricted OpenCode book-editor
+epubforge converts a PDF through MinerU and an isolated OpenCode book-editor
 agent into corrected chapter HTML.
 The repository contains one five-stage pipeline and ends at corrected chapter
 HTML.
 
 The book-editor agent has segmentation and revision modes selected by TASK.md.
 Segmentation receives a normalized content projection. Revision receives one
-chapter's HTML, manifest, referenced assets, and annotated page JPEGs. Agents
-must never open, render, or otherwise access the source PDF. Python owns PDF
-access and page rendering.
+chapter's HTML, manifest, referenced assets, clean and annotated page JPEGs,
+and per-page geometry contracts. Agents must never open, render, or otherwise
+access the source PDF. Python owns PDF access and page rendering.
 
 ## Five Stages
 
@@ -23,8 +23,8 @@ fresh result. Use `--force-rerun` to rebuild the selected stage.
 | 1 parse | `parse` / `run --from 1` | PDF | `source/source.pdf`, `source/source_meta.json`, `01_raw.zip` |
 | 2 normalize | `normalize` / `run --from 2` | Stage 1 archive and source PDF | `02_content/content.json`, `02_content/assets/` |
 | 3 segment | `segment` / `run --from 3` | normalized content | `03_chapters/chapters.json` |
-| 4 prepare | `prepare` / `run --from 4` | normalized content, chapter plan, source PDF | `04_edit/manifest.json`, chapter HTML, annotated page JPEGs |
-| 5 revise | `revise` / `run --from 5` | chapter workspaces | `corrected.html`, `revision.json` in each completed chapter |
+| 4 prepare | `prepare` / `run --from 4` | normalized content, chapter plan, source PDF | `04_edit/manifest.json`, chapter HTML, clean and annotated page JPEGs, per-page geometry |
+| 5 revise | `revise` / `run --from 5` | chapter workspaces | `corrected.html`, `revision.json`, applied bbox repairs in each completed chapter |
 
 `run` executes all five stages in order. `--from N` reuses earlier outputs and
 allows `--force-rerun` to affect stage N and later stages. Stage 1 accepts at
@@ -36,16 +36,30 @@ Stage 2 validates ZIP paths, JSON syntax, source-PDF identity, page count,
 page geometry, and asset hashes. Stage 3 runs the packaged OpenCode agent in an
 isolated workspace and validates every returned boundary against the content
 contract. Stage 4 writes deterministic HTML with content IDs, page IDs, bboxes,
-and annotated JPEG evidence. Stage 5 lets the same agent edit a pre-seeded
-`corrected.html`, validates the result, and publishes the corrected pair
-atomically.
+one clean JPEG and one annotated JPEG per page, and a per-page geometry
+contract with the raster/canonical conversion. Stage 5 lets the same agent
+edit a pre-seeded `corrected.html`; the agent may call the local Paddle
+page-image CLI on clean page images and writes `bbox-repairs.json` referencing
+candidate IDs only. Python converts candidates to canonical coordinates,
+applies every `data-bbox` change itself, validates the result, and publishes
+the corrected pair atomically. `revision.json` records the repair input
+hashes and every applied repair.
 
 Agent workspaces use mode 0700 system temporary directories outside the
 repository and book workspace. The runner disables project config and external
-skills. It denies shell commands, subagents, external directories, web tools,
-skills, questions, and MCP tools. It allows file reads, listing, globbing,
-grep, and edits only inside the isolated directory. Never place a PDF in an
-agent workspace.
+skills. It always denies subagents, external directories, web tools, skills,
+questions, and MCP tools, and allows file reads, listing, globbing, grep, and
+edits only inside the isolated directory.
+
+Execution profiles widen the permission baseline: `[runtime]
+execution_profile` selects `development` (default) or `restricted`. Stage 3
+segmentation always runs `restricted`, which denies shell commands. Stage 5
+revision runs the configured profile: `development` opens local bash inside
+the workspace so the agent can call `epubforge-paddle-page`, while
+`restricted` keeps bash denied. Development bash is an intentionally trusted
+mode, not an OS sandbox: the agent is expected to stay inside the workspace
+and rely on prompt constraints, and a stronger sandbox may replace it later.
+Never place a PDF in an agent workspace.
 
 ## Configuration
 
@@ -54,13 +68,14 @@ defaults and the listed environment variables. `config.example.toml` contains
 the complete section shape:
 
 - `[mineru]`: API key, endpoint, polling, archive limits, and extraction options
-- `[runtime]`: concurrency, work directory, and log level
+- `[runtime]`: concurrency, work directory, log level, and execution profile
 - `[chapters]`: page JPEG DPI and quality
 
 The epubforge credential is `EPUBFORGE_MINERU_API_KEY`. Leaf overrides include
 the documented `EPUBFORGE_MINERU_*` fields,
 `EPUBFORGE_RUNTIME_CONCURRENCY`, `EPUBFORGE_RUNTIME_WORK_DIR`,
-`EPUBFORGE_RUNTIME_LOG_LEVEL`, and the chapter rendering fields. OpenCode owns
+`EPUBFORGE_RUNTIME_LOG_LEVEL`, `EPUBFORGE_RUNTIME_EXECUTION_PROFILE`, and the
+chapter rendering fields. OpenCode owns
 model authentication and provider configuration. Logs go to
 `work/<book_name>/logs/` and stderr.
 

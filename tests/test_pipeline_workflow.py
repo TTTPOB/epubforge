@@ -105,7 +105,7 @@ def test_run_segment_constructs_runner_after_freshness_and_passes_force(
         order.append("freshness")
         return False
 
-    def make_runner() -> FakeRunner:
+    def make_runner(*args: Any, **kwargs: Any) -> FakeRunner:
         order.append("construct")
         return runner
 
@@ -121,7 +121,9 @@ def test_run_segment_constructs_runner_after_freshness_and_passes_force(
         calls.append((content_path, output_dir, force))
         return output_dir / "chapters.json"
 
-    monkeypatch.setattr(pipeline, "book_editor_identity", lambda: runner.identity)
+    monkeypatch.setattr(
+        pipeline, "book_editor_identity", lambda _profile: runner.identity
+    )
     monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", make_runner)
     monkeypatch.setattr(
         "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
@@ -190,6 +192,9 @@ def test_run_segment_force_skips_freshness_but_constructs_runner(
     class FakeRunner:
         identity = book_editor_identity()
 
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
     monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
     monkeypatch.setattr(
         "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
@@ -236,8 +241,10 @@ def test_run_revise_raises_with_report_failures_and_keeps_successes(
         calls.append({"edit_path": edit_path, **kwargs})
         return report
 
-    monkeypatch.setattr(pipeline, "book_editor_identity", lambda: runner.identity)
-    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", lambda: runner)
+    monkeypatch.setattr(
+        pipeline, "book_editor_identity", lambda _profile: runner.identity
+    )
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", lambda *args, **kwargs: runner)
     monkeypatch.setattr(
         "epubforge.chapter_revision.is_chapter_revision_fresh",
         lambda *args, **kwargs: False,
@@ -312,6 +319,9 @@ def test_run_revise_force_skips_freshness_and_needs_no_epubforge_llm_key(
 
     class FakeRunner:
         identity = book_editor_identity()
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
 
     monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
     monkeypatch.setattr(
@@ -405,8 +415,14 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
         parse_calls += 1
 
     class FakeAgentRunner:
-        identity = book_editor_identity()
         total_calls = 0
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Stage 3 runs restricted, Stage 5 uses the configured profile, so
+            # the fake must adopt the runner's profile for freshness to match.
+            self.identity = book_editor_identity(
+                kwargs.get("execution_profile", "development")
+            )
 
         def __call__(self, request: AgentRunRequest) -> AgentRunResult:
             self.__class__.total_calls += 1
@@ -476,3 +492,86 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
     assert FakeAgentRunner.total_calls == 2
     assert (chapter_dir / "corrected.html").read_bytes() == corrected_before
     assert (chapter_dir / "revision.json").read_bytes() == revision_before
+
+
+def test_run_segment_always_uses_restricted_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf = _pdf_path(tmp_path)
+    cfg = _config(tmp_path)
+    content = cfg.book_work_dir(pdf) / "02_content/content.json"
+    content.parent.mkdir(parents=True)
+    content.write_text("{}", encoding="utf-8")
+    identity_profiles: list[str] = []
+    runner_profiles: list[str] = []
+
+    class FakeRunner:
+        identity = book_editor_identity("restricted")
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            runner_profiles.append(str(kwargs.get("execution_profile")))
+
+    def fake_identity(profile: str) -> Any:
+        identity_profiles.append(profile)
+        return FakeRunner.identity
+
+    monkeypatch.setattr(pipeline, "book_editor_identity", fake_identity)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.segment_chapters",
+        lambda *args, **kwargs: None,
+    )
+
+    # cfg defaults to the development profile; segmentation must ignore it.
+    pipeline.run_segment(pdf, cfg)
+
+    assert identity_profiles == ["restricted"]
+    assert runner_profiles == ["restricted"]
+
+
+@pytest.mark.parametrize("profile", ["development", "restricted"])
+def test_run_revise_uses_configured_execution_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    pdf = _pdf_path(tmp_path)
+    cfg = Config(
+        runtime=RuntimeSettings(
+            work_dir=tmp_path / "work",
+            execution_profile=profile,  # type: ignore[arg-type]
+        )
+    )
+    edit_dir = cfg.book_work_dir(pdf) / "04_edit"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    identity_profiles: list[str] = []
+    runner_profiles: list[str] = []
+
+    class FakeRunner:
+        identity = book_editor_identity(profile)  # type: ignore[arg-type]
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            runner_profiles.append(str(kwargs.get("execution_profile")))
+
+    def fake_identity(requested: str) -> Any:
+        identity_profiles.append(requested)
+        return FakeRunner.identity
+
+    monkeypatch.setattr(pipeline, "book_editor_identity", fake_identity)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.is_chapter_revision_fresh",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.revise_all_chapters",
+        lambda *args, **kwargs: ChapterRevisionReport(),
+    )
+
+    pipeline.run_revise(pdf, cfg)
+
+    assert identity_profiles == [profile]
+    assert runner_profiles == [profile]

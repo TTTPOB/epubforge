@@ -21,8 +21,8 @@ uv run epubforge --config config.example.toml run fixtures/bmsf.pdf
 | 1 parse | `parse` | PDF | `source/source.pdf`、`source/source_meta.json`、`01_raw.zip` |
 | 2 normalize | `normalize` | `01_raw.zip`、source PDF | `02_content/content.json`、`assets/` |
 | 3 segment | `segment` | `content.json` | `03_chapters/chapters.json` |
-| 4 prepare | `prepare` | content、chapter plan、source PDF | `04_edit/manifest.json`、章节 HTML、标注页面 JPEG |
-| 5 revise | `revise` | `04_edit/` | 每章 `corrected.html`、`revision.json` |
+| 4 prepare | `prepare` | content、chapter plan、source PDF | `04_edit/manifest.json`、章节 HTML、干净与标注页面 JPEG、每页几何契约 |
+| 5 revise | `revise` | `04_edit/` | 每章 `corrected.html`、`revision.json`、已应用的 bbox 修复 |
 
 `run` 按顺序执行五个阶段：
 
@@ -55,7 +55,10 @@ work/bmsf/
         ├── chapter.html
         ├── corrected.html
         ├── revision.json
-        └── pages/page-0000.jpg
+        └── pages/
+            ├── page-0000.jpg
+            ├── page-0000.annotated.jpg
+            └── page-0000.meta.json
 ```
 
 Stage 1 直接保存 MinerU 返回的 ZIP。200 页以内保存一份原始响应；201 到 1000
@@ -73,15 +76,39 @@ Stage 3 创建隔离目录，写入 `TASK.md` 和 `content-projection.json`。�
 再原子发布 `chapters.json`。
 
 Stage 4 在程序内部读取 source PDF，生成带 content ID、page ID 和 bbox 标记的章节
-HTML，以及 `pages/page-*.jpg` 标注页面。Stage 5 只把 `chapter.html`、
-`chapter.json`、HTML 引用的 assets、按页排序的 JPEG、`TASK.md` 和预置的
-`corrected.html` 复制进隔离目录。Agent 编辑 `corrected.html`。Python 检查标签、
-content ID、bbox、asset 引用和文件哈希，再原子发布 HTML 与 revision metadata。
+HTML。每页同时产出三种文件：干净页面图 `pages/page-NNNN.jpg`、带 bbox 标注的
+`pages/page-NNNN.annotated.jpg`，以及几何契约 `pages/page-NNNN.meta.json`
+（记录 page_idx、canonical 宽高、raster 像素宽高和换算比例）。页面只渲染一次，
+两种 JPEG 与契约文件共享同一份渲染结果。
+
+Stage 5 只把 `chapter.html`、`chapter.json`、HTML 引用的 assets、按页排序的干净图、
+标注图、meta 契约、`TASK.md` 和预置的 `corrected.html` 复制进隔离目录。Agent
+编辑 `corrected.html`，并可对可疑 bbox 批量调用本地 `epubforge-paddle-page`
+CLI（只接受工作区内的干净页面图，不接触 PDF）：
+
+```bash
+epubforge-paddle-page --image pages/page-0001.jpg --page-idx 1 \
+  --image pages/page-0002.jpg --page-idx 2 \
+  --output .paddle --evidence-out paddle-evidence.json
+```
+
+CLI 输出 `evidence.json`、`candidate.json` 和证据 JPEG，缓存原始检测；
+`--reuse-raw` 可调整后处理参数后免推理重跑，`--page-patch` 可应用 agent 自己
+写的补丁。Agent 在 `bbox-repairs.json` 中只引用候选 ID，绝不手写坐标：Python
+依据 `paddle-evidence.json` 中的候选像素框和 `pages/page-NNNN.meta.json` 的换算
+契约，把候选换算成 canonical 页面坐标、应用到 `corrected.html`，并把应用结果
+（目标、操作、候选 ID、最终 bbox）记录进 `revision.json`。没有可靠候选时，agent
+保留原 bbox 值并加 `data-bbox-status="needs-repair"` 作为降级。
 
 Runner 在系统临时目录创建 mode 0700 工作区，不把仓库、book workdir 或 PDF 暴露给
-agent。它禁用项目配置和外部 skills，拒绝 shell、subagent、外部目录、web、MCP、
-skill 和 question，只允许隔离目录内的文件读取、检索与编辑。Runner 限制运行时间、
-stdout、stderr、单行和输出文件大小，失败时终止进程组并清理目录。
+agent。它禁用项目配置和外部 skills，拒绝 subagent、外部目录、web、MCP、skill 和
+question。`[runtime] execution_profile` 控制工作区内的 bash：Stage 3 segmentation
+始终使用 `restricted`（拒绝命令）；Stage 5 revision 使用配置的 profile——
+`development`（默认）在工作区内打开本地 bash，供 agent 调用
+`epubforge-paddle-page`；`restricted` 保持旧版完全拒绝命令的权限。development
+的 bash 是有意信任的模式，不是 OS 沙盒：agent 依靠提示词约束留在工作区内，未来
+可用更强的沙盒替换。Runner 限制运行时间、stdout、stderr、单行和输出文件大小，
+失败时终止进程组并清理目录。
 
 ## 配置与日志
 
@@ -94,6 +121,7 @@ language = "ch"
 [runtime]
 work_dir = "work"
 log_level = "INFO"
+execution_profile = "development"  # development（开工作区内 bash，供 Paddle CLI 使用）| restricted（旧版权限）
 
 [chapters]
 render_dpi = 150
@@ -106,10 +134,12 @@ jpeg_quality = 92
 EPUBFORGE_MINERU_API_KEY=...
 EPUBFORGE_RUNTIME_WORK_DIR=work
 EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
+EPUBFORGE_RUNTIME_EXECUTION_PROFILE=restricted
 ```
 
-epubforge 配置不接收模型 endpoint、model 或 API key。OpenCode 从自己的配置与认证
-存储中取得这些信息。
+execution_profile 参与 agent fingerprint：切换 profile 会让对应阶段判定为不新鲜并
+重跑；Stage 3 固定使用 restricted，不受此配置影响。epubforge 配置不接收模型
+endpoint、model 或 API key。OpenCode 从自己的配置与认证存储中取得这些信息。
 
 日志默认写入 `work/<name>/logs/`，同时输出到 stderr：
 

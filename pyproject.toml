@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 epubforge = "epubforge.cli:app"
+epubforge-paddle-page = "epubforge.paddle_page_cli:main"
 
 [dependency-groups]
 dev = [

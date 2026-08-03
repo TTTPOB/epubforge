@@ -31,6 +31,9 @@ RETAINED_MODULES = (
     "mineru",
     "mineru_content",
     "observability",
+    "paddle_common",
+    "paddle_contract",
+    "paddle_page_cli",
     "page_geometry",
     "pipeline",
     "strict_json",
@@ -145,6 +148,37 @@ jpeg_quality = 88
     assert not hasattr(cfg, "extract")
     assert not hasattr(cfg, "llm")
     assert not hasattr(cfg.runtime, "cache_dir")
+
+
+def test_execution_profile_defaults_to_development_and_env_overrides(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[runtime]
+execution_profile = "restricted"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    assert load_config(None).runtime.execution_profile == "development"
+    assert load_config(config_path).runtime.execution_profile == "restricted"
+
+    monkeypatch.setenv("EPUBFORGE_RUNTIME_EXECUTION_PROFILE", "development")
+    assert load_config(config_path).runtime.execution_profile == "development"
+
+    monkeypatch.delenv("EPUBFORGE_RUNTIME_EXECUTION_PROFILE")
+    invalid_path = tmp_path / "invalid.toml"
+    invalid_path.write_text(
+        """
+[runtime]
+execution_profile = "invalid"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception):
+        load_config(invalid_path)
 
 
 def test_packaged_agent_selects_luna_medium() -> None:

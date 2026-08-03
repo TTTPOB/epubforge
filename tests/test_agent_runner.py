@@ -227,7 +227,7 @@ def test_command_environment_permissions_session_and_cleanup(
         return real_popen(*args, **kwargs)
 
     monkeypatch.setattr(runner_module.subprocess, "Popen", recording_popen)
-    runner = _runner(tmp_path)
+    runner = _runner(tmp_path, execution_profile="restricted")
     temp_root = tmp_path / "isolated"
 
     result = runner(_request())
@@ -278,6 +278,59 @@ def test_command_environment_permissions_session_and_cleanup(
     assert kwargs["start_new_session"] is True
     assert kwargs["cwd"] == Path(payload["cwd"])
     assert list(temp_root.iterdir()) == []
+
+
+def test_development_profile_allows_bash_only_inside_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args: Any, **kwargs: Any):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", recording_popen)
+    runner = _runner(tmp_path, execution_profile="development")
+
+    result = runner(_request())
+    payload = json.loads(result.outputs["result.json"])
+    agent = payload["config"]["agent"]["book-editor"]
+    assert payload["permission_env"] == agent["permission"]
+    assert agent["permission"]["bash"] == "allow"
+    for permission in ("read", "list", "glob", "grep", "edit"):
+        assert agent["permission"][permission] == "allow"
+    for permission in (
+        "task",
+        "external_directory",
+        "webfetch",
+        "websearch",
+        "skill",
+        "question",
+        "lsp",
+    ):
+        assert agent["permission"][permission] == "deny"
+    assert agent["permission"]["*"] == "deny"
+
+
+def test_execution_profiles_distinguish_identity_fingerprints() -> None:
+    development = runner_module.book_editor_identity("development")
+    restricted = runner_module.book_editor_identity("restricted")
+    assert development != restricted
+    assert development.prompt_sha256 == restricted.prompt_sha256
+    assert development.fingerprint != restricted.fingerprint
+    assert runner_module.book_editor_identity() == development
+
+
+@pytest.mark.parametrize("profile", ["", "prod", "sandbox", None])
+def test_invalid_execution_profile_is_rejected(
+    tmp_path: Path, profile: str | None
+) -> None:
+    with pytest.raises(ValueError, match="execution profile"):
+        _runner(tmp_path, execution_profile=profile)
+    with pytest.raises(ValueError, match="execution profile"):
+        runner_module.book_editor_identity(profile if profile is not None else "")
 
 
 def test_private_config_probe_ignores_inherited_global_and_project_config(

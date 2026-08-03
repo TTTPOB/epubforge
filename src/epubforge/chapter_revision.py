@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import json
 from html.parser import HTMLParser
 import logging
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -27,14 +28,29 @@ from epubforge.agent_runner import (
     AgentRunnerError,
     BOOK_EDITOR_PROMPT,
 )
+from epubforge.chapter_workspace import (
+    PAGE_GEOMETRY_SCHEMA,
+    PAGE_GEOMETRY_SCHEMA_VERSION,
+    workspace_contract_sha256,
+)
+from epubforge.paddle_contract import (
+    CANDIDATE_SCHEMA_VERSION,
+    CANDIDATE_TYPES,
+    EVIDENCE_SCHEMA_VERSION,
+    LAYOUT_MODEL,
+    PAGE_CANDIDATE_COORDINATE_SPACE,
+    PAGE_EVIDENCE_COORDINATE_SPACE,
+    TEXT_MODEL,
+    stable_candidate_id,
+)
 from epubforge.strict_json import StrictJsonError, parse_json_document
 
 
 WORKSPACE_SCHEMA = "epubforge.chapter-workspace"
 WORKSPACE_SCHEMA_VERSION = 1
 REVISION_SCHEMA = "epubforge.chapter-revision"
-REVISION_SCHEMA_VERSION = 2
-REVISION_CONTRACT_VERSION = 2
+REVISION_SCHEMA_VERSION = 3
+REVISION_CONTRACT_VERSION = 3
 
 MAX_WORKSPACE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_CHAPTER_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -50,6 +66,11 @@ MAX_WORKSPACE_FILE_BYTES = 512 * 1024 * 1024
 MAX_WORKSPACE_FILES = 20_000
 MAX_WORKSPACE_DEPTH = 8
 MAX_CHAPTER_COUNT = 4096
+MAX_BBOX_REPAIRS_BYTES = 4 * 1024 * 1024
+MAX_PADDLE_EVIDENCE_BYTES = 32 * 1024 * 1024
+MAX_REPAIRS = 2048
+MAX_REPAIR_REASON_CHARS = 500
+MAX_EVIDENCE_PAGES = 512
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _SHA256_RE = re.compile(_SHA256_PATTERN)
@@ -57,8 +78,13 @@ _CONTENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 _PART_RE = re.compile(r"^([1-9][0-9]*)/([1-9][0-9]*)$")
 _PAGE_RE = re.compile(r"^pages/page-([0-9]{4,})\.jpg$")
+_ANNOTATED_PAGE_RE = re.compile(r"^pages/page-([0-9]{4,})\.annotated\.jpg$")
+_PAGE_META_RE = re.compile(r"^pages/page-([0-9]{4,})\.meta\.json$")
+_CANDIDATE_ID_RE = re.compile(r"^p[0-9]{4,}-[a-z0-9_]+-[0-9a-f]{10}$")
 _NUMBER_RE = re.compile(r"^[0-9]+$")
 _DIMENSION_RE = re.compile(r"^(?:[1-9][0-9]*)(?:\.[0-9]+)?$")
+_BBOX_REPAIRS_SCHEMA_VERSION = 1
+_PADDLE_EVIDENCE_SCHEMA_VERSION = 1
 
 _LOCK_FILENAME = ".chapter-revision.lock"
 _STAGING_PREFIX = ".revision-staging-"
@@ -148,28 +174,89 @@ REVISION_TASK_PREFIX = """# Chapter correction task
 Mode: `revision`
 
 Read `chapter.json`, `chapter.html`, referenced files under `assets/`, and the
-annotated JPEG files under `pages/` in the order listed below. Python has
-pre-seeded `corrected.html` with the complete source HTML. Edit only
-`corrected.html`; keep it as one complete HTML document.
+page evidence under `pages/` in the order listed below. Python has pre-seeded
+`corrected.html` with the complete source HTML. Edit only `corrected.html`;
+keep it as one complete HTML document.
 
 Correct headings and section boundaries, semantic block tags, reading order,
-OCR text, repeated headers or footers, page numbers, tables, figures, captions,
-footnotes, and paragraphs that continue across pages when the supplied evidence
-supports the change.
+OCR text, repeated headers or footers, page numbers, tables, figures,
+captions, footnotes, and paragraphs that continue across pages when the
+supplied evidence supports the change.
 
-Keep every substantive `data-content-idx` reference. You may remove a reference
-only when the evidence identifies it as a repeated header, footer, or page
-number. One element may use an ordered space-separated list to merge content
-IDs. A split may repeat one ID only with `data-content-part="n/N"`; use every
-part exactly once and in order.
+Keep every substantive `data-content-idx` reference. You may remove a
+reference only when the evidence identifies it as a repeated header, footer,
+or page number. One element may use an ordered space-separated list to merge
+content IDs. A split may repeat one ID only with `data-content-part="n/N"`;
+use every part exactly once and in order.
 
-Keep every original `data-bbox` numeric value. If a rectangle is unreliable,
-keep its value and add `data-bbox-status="needs-repair"`. Never create
-coordinates. Do not guess unsupported text. Mark uncertain text with
-`<span data-uncertain="true">...</span>`. Remove only identified repeated
-headers, footers, or page numbers. Keep local asset `src` values unchanged.
+## Bounding boxes
 
-Ordered annotated page evidence:
+Never change a `data-bbox` value in `corrected.html`. Python owns all
+coordinate changes and applies them from `bbox-repairs.json` after you finish.
+
+Review each `data-bbox` against the clean page image, the annotated page
+image, and `pages/page-NNNN.meta.json` (which records the canonical page
+geometry and the raster conversion contract). For each unreliable rectangle:
+
+1. Run the local Paddle page CLI on the clean page image only. Batch pages in
+   one invocation by repeating `--image` and `--page-idx`, and always pass
+   `--evidence-out paddle-evidence.json`:
+
+   epubforge-paddle-page --image pages/page-0001.jpg --page-idx 1 \\
+     --image pages/page-0002.jpg --page-idx 2 \\
+     --output .paddle --evidence-out paddle-evidence.json
+
+   The CLI writes `evidence.json`, `candidate.json`, `layout_raw.jpg`,
+   `text_raw.jpg`, and `annotated.jpg` under `.paddle/page-NNNN/` and caches
+   the raw model output. Rerun with `--reuse-raw` after adjusting postprocess
+   flags, or write a `patch_page(context)` Python hook and pass it with
+   `--page-patch` (see `epubforge-paddle-page --help`). Files under
+   `.paddle/` are temporary working evidence, not deliverables.
+2. Inspect the evidence JSON and JPEGs plus the candidates. Choose only
+   candidate IDs from `candidate.json`.
+3. Record one repair per unreliable element in `bbox-repairs.json`. If no
+   rectangle needs repair, write `{"schema_version": 1, "repairs": []}`. If
+   Paddle produced no reliable candidate, keep the original `data-bbox` value
+   and add `data-bbox-status="needs-repair"` instead of a repair.
+
+`bbox-repairs.json` is one JSON object with exactly this shape:
+
+```json
+{
+  "schema_version": 1,
+  "repairs": [
+    {
+      "data_content_idx": 5,
+      "data_content_part": null,
+      "page_idx": 1,
+      "candidate_ids": ["p0001-figure-3f2a9c1d4e"],
+      "operation": "replace",
+      "reason": "Paddle layout places the figure box over the caption."
+    }
+  ]
+}
+```
+
+Rules: `data_content_idx` must name a substantive element that already
+carries `data-bbox`; `data_content_part` is optional and must match the
+element's split part; `page_idx` must equal the element's `data-page-idx`;
+`operation` is `replace` (exactly one candidate) or `union` (one or more
+candidates whose boxes are combined); `candidate_ids` must come from the
+`candidate.json` files the CLI wrote for that page; `reason` is a concise
+explanation. Never repair an element that carries
+`data-bbox-status="needs-repair"`.
+
+`paddle-evidence.json` is the `--evidence-out` file the CLI produced; when
+you ran Paddle, write `{"schema_version": 1, "pages": []}` otherwise. Do not
+change `data-bbox` values, do not invent coordinates, and never create a new
+`data-bbox` on an element that lacks one.
+
+Correct headings, blocks, and text as usual: mark uncertain text with
+`<span data-uncertain="true">...</span>`, remove only identified repeated
+headers, footers, or page numbers, and keep local asset `src` values
+unchanged.
+
+Ordered page evidence:
 """
 
 
@@ -188,6 +275,40 @@ class ChapterRevisionPublicationError(ChapterRevisionError):
         super().__init__(message + suffix)
 
 
+class AppliedBBoxRepair(BaseModel):
+    """One repair Python applied, recorded verbatim in ``revision.json``.
+
+    Strict validation keeps corrupted or truncated records from ever reaching
+    freshness logic: an invalid record simply makes the revision stale.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    data_content_idx: int = Field(ge=0)
+    data_content_part: str | None = Field(default=None)
+    page_idx: int = Field(ge=0)
+    operation: Literal["replace", "union"]
+    candidate_ids: list[str] = Field(min_length=1)
+    bbox: list[str] = Field(min_length=4, max_length=4)
+    reason: str = Field(min_length=1, max_length=MAX_REPAIR_REASON_CHARS)
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> AppliedBBoxRepair:
+        if self.data_content_part is not None and not _PART_RE.fullmatch(
+            self.data_content_part
+        ):
+            raise ValueError("data_content_part must be n/N")
+        if len(set(self.candidate_ids)) != len(self.candidate_ids):
+            raise ValueError("candidate_ids must be unique")
+        try:
+            bbox_values = _bbox(",".join(self.bbox))
+        except ChapterRevisionError as exc:
+            raise ValueError(f"bbox is invalid: {exc}") from exc
+        if bbox_values is None or len(bbox_values) != 4:
+            raise ValueError("bbox must contain four coordinates")
+        return self
+
+
 class ChapterRevisionRecord(BaseModel):
     """Metadata proving which inputs produced ``corrected.html``."""
 
@@ -196,7 +317,7 @@ class ChapterRevisionRecord(BaseModel):
     schema_name: Literal["epubforge.chapter-revision"] = Field(
         default=REVISION_SCHEMA, alias="schema"
     )
-    schema_version: Literal[2] = REVISION_SCHEMA_VERSION
+    schema_version: Literal[3] = REVISION_SCHEMA_VERSION
     agent_name: str = Field(min_length=1)
     agent_model: str = Field(min_length=1)
     agent_variant: str = Field(min_length=1)
@@ -208,7 +329,12 @@ class ChapterRevisionRecord(BaseModel):
     source_chapter_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_chapter_html_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_images_sha256: dict[str, str]
+    source_annotated_pages_sha256: dict[str, str]
+    source_page_metadata_sha256: dict[str, str]
     source_assets_sha256: dict[str, str]
+    paddle_evidence_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    bbox_repairs_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    applied_bbox_repairs: list[AppliedBBoxRepair] = Field(default_factory=list)
     corrected_html_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -217,6 +343,8 @@ class ChapterRevisionRecord(BaseModel):
             not _SHA256_RE.fullmatch(value)
             for value in (
                 *self.source_images_sha256.values(),
+                *self.source_annotated_pages_sha256.values(),
+                *self.source_page_metadata_sha256.values(),
                 *self.source_assets_sha256.values(),
             )
         ):
@@ -301,6 +429,8 @@ class _ChapterManifest(BaseModel):
     end_page_idx: int = Field(ge=0)
     chapter_html_sha256: str = Field(pattern=_SHA256_PATTERN)
     pages: list[str] = Field(min_length=1)
+    annotated_pages: list[str] = Field(min_length=1)
+    page_metadata: list[str] = Field(min_length=1)
     assets: list[str] = Field(default_factory=list)
 
 
@@ -330,6 +460,8 @@ class _ChapterInput:
     chapter_html: str
     chapter_html_sha256: str
     page_bytes: tuple[tuple[str, bytes, str], ...]
+    annotated_page_bytes: tuple[tuple[str, bytes, str], ...]
+    page_metadata_bytes: tuple[tuple[str, bytes, str], ...]
     asset_bytes: tuple[tuple[str, bytes, str], ...]
     seed: _SeedInfo
 
@@ -536,7 +668,11 @@ def _revise_one_locked(
                 title=f"epubforge chapter {chapter.chapter_manifest.ordinal:04d}",
                 prompt=BOOK_EDITOR_PROMPT,
                 files=files,
-                output_limits={"corrected.html": MAX_HTML_BYTES},
+                output_limits={
+                    "corrected.html": MAX_HTML_BYTES,
+                    "bbox-repairs.json": MAX_BBOX_REPAIRS_BYTES,
+                    "paddle-evidence.json": MAX_PADDLE_EVIDENCE_BYTES,
+                },
                 forbidden_roots=(workspace.root.parent,),
             )
         )
@@ -548,6 +684,19 @@ def _revise_one_locked(
         except UnicodeDecodeError as exc:
             raise ChapterRevisionError("corrected HTML is not UTF-8") from exc
         _validate_corrected_html(corrected_html, chapter.seed)
+        final_html, applied_repairs = _apply_bbox_repairs(
+            corrected_html,
+            chapter,
+            result.outputs.get("bbox-repairs.json"),
+            result.outputs.get("paddle-evidence.json"),
+        )
+        if final_html != corrected_html:
+            _validate_corrected_html(
+                final_html,
+                chapter.seed,
+                expected_repairs=_applied_repairs_map(applied_repairs),
+            )
+        corrected_bytes = final_html.encode("utf-8")
     except ChapterRevisionError:
         raise
     except AgentRunnerError as exc:
@@ -558,6 +707,8 @@ def _revise_one_locked(
     if len(corrected_bytes) > MAX_HTML_BYTES:
         raise ChapterRevisionError("corrected HTML exceeds the size limit")
     corrected_hash = _sha256_bytes(corrected_bytes)
+    repairs_bytes = result.outputs.get("bbox-repairs.json")
+    evidence_bytes = result.outputs.get("paddle-evidence.json")
     record = ChapterRevisionRecord(
         agent_name=identity.name,
         agent_model=identity.model,
@@ -570,11 +721,24 @@ def _revise_one_locked(
         source_chapter_manifest_sha256=chapter.chapter_manifest_sha256,
         source_chapter_html_sha256=chapter.chapter_html_sha256,
         source_images_sha256={name: digest for name, _, digest in chapter.page_bytes},
+        source_annotated_pages_sha256={
+            name: digest for name, _, digest in chapter.annotated_page_bytes
+        },
+        source_page_metadata_sha256={
+            name: digest for name, _, digest in chapter.page_metadata_bytes
+        },
         source_assets_sha256={
             name: digest
             for name, _, digest in chapter.asset_bytes
             if name in chapter.seed.referenced_assets
         },
+        paddle_evidence_sha256=(
+            _sha256_bytes(evidence_bytes) if isinstance(evidence_bytes, bytes) else None
+        ),
+        bbox_repairs_sha256=(
+            _sha256_bytes(repairs_bytes) if isinstance(repairs_bytes, bytes) else None
+        ),
+        applied_bbox_repairs=applied_repairs,
         corrected_html_sha256=corrected_hash,
     )
     _publish_pair(
@@ -587,8 +751,16 @@ def _revise_one_locked(
 
 def _revision_task(chapter: _ChapterInput) -> str:
     ordered_pages = "\n".join(
-        f"{position}. `{relative}`"
-        for position, (relative, _, _) in enumerate(chapter.page_bytes, start=1)
+        f"{position}. `{clean}`\n   {annotated}\n   {meta}"
+        for position, ((clean, _, _), (annotated, _, _), (meta, _, _)) in enumerate(
+            zip(
+                chapter.page_bytes,
+                chapter.annotated_page_bytes,
+                chapter.page_metadata_bytes,
+                strict=True,
+            ),
+            start=1,
+        )
     )
     return REVISION_TASK_PREFIX + ordered_pages + "\n\nWrite no other files.\n"
 
@@ -601,6 +773,8 @@ def _agent_workspace_files(chapter: _ChapterInput, task: str) -> dict[str, bytes
         "corrected.html": chapter.chapter_html.encode("utf-8"),
     }
     files.update({name: data for name, data, _ in chapter.page_bytes})
+    files.update({name: data for name, data, _ in chapter.annotated_page_bytes})
+    files.update({name: data for name, data, _ in chapter.page_metadata_bytes})
     files.update(
         {
             name: data
@@ -626,7 +800,11 @@ def _contract_sha256() -> str:
     return _sha256_json(
         {
             "version": REVISION_CONTRACT_VERSION,
-            "output_file": "corrected.html",
+            "output_files": {
+                "corrected": "corrected.html",
+                "bbox_repairs": "bbox-repairs.json",
+                "paddle_evidence": "paddle-evidence.json",
+            },
             "html_tags": sorted(_ALLOWED_TAGS),
             "html_attributes": sorted(_GLOBAL_ATTRS),
             "reference_contract": {
@@ -634,8 +812,841 @@ def _contract_sha256() -> str:
                 "split": "data-content-part=n/N with complete 1..N parts",
                 "bbox_status": "needs-repair",
             },
+            "bbox_repairs_contract": {
+                "schema_version": _BBOX_REPAIRS_SCHEMA_VERSION,
+                "target": "data-content-idx with optional data-content-part",
+                "page_match": "repair page_idx equals element data-page-idx",
+                "operations": ["replace", "union"],
+                "replace_cardinality": "exactly one candidate",
+                "union_cardinality": "one or more candidates",
+                "coordinate_source": "candidate boxes from collected paddle-evidence",
+                "conversion": "raster pixels divided by raster/canonical per axis from page meta",
+                "bounds": "finite, positive area, inside canonical page geometry",
+                "apply_owner": "Python applies all data-bbox changes from repairs",
+            },
+            "paddle_evidence_contract": {
+                "schema_version": _PADDLE_EVIDENCE_SCHEMA_VERSION,
+                "page_source": "clean workspace page image pages/page-NNNN.jpg",
+                "requires_page_meta": "raster dimensions must match pages/page-NNNN.meta.json",
+            },
         }
     )
+
+
+@dataclass(frozen=True)
+class _StartTagSpan:
+    tag: str
+    start: int
+    end: int
+    attr_spans: Mapping[str, tuple[int, int]]
+
+
+def _scan_start_tags(html_text: str) -> list[_StartTagSpan]:
+    """Scan start tags with byte spans, mirroring the validated HTML tree."""
+    spans: list[_StartTagSpan] = []
+    position = 0
+    length = len(html_text)
+    while True:
+        lt = html_text.find("<", position)
+        if lt == -1:
+            break
+        if html_text.startswith("<!--", lt):
+            end = html_text.find("-->", lt + 4)
+            position = length if end == -1 else end + 3
+            continue
+        if html_text.startswith("<!", lt):
+            if html_text[lt : lt + 9].lower() != "<!doctype":
+                position = lt + 1
+                continue
+            end = html_text.find(">", lt)
+            position = length if end == -1 else end + 1
+            continue
+        if html_text.startswith("</", lt):
+            end = html_text.find(">", lt)
+            position = length if end == -1 else end + 1
+            continue
+        if lt + 1 >= length or not html_text[lt + 1].isalpha():
+            position = lt + 1
+            continue
+        parsed = _parse_start_tag(html_text, lt)
+        if parsed is None:
+            position = lt + 1
+            continue
+        spans.append(parsed)
+        position = parsed.end
+    return spans
+
+
+def _parse_start_tag(html_text: str, start: int) -> _StartTagSpan | None:
+    length = len(html_text)
+    pos = start + 1
+    tag_start = pos
+    while pos < length and (html_text[pos].isalnum() or html_text[pos] in "-:"):
+        pos += 1
+    tag = html_text[tag_start:pos].lower()
+    if not tag:
+        return None
+    attr_spans: dict[str, tuple[int, int]] = {}
+    while True:
+        while pos < length and html_text[pos].isspace():
+            pos += 1
+        if pos >= length:
+            return None
+        character = html_text[pos]
+        if character == ">":
+            return _StartTagSpan(tag, start, pos + 1, attr_spans)
+        if character == "/" and pos + 1 < length and html_text[pos + 1] == ">":
+            return _StartTagSpan(tag, start, pos + 2, attr_spans)
+        if character == "=":
+            return None
+        name_start = pos
+        while (
+            pos < length
+            and not html_text[pos].isspace()
+            and html_text[pos] not in "=>/"
+        ):
+            pos += 1
+        name = html_text[name_start:pos].lower()
+        if not name:
+            return None
+        while pos < length and html_text[pos].isspace():
+            pos += 1
+        value_start: int | None = None
+        value_end: int | None = None
+        if pos < length and html_text[pos] == "=":
+            pos += 1
+            while pos < length and html_text[pos].isspace():
+                pos += 1
+            if pos >= length:
+                return None
+            if html_text[pos] in "\"'":
+                quote = html_text[pos]
+                pos += 1
+                value_start = pos
+                end = html_text.find(quote, pos)
+                if end == -1:
+                    return None
+                value_end = end
+                pos = end + 1
+            else:
+                value_start = pos
+                while (
+                    pos < length
+                    and not html_text[pos].isspace()
+                    and html_text[pos] != ">"
+                    and not (
+                        html_text[pos] == "/"
+                        and pos + 1 < length
+                        and html_text[pos + 1] == ">"
+                    )
+                ):
+                    pos += 1
+                value_end = pos
+        if value_start is not None and value_end is not None:
+            attr_spans[name] = (value_start, value_end)
+    return None  # pragma: no cover - loop returns or None above
+
+
+def _node_repair_key(node: _HTMLNode) -> tuple[str, str | None] | None:
+    raw = node.attrs.get("data-content-idx")
+    if raw is None:
+        return None
+    tokens = _content_ids(raw)
+    if len(tokens) != 1:
+        return None
+    return tokens[0], node.attrs.get("data-content-part")
+
+
+def _validate_repairs_document(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != (
+        _BBOX_REPAIRS_SCHEMA_VERSION
+    ):
+        raise ChapterRevisionError("bbox-repairs.json has an invalid schema")
+    repairs = payload.get("repairs")
+    if not isinstance(repairs, list):
+        raise ChapterRevisionError("bbox-repairs.json repairs must be a list")
+    if len(repairs) > MAX_REPAIRS:
+        raise ChapterRevisionError("bbox-repairs.json contains too many repairs")
+    validated: list[dict[str, Any]] = []
+    expected_keys = {
+        "candidate_ids",
+        "data_content_idx",
+        "data_content_part",
+        "operation",
+        "page_idx",
+        "reason",
+    }
+    for index, item in enumerate(repairs):
+        if not isinstance(item, dict):
+            raise ChapterRevisionError(f"bbox repair {index} must be an object")
+        if set(item) != expected_keys:
+            raise ChapterRevisionError(f"bbox repair {index} has an invalid contract")
+        content_idx = item.get("data_content_idx")
+        if (
+            not isinstance(content_idx, int)
+            or isinstance(content_idx, bool)
+            or content_idx < 0
+        ):
+            raise ChapterRevisionError(
+                f"bbox repair {index} has an invalid data_content_idx"
+            )
+        part = item.get("data_content_part")
+        if part is not None and (
+            not isinstance(part, str) or not _PART_RE.fullmatch(part)
+        ):
+            raise ChapterRevisionError(
+                f"bbox repair {index} has an invalid data_content_part"
+            )
+        page_idx = item.get("page_idx")
+        if not isinstance(page_idx, int) or isinstance(page_idx, bool) or page_idx < 0:
+            raise ChapterRevisionError(f"bbox repair {index} has an invalid page_idx")
+        operation = item.get("operation")
+        if operation not in {"replace", "union"}:
+            raise ChapterRevisionError(
+                f"bbox repair {index} has an unsupported operation"
+            )
+        candidate_ids = item.get("candidate_ids")
+        if not isinstance(candidate_ids, list) or not candidate_ids:
+            raise ChapterRevisionError(
+                f"bbox repair {index} candidate_ids must be a non-empty list"
+            )
+        if not all(
+            isinstance(candidate_id, str) and _CANDIDATE_ID_RE.fullmatch(candidate_id)
+            for candidate_id in candidate_ids
+        ):
+            raise ChapterRevisionError(f"bbox repair {index} has invalid candidate IDs")
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ChapterRevisionError(f"bbox repair {index} repeats a candidate ID")
+        if operation == "replace" and len(candidate_ids) != 1:
+            raise ChapterRevisionError(
+                f"bbox repair {index} replace must use exactly one candidate"
+            )
+        reason = item.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > MAX_REPAIR_REASON_CHARS
+        ):
+            raise ChapterRevisionError(f"bbox repair {index} has an invalid reason")
+        validated.append(
+            {
+                "data_content_idx": content_idx,
+                "data_content_part": part,
+                "page_idx": page_idx,
+                "operation": operation,
+                "candidate_ids": list(candidate_ids),
+                "reason": reason.strip(),
+            }
+        )
+    return validated
+
+
+def _validate_evidence_document(payload: Any) -> dict[int, dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != (
+        _PADDLE_EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ChapterRevisionError("paddle-evidence.json has an invalid schema")
+    pages = payload.get("pages")
+    if not isinstance(pages, list):
+        raise ChapterRevisionError("paddle-evidence.json pages must be a list")
+    if len(pages) > MAX_EVIDENCE_PAGES:
+        raise ChapterRevisionError("paddle-evidence.json contains too many pages")
+    by_page: dict[int, dict[str, Any]] = {}
+    for index, page in enumerate(pages):
+        if not isinstance(page, dict):
+            raise ChapterRevisionError(
+                f"paddle evidence page {index} must be an object"
+            )
+        page_idx = page.get("page_idx")
+        if not isinstance(page_idx, int) or isinstance(page_idx, bool) or page_idx < 0:
+            raise ChapterRevisionError(
+                f"paddle evidence page {index} has an invalid page_idx"
+            )
+        if page_idx in by_page:
+            raise ChapterRevisionError(f"paddle evidence repeats page_idx {page_idx}")
+        source_image = page.get("source_image")
+        if not isinstance(source_image, str) or source_image != (
+            f"pages/page-{page_idx:04d}.jpg"
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} must come from the clean "
+                "workspace page image"
+            )
+        source_image_sha256 = page.get("source_image_sha256")
+        if not isinstance(source_image_sha256, str) or not _SHA256_RE.fullmatch(
+            source_image_sha256
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has an invalid source image hash"
+            )
+        image = page.get("image")
+        if not isinstance(image, dict):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has no image metadata"
+            )
+        width, height = image.get("width"), image.get("height")
+        if (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has invalid image dimensions"
+            )
+        evidence = page.get("evidence")
+        candidate = page.get("candidate")
+        if not isinstance(evidence, dict) or not isinstance(candidate, dict):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} is missing evidence or candidate"
+            )
+        if evidence.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has an invalid evidence schema"
+            )
+        if candidate.get("schema_version") != CANDIDATE_SCHEMA_VERSION:
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has an invalid candidate schema"
+            )
+        if evidence.get("coordinate_space") != PAGE_EVIDENCE_COORDINATE_SPACE:
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has an invalid evidence "
+                "coordinate space"
+            )
+        if candidate.get("coordinate_space") != PAGE_CANDIDATE_COORDINATE_SPACE:
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has an invalid candidate "
+                "coordinate space"
+            )
+        inference_params = candidate.get("inference_params")
+        if not isinstance(inference_params, dict):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has no candidate inference params"
+            )
+        if (
+            inference_params.get("layout_model") != LAYOUT_MODEL
+            or inference_params.get("text_model") != TEXT_MODEL
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has invalid inference models"
+            )
+        inference_source_sha256 = inference_params.get("source_sha256")
+        if (
+            not isinstance(inference_source_sha256, str)
+            or not _SHA256_RE.fullmatch(inference_source_sha256)
+            or inference_source_sha256 != source_image_sha256
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} inference source hash does "
+                "not match its source image"
+            )
+        if evidence.get("page") != page_idx or candidate.get("page") != page_idx:
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has a page mismatch"
+            )
+        candidate_image = candidate.get("image")
+        if (
+            not isinstance(candidate_image, dict)
+            or candidate_image.get("width") != width
+            or candidate_image.get("height") != height
+        ):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} candidate image mismatch"
+            )
+        boxes = candidate.get("boxes")
+        if not isinstance(boxes, list):
+            raise ChapterRevisionError(
+                f"paddle evidence page {page_idx} has no candidate boxes"
+            )
+        candidate_boxes: dict[str, dict[str, Any]] = {}
+        for box in boxes:
+            if not isinstance(box, dict):
+                raise ChapterRevisionError(
+                    f"paddle evidence page {page_idx} has a malformed candidate"
+                )
+            box_id = box.get("id")
+            if not isinstance(box_id, str) or not _CANDIDATE_ID_RE.fullmatch(box_id):
+                raise ChapterRevisionError(
+                    f"paddle evidence page {page_idx} has an invalid candidate ID"
+                )
+            if box_id in candidate_boxes:
+                raise ChapterRevisionError(
+                    f"paddle evidence page {page_idx} repeats candidate {box_id}"
+                )
+            _validate_candidate_box(
+                box,
+                box_id,
+                page_idx=page_idx,
+                width=width,
+                height=height,
+            )
+            candidate_boxes[box_id] = box
+        by_page[page_idx] = {
+            "page_idx": page_idx,
+            "image": {"width": width, "height": height},
+            "source_image_sha256": source_image_sha256,
+            "candidate_boxes": candidate_boxes,
+        }
+    return by_page
+
+
+def _validate_candidate_box(
+    box: Mapping[str, Any],
+    box_id: str,
+    *,
+    page_idx: int,
+    width: int,
+    height: int,
+) -> None:
+    """Validate a candidate's schema and recompute its stable ID.
+
+    The ID must derive from page/type/bbox, so a well-formed-looking but
+    forged string is rejected.
+    """
+    box_type = box.get("type")
+    if not isinstance(box_type, str) or not box_type.strip():
+        raise ChapterRevisionError(
+            f"candidate {box_id} on page {page_idx} has an invalid type"
+        )
+    if box_type not in CANDIDATE_TYPES:
+        raise ChapterRevisionError(
+            f"candidate {box_id} on page {page_idx} has unsupported type {box_type!r}"
+        )
+    coordinates: list[float] = []
+    for name in ("x0", "y0", "x1", "y1"):
+        value = box.get(name)
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+        ):
+            raise ChapterRevisionError(
+                f"candidate {box_id} on page {page_idx} has an invalid {name}"
+            )
+        coordinates.append(float(value))
+    x0, y0, x1, y1 = coordinates
+    if x0 < 0 or y0 < 0 or x1 > width or y1 > height or x1 <= x0 or y1 <= y0:
+        raise ChapterRevisionError(
+            f"candidate {box_id} on page {page_idx} is outside its page image"
+        )
+    expected_id = stable_candidate_id(page_idx, box_type, coordinates)
+    if box_id != expected_id:
+        raise ChapterRevisionError(
+            f"candidate {box_id} on page {page_idx} does not match its "
+            f"recomputed stable ID {expected_id}"
+        )
+
+
+def _positive_dimension(value: Any, label: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise ChapterRevisionError(f"{label} must be a positive number")
+    return float(value)
+
+
+def _positive_int_dimension(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ChapterRevisionError(f"{label} must be a positive integer")
+    return value
+
+
+def _validate_page_metadata(relative: str, data: bytes) -> dict[str, Any]:
+    """Strictly validate one ``pages/page-NNNN.meta.json`` geometry contract.
+
+    Old or tampered metadata is rejected before any repair work: schema and
+    version, page index, positive canonical/raster dimensions, the coordinate
+    origin/axis contract, and the scale-to-dimension relationship.
+    """
+    match = _PAGE_META_RE.fullmatch(relative)
+    if match is None:
+        raise ChapterRevisionError(f"invalid page metadata path: {relative}")
+    page_idx = int(match.group(1))
+    try:
+        payload = parse_json_document(
+            data,
+            label=f"page metadata {relative}",
+            max_bytes=MAX_CHAPTER_MANIFEST_BYTES,
+        )
+    except StrictJsonError as exc:
+        raise ChapterRevisionError(
+            f"page metadata {relative} is invalid: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ChapterRevisionError(f"page metadata {relative} is not an object")
+    if payload.get("schema") != PAGE_GEOMETRY_SCHEMA:
+        raise ChapterRevisionError(f"page metadata {relative} has an invalid schema")
+    if payload.get("schema_version") != PAGE_GEOMETRY_SCHEMA_VERSION:
+        raise ChapterRevisionError(
+            f"page metadata {relative} has an invalid schema version"
+        )
+    meta_page_idx = payload.get("page_idx")
+    if (
+        not isinstance(meta_page_idx, int)
+        or isinstance(meta_page_idx, bool)
+        or meta_page_idx != page_idx
+    ):
+        raise ChapterRevisionError(f"page metadata {relative} has an invalid page_idx")
+    canonical = payload.get("canonical")
+    if not isinstance(canonical, dict):
+        raise ChapterRevisionError(
+            f"page metadata {relative} has no canonical geometry"
+        )
+    canonical_width = _positive_dimension(
+        canonical.get("width"), f"page metadata {relative} canonical width"
+    )
+    canonical_height = _positive_dimension(
+        canonical.get("height"), f"page metadata {relative} canonical height"
+    )
+    raster = payload.get("raster")
+    if not isinstance(raster, dict):
+        raise ChapterRevisionError(f"page metadata {relative} has no raster geometry")
+    raster_width = _positive_int_dimension(
+        raster.get("width"), f"page metadata {relative} raster width"
+    )
+    raster_height = _positive_int_dimension(
+        raster.get("height"), f"page metadata {relative} raster height"
+    )
+    conversion = payload.get("conversion")
+    if not isinstance(conversion, dict):
+        raise ChapterRevisionError(
+            f"page metadata {relative} has no conversion contract"
+        )
+    for name, expected in (
+        ("origin", "top-left"),
+        ("x_axis", "right"),
+        ("y_axis", "down"),
+    ):
+        if conversion.get(name) != expected:
+            raise ChapterRevisionError(
+                f"page metadata {relative} has an invalid {name}"
+            )
+    scale_x = _positive_dimension(
+        conversion.get("scale_x"), f"page metadata {relative} scale_x"
+    )
+    scale_y = _positive_dimension(
+        conversion.get("scale_y"), f"page metadata {relative} scale_y"
+    )
+    tolerance = 1e-9
+    if (
+        abs(scale_x - raster_width / canonical_width) > tolerance
+        or abs(scale_y - raster_height / canonical_height) > tolerance
+    ):
+        raise ChapterRevisionError(
+            f"page metadata {relative} scale does not match its dimensions"
+        )
+    return payload
+
+
+def _chapter_page_geometry(chapter: _ChapterInput) -> dict[int, dict[str, Any]]:
+    geometry: dict[int, dict[str, Any]] = {}
+    for relative, data, _ in chapter.page_metadata_bytes:
+        try:
+            payload = parse_json_document(
+                data,
+                label=f"page metadata {relative}",
+                max_bytes=MAX_CHAPTER_MANIFEST_BYTES,
+            )
+        except StrictJsonError as exc:
+            raise ChapterRevisionError(
+                f"page metadata {relative} is invalid: {exc}"
+            ) from exc
+        match = _PAGE_META_RE.fullmatch(relative)
+        if match is None:
+            raise ChapterRevisionError(f"invalid page metadata path: {relative}")
+        if not isinstance(payload, dict):
+            raise ChapterRevisionError(f"page metadata {relative} is not an object")
+        geometry[int(match.group(1))] = payload
+    return geometry
+
+
+def _repair_candidate_boxes(
+    repair: Mapping[str, Any],
+    evidence_pages: Mapping[int, dict[str, Any]],
+    page_idx: int,
+) -> list[list[float]]:
+    page = evidence_pages.get(page_idx)
+    if page is None:
+        raise ChapterRevisionError(
+            f"repair page_idx {page_idx} has no collected paddle evidence"
+        )
+    boxes_by_id = page["candidate_boxes"]
+    width, height = page["image"]["width"], page["image"]["height"]
+    boxes: list[list[float]] = []
+    for candidate_id in repair["candidate_ids"]:
+        box = boxes_by_id.get(candidate_id)
+        if box is None:
+            raise ChapterRevisionError(
+                f"repair references unknown candidate {candidate_id} on page {page_idx}"
+            )
+        coordinates: list[float] = []
+        for name in ("x0", "y0", "x1", "y1"):
+            value = box.get(name)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+            ):
+                raise ChapterRevisionError(
+                    f"candidate {candidate_id} has an invalid {name}"
+                )
+            coordinates.append(float(value))
+        x0, y0, x1, y1 = coordinates
+        if x0 < 0 or y0 < 0 or x1 > width or y1 > height or x1 <= x0 or y1 <= y0:
+            raise ChapterRevisionError(
+                f"candidate {candidate_id} is outside its page image"
+            )
+        boxes.append(coordinates)
+    return boxes
+
+
+def _canonical_bbox_strings(
+    candidate_boxes: Sequence[Sequence[float]],
+    page_idx: int,
+    chapter: _ChapterInput,
+    evidence_pages: Mapping[int, dict[str, Any]],
+    geometry: Mapping[int, Mapping[str, Any]],
+) -> tuple[str, str, str, str]:
+    evidence_image = evidence_pages[page_idx]["image"]
+    raster_width = int(evidence_image["width"])
+    raster_height = int(evidence_image["height"])
+    meta = geometry.get(page_idx)
+    if meta is None:
+        raise ChapterRevisionError(f"page metadata is missing for page {page_idx}")
+    raster = meta.get("raster")
+    canonical = meta.get("canonical")
+    if (
+        not isinstance(raster, dict)
+        or not isinstance(canonical, dict)
+        or int(raster.get("width", -1)) != raster_width
+        or int(raster.get("height", -1)) != raster_height
+    ):
+        raise ChapterRevisionError(
+            f"paddle evidence raster size does not match page {page_idx} metadata"
+        )
+    canonical_width = float(canonical.get("width", 0.0))
+    canonical_height = float(canonical.get("height", 0.0))
+    if not math.isfinite(canonical_width) or canonical_width <= 0:
+        raise ChapterRevisionError(
+            f"page {page_idx} metadata has invalid canonical width"
+        )
+    if not math.isfinite(canonical_height) or canonical_height <= 0:
+        raise ChapterRevisionError(
+            f"page {page_idx} metadata has invalid canonical height"
+        )
+    x0 = min(float(box[0]) for box in candidate_boxes)
+    y0 = min(float(box[1]) for box in candidate_boxes)
+    x1 = max(float(box[2]) for box in candidate_boxes)
+    y1 = max(float(box[3]) for box in candidate_boxes)
+    scale_x = canonical_width / raster_width
+    scale_y = canonical_height / raster_height
+    canonical_bbox = [
+        x0 * scale_x,
+        y0 * scale_y,
+        x1 * scale_x,
+        y1 * scale_y,
+    ]
+    if any(not math.isfinite(value) for value in canonical_bbox):
+        raise ChapterRevisionError(
+            f"repair on page {page_idx} produced a non-finite bbox"
+        )
+    cx0, cy0, cx1, cy1 = canonical_bbox
+    epsilon = 1e-5
+    if cx1 - cx0 <= epsilon or cy1 - cy0 <= epsilon:
+        raise ChapterRevisionError(
+            f"repair on page {page_idx} produced a degenerate bbox"
+        )
+    if (
+        cx0 < -epsilon
+        or cy0 < -epsilon
+        or cx1 > canonical_width + epsilon
+        or cy1 > canonical_height + epsilon
+    ):
+        raise ChapterRevisionError(
+            f"repair on page {page_idx} produced a bbox outside the page"
+        )
+    c0 = _format_coordinate(canonical_bbox[0])
+    c1 = _format_coordinate(canonical_bbox[1])
+    c2 = _format_coordinate(canonical_bbox[2])
+    c3 = _format_coordinate(canonical_bbox[3])
+    return c0, c1, c2, c3
+
+
+def _format_coordinate(value: float) -> str:
+    formatted = format(float(value), ".12g")
+    return "0" if formatted == "-0" else formatted
+
+
+def _applied_repairs_map(
+    applied: Sequence[AppliedBBoxRepair],
+) -> dict[tuple[str, str | None], tuple[str, str, str, str]]:
+    result: dict[tuple[str, str | None], tuple[str, str, str, str]] = {}
+    for repair in applied:
+        bbox = repair.bbox
+        result[(str(repair.data_content_idx), repair.data_content_part)] = (
+            bbox[0],
+            bbox[1],
+            bbox[2],
+            bbox[3],
+        )
+    return result
+
+
+def _apply_bbox_repairs(
+    corrected_html: str,
+    chapter: _ChapterInput,
+    repairs_bytes: bytes | None,
+    evidence_bytes: bytes | None,
+) -> tuple[str, list[AppliedBBoxRepair]]:
+    """Validate and apply the agent's bbox repair manifest.
+
+    Python owns every coordinate change: the agent only references candidate
+    IDs, and Python converts the collected raster boxes into canonical page
+    geometry.  Returns the final HTML and the applied repair records.
+    """
+    if repairs_bytes is None:
+        return corrected_html, []
+    try:
+        repairs_payload = parse_json_document(
+            repairs_bytes,
+            label="bbox-repairs.json",
+            max_bytes=MAX_BBOX_REPAIRS_BYTES,
+        )
+    except StrictJsonError as exc:
+        raise ChapterRevisionError(f"bbox-repairs.json is invalid: {exc}") from exc
+    repairs = _validate_repairs_document(repairs_payload)
+    if not repairs:
+        return corrected_html, []
+    if evidence_bytes is None:
+        raise ChapterRevisionError("bbox-repairs.json requires paddle-evidence.json")
+    try:
+        evidence_payload = parse_json_document(
+            evidence_bytes,
+            label="paddle-evidence.json",
+            max_bytes=MAX_PADDLE_EVIDENCE_BYTES,
+        )
+    except StrictJsonError as exc:
+        raise ChapterRevisionError(f"paddle-evidence.json is invalid: {exc}") from exc
+    evidence_pages = _validate_evidence_document(evidence_payload)
+    clean_page_digests: dict[int, str] = {}
+    for relative, _data, digest in chapter.page_bytes:
+        match = _PAGE_RE.fullmatch(relative)
+        if match is None:
+            raise ChapterRevisionError(f"invalid clean page path: {relative}")
+        clean_page_digests[int(match.group(1))] = digest
+    root = _parse_and_validate_html(
+        corrected_html, chapter.seed.assets, label="corrected HTML"
+    )
+    spans = _scan_start_tags(corrected_html)
+    nodes = [node for node in _walk_nodes(root)]
+    if len(nodes) != len(spans):
+        raise ChapterRevisionError("corrected HTML tag scan disagrees with its tree")
+    for node, span in zip(nodes, spans, strict=True):
+        if node.tag != span.tag:
+            raise ChapterRevisionError(
+                "corrected HTML tag scan disagrees with its tree"
+            )
+
+    node_index_by_key: dict[tuple[str, str | None], int] = {}
+    for index, node in enumerate(nodes):
+        key = _node_repair_key(node)
+        if key is not None:
+            node_index_by_key[key] = index
+    geometry = _chapter_page_geometry(chapter)
+    applied: list[AppliedBBoxRepair] = []
+    replacements: list[tuple[int, int, str]] = []
+    seen_targets: set[tuple[str, str | None]] = set()
+    for repair in repairs:
+        content_idx = int(repair["data_content_idx"])
+        part = repair.get("data_content_part")
+        page_idx = int(repair["page_idx"])
+        target_key = (str(content_idx), part)
+        if target_key in seen_targets:
+            raise ChapterRevisionError(
+                f"duplicate repair target: content={content_idx} part={part!r}"
+            )
+        seen_targets.add(target_key)
+        node_index = node_index_by_key.get(target_key)
+        if node_index is None:
+            raise ChapterRevisionError(
+                f"repair targets no output element: content={content_idx} part={part!r}"
+            )
+        node = nodes[node_index]
+        if node.attrs.get("data-bbox-status") is not None:
+            raise ChapterRevisionError(
+                f"repair targets a needs-repair element: content={content_idx}"
+            )
+        element_page = node.attrs.get("data-page-idx")
+        if element_page != str(page_idx):
+            raise ChapterRevisionError(
+                f"repair page_idx {page_idx} does not match the element's "
+                f"data-page-idx {element_page!r}"
+            )
+        clean_digest = clean_page_digests.get(page_idx)
+        if clean_digest is None:
+            raise ChapterRevisionError(
+                f"chapter has no clean page image for page {page_idx}"
+            )
+        if evidence_pages[page_idx]["source_image_sha256"] != clean_digest:
+            raise ChapterRevisionError(
+                f"paddle evidence for page {page_idx} does not match the "
+                "chapter's clean page image snapshot"
+            )
+        span = spans[node_index]
+        bbox_value_span = span.attr_spans.get("data-bbox")
+        if bbox_value_span is None:
+            raise ChapterRevisionError(
+                f"repair target carries no data-bbox: content={content_idx}"
+            )
+        candidate_boxes = _repair_candidate_boxes(repair, evidence_pages, page_idx)
+        bbox_strings = _canonical_bbox_strings(
+            candidate_boxes,
+            page_idx,
+            chapter,
+            evidence_pages,
+            geometry,
+        )
+        replacements.append(
+            (bbox_value_span[0], bbox_value_span[1], ",".join(bbox_strings))
+        )
+        applied.append(
+            AppliedBBoxRepair(
+                data_content_idx=content_idx,
+                data_content_part=part,
+                page_idx=page_idx,
+                operation=repair["operation"],
+                candidate_ids=list(repair["candidate_ids"]),
+                bbox=list(bbox_strings),
+                reason=repair["reason"],
+            )
+        )
+
+    final_html = corrected_html
+    for value_start, value_end, new_value in sorted(
+        replacements, key=lambda item: item[0], reverse=True
+    ):
+        if value_start > 0 and corrected_html[value_start - 1] in ("'", '"'):
+            final_html = (
+                final_html[: value_start - 1]
+                + '"'
+                + new_value
+                + '"'
+                + final_html[value_end + 1 :]
+            )
+        else:
+            final_html = (
+                final_html[:value_start]
+                + '"'
+                + new_value
+                + '"'
+                + final_html[value_end:]
+            )
+    return final_html, applied
 
 
 @contextmanager
@@ -667,26 +1678,42 @@ def _chapter_lock(chapter_dir: Path) -> Iterator[None]:
 
 
 def _cleanup_orphans(chapter_dir: Path) -> None:
-    """Remove only generated staging and backup leftovers while locked."""
+    """Recover interrupted publications, then remove generated leftovers.
+
+    ``_publish_pair`` moves the previous output pair into a backup directory
+    before installing the new pair.  If the process dies between those two
+    steps, the chapter is left with a missing or mixed output pair and the
+    only complete copy of the previous pair sits in a leftover directory.
+    Cleanup therefore restores a complete pair from leftover staging or
+    backup directories before deleting them.
+    """
     try:
         entries = list(os.scandir(chapter_dir))
     except OSError as exc:
         raise ChapterRevisionError(
             f"cannot inspect revision leftovers: {chapter_dir}"
         ) from exc
+    staging_dirs: list[Path] = []
+    backup_dirs: list[Path] = []
     for entry in entries:
-        if not (
-            entry.name.startswith(_STAGING_PREFIX)
-            or entry.name.startswith(_BACKUP_PREFIX)
-        ):
-            continue
-        path = Path(entry.path)
+        if entry.name.startswith(_STAGING_PREFIX):
+            staging_dirs.append(Path(entry.path))
+        elif entry.name.startswith(_BACKUP_PREFIX):
+            backup_dirs.append(Path(entry.path))
+    if not _revision_pair_complete(chapter_dir):
+        restored = _restore_revision_pair(chapter_dir, [*backup_dirs, *staging_dirs])
+        if not restored and (staging_dirs or backup_dirs):
+            raise ChapterRevisionError(
+                "chapter output pair is incomplete and no complete recovery "
+                "copy exists; inspect the leftover directories"
+            )
+    for path in [*staging_dirs, *backup_dirs]:
         try:
-            if entry.is_symlink():
+            if path.is_symlink():
                 raise ChapterRevisionError(f"revision leftover is a symlink: {path}")
-            if entry.is_dir(follow_symlinks=False):
+            if path.is_dir(follow_symlinks=False):
                 shutil.rmtree(path)
-            elif entry.is_file(follow_symlinks=False):
+            elif path.is_file(follow_symlinks=False):
                 path.unlink()
             else:
                 raise ChapterRevisionError(f"revision leftover is not regular: {path}")
@@ -694,6 +1721,105 @@ def _cleanup_orphans(chapter_dir: Path) -> None:
             raise
         except OSError as exc:
             _log.warning("could not clean revision leftover %s: %s", path, exc)
+
+
+def _revision_pair_complete(chapter_dir: Path) -> bool:
+    """Return whether both output files exist as regular files."""
+    for name in ("corrected.html", "revision.json"):
+        path = chapter_dir / name
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ChapterRevisionError(f"cannot inspect output: {path}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return False
+    return True
+
+
+def _restore_revision_pair(chapter_dir: Path, candidate_dirs: Sequence[Path]) -> bool:
+    """Restore a coherent output pair from leftover directories.
+
+    ``_publish_pair`` moves corrected.html, then revision.json, into the
+    backup directory before installing the new pair.  A crash can therefore
+    leave either a complete backup or a backup holding one file while the
+    target still holds the other (both halves of the previous pair).  Newest
+    leftovers win when several exist.
+    """
+    names = ("corrected.html", "revision.json")
+    ordered = sorted(
+        candidate_dirs,
+        key=lambda path: _directory_mtime_ns(path),
+        reverse=True,
+    )
+    for candidate in ordered:
+        available = _regular_pair_files(candidate, names)
+        if len(available) == len(names):
+            _install_pair_files(chapter_dir, available)
+            return True
+    for candidate in ordered:
+        available = _regular_pair_files(candidate, names)
+        if len(available) != 1:
+            continue
+        name = next(iter(available))
+        other = "revision.json" if name == "corrected.html" else "corrected.html"
+        try:
+            other_info = os.lstat(chapter_dir / other)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _log.warning("could not inspect recovery target %s: %s", other, exc)
+            continue
+        if stat.S_ISLNK(other_info.st_mode) or not stat.S_ISREG(other_info.st_mode):
+            continue
+        try:
+            os.replace(available[name], chapter_dir / name)
+            _fsync_directory(chapter_dir)
+        except OSError as exc:
+            raise ChapterRevisionError(
+                f"cannot restore the chapter output pair from {candidate}"
+            ) from exc
+        return True
+    return False
+
+
+def _directory_mtime_ns(path: Path) -> int:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _regular_pair_files(directory: Path, names: Sequence[str]) -> dict[str, Path]:
+    available: dict[str, Path] = {}
+    for name in names:
+        path = directory / name
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _log.warning("could not inspect recovery copy %s: %s", path, exc)
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            continue
+        available[name] = path
+    return available
+
+
+def _install_pair_files(chapter_dir: Path, available: Mapping[str, Path]) -> None:
+    for name in ("corrected.html", "revision.json"):
+        source = available.get(name)
+        if source is None:
+            raise ChapterRevisionError(f"recovery copy is missing {name}")
+        try:
+            os.replace(source, chapter_dir / name)
+        except OSError as exc:
+            raise ChapterRevisionError(
+                f"cannot restore the chapter output pair from {source.parent}"
+            ) from exc
+    _fsync_directory(chapter_dir)
 
 
 def _fresh_output(
@@ -746,6 +1872,10 @@ def _fresh_output(
             or record.source_chapter_html_sha256 != chapter.chapter_html_sha256
             or record.source_images_sha256
             != {name: digest for name, _, digest in chapter.page_bytes}
+            or record.source_annotated_pages_sha256
+            != {name: digest for name, _, digest in chapter.annotated_page_bytes}
+            or record.source_page_metadata_sha256
+            != {name: digest for name, _, digest in chapter.page_metadata_bytes}
             or record.source_assets_sha256
             != {
                 name: digest
@@ -756,7 +1886,11 @@ def _fresh_output(
         ):
             return False
         corrected_html = corrected_bytes.decode("utf-8")
-        _validate_corrected_html(corrected_html, chapter.seed)
+        _validate_corrected_html(
+            corrected_html,
+            chapter.seed,
+            expected_repairs=_applied_repairs_map(record.applied_bbox_repairs),
+        )
     except (
         ChapterRevisionError,
         OSError,
@@ -837,6 +1971,11 @@ def _validate_root_manifest(manifest: _RootManifest) -> None:
         raise ChapterRevisionError("chapter workspace has an invalid schema")
     if manifest.schema_version != WORKSPACE_SCHEMA_VERSION:
         raise ChapterRevisionError("chapter workspace has an invalid schema version")
+    if manifest.contract_sha256 != workspace_contract_sha256():
+        raise ChapterRevisionError(
+            "chapter workspace contract_sha256 does not match the current "
+            "Stage 4 contract; rerun prepare"
+        )
     expected_fingerprints = {
         "content_sha256",
         "content_file_sha256",
@@ -997,15 +2136,28 @@ def _load_chapter(
             raise ChapterRevisionError(f"chapter asset hash mismatch: {relative}")
         asset_bytes.append((relative, data, actual_hash))
 
-    pages = _validate_page_paths(chapter_manifest.pages)
-    if len(pages) > min(MAX_IMAGE_COUNT, MAX_IMAGES):
+    pages = _validate_page_paths(chapter_manifest.pages, _PAGE_RE, "annotated page")
+    annotated_pages = _validate_page_paths(
+        chapter_manifest.annotated_pages, _ANNOTATED_PAGE_RE, "annotated page"
+    )
+    page_metadata = _validate_page_paths(
+        chapter_manifest.page_metadata, _PAGE_META_RE, "page metadata"
+    )
+    if len(pages) != len(annotated_pages) or len(pages) != len(page_metadata):
+        raise ChapterRevisionError("chapter page lists have mismatched lengths")
+    page_numbers = _listed_page_numbers(pages, _PAGE_RE, "annotated page")
+    if (
+        _listed_page_numbers(annotated_pages, _ANNOTATED_PAGE_RE, "annotated page")
+        != page_numbers
+    ):
+        raise ChapterRevisionError("chapter page lists do not agree on page order")
+    if (
+        _listed_page_numbers(page_metadata, _PAGE_META_RE, "page metadata")
+        != page_numbers
+    ):
+        raise ChapterRevisionError("chapter page lists do not agree on page order")
+    if len(pages) + len(annotated_pages) > min(MAX_IMAGE_COUNT, MAX_IMAGES):
         raise ChapterRevisionError("chapter contains too many page images")
-    page_numbers: list[int] = []
-    for page in pages:
-        match = _PAGE_RE.fullmatch(page)
-        if match is None:
-            raise ChapterRevisionError(f"invalid annotated page path: {page}")
-        page_numbers.append(int(match.group(1)))
     if any(
         number < chapter_manifest.start_page_idx
         or number > chapter_manifest.end_page_idx
@@ -1014,7 +2166,7 @@ def _load_chapter(
         raise ChapterRevisionError("annotated page is outside the chapter page range")
     page_bytes: list[tuple[str, bytes, str]] = []
     total_image_bytes = 0
-    for relative in pages:
+    for relative in [*pages, *annotated_pages]:
         path = chapter_dir / PurePosixPath(relative)
         data = _read_snapshot(
             path, f"annotated page {relative}", max_bytes=MAX_IMAGE_BYTES
@@ -1030,6 +2182,24 @@ def _load_chapter(
         if expected_hash is None or digest != expected_hash:
             raise ChapterRevisionError(f"annotated page hash mismatch: {relative}")
         page_bytes.append((relative, data, digest))
+    clean_page_bytes = tuple(item for item in page_bytes if item[0] in pages)
+    annotated_page_bytes = tuple(
+        item for item in page_bytes if item[0] in annotated_pages
+    )
+    metadata_bytes: list[tuple[str, bytes, str]] = []
+    for relative in page_metadata:
+        path = chapter_dir / PurePosixPath(relative)
+        data = _read_snapshot(
+            path, f"page metadata {relative}", max_bytes=MAX_CHAPTER_MANIFEST_BYTES
+        )
+        root_relative = _relative(workspace.root, path)
+        expected_hash = workspace.manifest.files_sha256.get(root_relative)
+        digest = _sha256_bytes(data)
+        if expected_hash is None or digest != expected_hash:
+            raise ChapterRevisionError(f"page metadata hash mismatch: {relative}")
+        metadata_bytes.append((relative, data, digest))
+    for relative, data, _ in metadata_bytes:
+        _validate_page_metadata(relative, data)
 
     seed = _validate_seed_html(chapter_html, assets)
     return _ChapterInput(
@@ -1042,7 +2212,9 @@ def _load_chapter(
         chapter_manifest_sha256=chapter_hash,
         chapter_html=chapter_html,
         chapter_html_sha256=html_hash,
-        page_bytes=tuple(page_bytes),
+        page_bytes=clean_page_bytes,
+        annotated_page_bytes=annotated_page_bytes,
+        page_metadata_bytes=tuple(metadata_bytes),
         asset_bytes=tuple(asset_bytes),
         seed=seed,
     )
@@ -1155,7 +2327,12 @@ def _validate_seed_html(html_text: str, assets: frozenset[str]) -> _SeedInfo:
     )
 
 
-def _validate_corrected_html(html_text: str, seed: _SeedInfo) -> None:
+def _validate_corrected_html(
+    html_text: str,
+    seed: _SeedInfo,
+    expected_repairs: Mapping[tuple[str, str | None], tuple[str, str, str, str]]
+    | None = None,
+) -> None:
     if len(html_text.encode("utf-8")) > MAX_HTML_BYTES:
         raise ChapterRevisionError("corrected HTML exceeds the size limit")
     root = _parse_and_validate_html(html_text, seed.assets, label="corrected HTML")
@@ -1193,7 +2370,7 @@ def _validate_corrected_html(html_text: str, seed: _SeedInfo) -> None:
             raise ChapterRevisionError("merged elements cannot carry split metadata")
         for token in tokens:
             occurrences[token].append((node, part))
-        _validate_output_bbox(node, tokens, seed.source)
+        _validate_output_bbox(node, tokens, seed.source, expected_repairs)
 
     for content_id, source_element in seed.source.items():
         values = occurrences[content_id]
@@ -1230,13 +2407,32 @@ def _validate_output_bbox(
     node: _HTMLNode,
     tokens: list[str],
     source: Mapping[str, _SourceElement],
+    expected_repairs: Mapping[tuple[str, str | None], tuple[str, str, str, str]]
+    | None = None,
 ) -> None:
+    expected_repairs = expected_repairs or {}
     bbox = _bbox(node.attrs.get("data-bbox"))
     status = node.attrs.get("data-bbox-status")
     if status is not None and status != "needs-repair":
         raise ChapterRevisionError("data-bbox-status must be needs-repair")
     if status is not None and bbox is None:
         raise ChapterRevisionError("data-bbox-status requires data-bbox")
+    if len(tokens) == 1:
+        repair_key = (tokens[0], node.attrs.get("data-content-part"))
+        if repair_key in expected_repairs:
+            if status is not None:
+                raise ChapterRevisionError(
+                    "applied repair cannot carry data-bbox-status"
+                )
+            if bbox is None:
+                raise ChapterRevisionError(
+                    f"applied repair is missing data-bbox for content ID {tokens[0]}"
+                )
+            if bbox != expected_repairs[repair_key]:
+                raise ChapterRevisionError(
+                    "corrected HTML data-bbox does not match the applied repair"
+                )
+            return
     if bbox is None:
         if len(tokens) == 1 and source[tokens[0]].bbox is not None:
             raise ChapterRevisionError(
@@ -1491,18 +2687,32 @@ def _validate_asset_paths(assets: frozenset[str]) -> None:
             raise ChapterRevisionError(f"invalid chapter asset path: {relative}")
 
 
-def _validate_page_paths(pages: list[str]) -> list[str]:
+def _validate_page_paths(
+    pages: list[str], pattern: re.Pattern[str], label: str
+) -> list[str]:
     if len(pages) != len(set(pages)):
-        raise ChapterRevisionError("chapter page list contains duplicates")
+        raise ChapterRevisionError(f"chapter {label} list contains duplicates")
     numbers: list[int] = []
     for relative in pages:
-        match = _PAGE_RE.fullmatch(relative)
+        match = pattern.fullmatch(relative)
         if match is None:
-            raise ChapterRevisionError(f"invalid annotated page path: {relative}")
+            raise ChapterRevisionError(f"invalid {label} path: {relative}")
         numbers.append(int(match.group(1)))
     if numbers != sorted(numbers):
-        raise ChapterRevisionError("annotated pages are not in page order")
+        raise ChapterRevisionError(f"{label}s are not in page order")
     return pages
+
+
+def _listed_page_numbers(
+    pages: Sequence[str], pattern: re.Pattern[str], label: str
+) -> list[int]:
+    numbers: list[int] = []
+    for relative in pages:
+        match = pattern.fullmatch(relative)
+        if match is None:
+            raise ChapterRevisionError(f"invalid {label} path: {relative}")
+        numbers.append(int(match.group(1)))
+    return numbers
 
 
 def _entry_for_chapter(workspace: _WorkspaceInput, chapter_dir: Path) -> dict[str, Any]:
@@ -1877,18 +3087,21 @@ def _sha256_json(value: Any) -> str:
 
 
 __all__ = [
+    "AppliedBBoxRepair",
     "ChapterRevisionError",
     "ChapterRevisionFailure",
     "ChapterRevisionPublicationError",
     "ChapterRevisionRecord",
     "ChapterRevisionReport",
-    "is_chapter_revision_fresh",
+    "MAX_BBOX_REPAIRS_BYTES",
     "MAX_HTML_BYTES",
     "MAX_HTML_ELEMENTS",
     "MAX_IMAGE_BYTES",
     "MAX_IMAGE_COUNT",
+    "MAX_PADDLE_EVIDENCE_BYTES",
     "MAX_TOTAL_IMAGE_BYTES",
     "REVISION_TASK_PREFIX",
+    "is_chapter_revision_fresh",
     "revise_all_chapters",
     "revise_chapter",
 ]
