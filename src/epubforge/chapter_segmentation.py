@@ -40,18 +40,20 @@ from epubforge.strict_json import (
 CHAPTERS_SCHEMA = "epubforge.chapter-segmentation"
 CHAPTERS_SCHEMA_VERSION = 2
 CONTENT_PROJECTION_SCHEMA = "epubforge.chapter-content-projection"
-CONTENT_PROJECTION_SCHEMA_VERSION = 1
+CONTENT_PROJECTION_SCHEMA_VERSION = 2
 MAX_INPUT_JSON_BYTES = DEFAULT_MAX_JSON_BYTES
 
 SEGMENTATION_TASK = """# Chapter segmentation task
 
 Mode: `segmentation`
 
-Read `content-projection.json`. Identify ordered starts for front matter,
-chapters, and back matter. Use `text_level`, `type`, and surrounding content as
-evidence. Dense table-of-contents title lists are not body starts. Running
-headers, quotations, and embedded document or article titles can resemble
-chapter starts.
+Read `content-projection.json`. Each item carries its `content_idx`, `page_idx`,
+`type`, `text_level`, and `text_chunks`. Concatenate all `text_chunks` strings
+in order to recover the exact original text. Identify ordered starts for front
+matter, chapters, and back matter. Use `text_level`, `type`, and surrounding content
+as evidence. Dense table-of-contents title lists are not body starts.
+Running headers, quotations, and embedded document or article titles can
+resemble chapter starts.
 
 Write `boundaries.json` as one JSON object with exactly this shape:
 
@@ -79,9 +81,33 @@ order. Write no other files.
 # The projection contract belongs in freshness fingerprints because changing
 # any projected field changes the model input even when the prose stays put.
 CONTENT_PROJECTION_CONTRACT: tuple[int, tuple[str, ...]] = (
-    2,
-    ("content_idx", "page_idx", "type", "text_level", "text"),
+    3,
+    ("content_idx", "page_idx", "type", "text_level", "text_chunks"),
 )
+
+# Physical line budget: every chunk line must stay comfortably below
+# OpenCode's 2000-character read truncation.  With ``ensure_ascii=False``
+# each CJK / non-BMP character occupies 1 JSON character, so the UTF-8
+# byte total also stays safely under grep's 65536-byte record limit.
+# ``allow_nan=False`` ensures non-finite floats never appear in any line.
+#
+# The chunker uses a per-character encoded-length prediction so the budget
+# is enforced by construction even for repeated JSON-escaped control
+# characters, quotes, and backslashes.
+_MAX_LINE_CHARS = 1900
+_MAX_LINE_BYTES = 65536  # grep's record limit; checked with ``<``
+
+# Structural overhead per chunk line in the pretty-printed JSON:
+#   8 spaces (indent level 4) + '"' + <encoded text> + '",'
+_LINE_OVERHEAD = 11
+
+# Serialization parameters for the projection writer.  The contract
+# fingerprint mirrors every one of them, so keep the two in sync when
+# changing the projection format.
+_PROJECTION_ENSURE_ASCII = False
+_PROJECTION_SORT_KEYS = True
+_PROJECTION_INDENT = 2
+_PROJECTION_ALLOW_NAN = False
 
 _TEXTUAL_TYPES = frozenset(
     {
@@ -432,7 +458,13 @@ def _load_source_items(
         raise ChapterSegmentationError(
             "Normalized content has an invalid schema version"
         )
-    if content.items_sha256 != _items_sha256(content.items):
+    try:
+        items_match = content.items_sha256 == _items_sha256(content.items)
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ChapterSegmentationError(
+            f"Normalized content items cannot be hashed: {exc}"
+        ) from exc
+    if not items_match:
         raise ChapterSegmentationError(
             "Normalized content items_sha256 does not match items"
         )
@@ -516,6 +548,115 @@ def _is_textual_item(item: Mapping[str, Any]) -> bool:
     return isinstance(item_type, str) and item_type.strip().lower() in _TEXTUAL_TYPES
 
 
+def _encoded_len_contribution(ch: str) -> int:
+    """Return the number of JSON characters one code point occupies.
+
+    Under ``ensure_ascii=False``, the Python ``json`` encoder:
+    - escapes ``"`` as ``\"`` (2 chars) and ``\\`` as ``\\\\`` (2 chars)
+    - escapes ``\\b`` ``\\f`` ``\\n`` ``\\r`` ``\\t`` as 2-char sequences
+    - escapes every other U+0000–U+001F control as ``\\uXXXX`` (6 chars)
+    - outputs every remaining BMP / non-BMP code point as-is (1 char)
+    """
+    cp = ord(ch)
+    if ch == '"' or ch == "\\":
+        return 2  # \" or \\
+    if ch in ("\b", "\f", "\n", "\r", "\t"):
+        return 2  # \b \f \n \r \t
+    if cp <= 0x1F:
+        return 6  # \uXXXX
+    return 1
+
+
+def _chunk_text(text: str) -> list[str]:
+    """Split *text* so every chunk line stays within ``_MAX_LINE_CHARS``.
+
+    Each chunk is serialized as a JSON string and placed on a pretty-printed
+    line.  The chunker tracks the cumulative encoded length
+    character-by-character and breaks before the physical line would exceed
+    ``_MAX_LINE_CHARS``.  This is provably correct for any input because
+    ``_encoded_len_contribution`` predicts the exact JSON-encoded expansion
+    of every code point.
+
+    The concatenation of all chunks equals the original *text* byte-for-byte.
+    An empty string produces ``[""]`` so every item always carries at least
+    one chunk.
+    """
+    if not text:
+        return [""]
+    max_encoded = _MAX_LINE_CHARS - _LINE_OVERHEAD
+
+    chunks: list[str] = []
+    pos = 0
+    n = len(text)
+
+    while pos < n:
+        encoded_len = 0
+        chunk_start = pos
+        while pos < n:
+            contrib = _encoded_len_contribution(text[pos])
+            if encoded_len + contrib > max_encoded:
+                break
+            encoded_len += contrib
+            pos += 1
+
+        if pos == chunk_start:
+            # Edge case: a single character still fits (6 <= max_encoded).
+            pos += 1
+
+        chunks.append(text[chunk_start:pos])
+
+    return chunks
+
+
+def _validate_projection_field(value: Any, *, field_name: str) -> None:
+    """Raise if *value* would produce a physical projection line exceeding
+    ``_MAX_LINE_CHARS`` or the ``_MAX_LINE_BYTES`` UTF-8 byte limit.
+
+    Accepts every JSON-serializable scalar (``str``, ``int``, ``float``,
+    ``None``) and uses ``json.dumps`` with the projection's serialization
+    parameters to build the exact physical line.  Non-finite floats raise
+    ``ChapterSegmentationError`` (``allow_nan=False`` defense-in-depth);
+    unserializable objects and lone surrogates that cannot be UTF-8 encoded
+    raise it too, so every projection scalar failure surfaces as
+    ``ChapterSegmentationError`` at the projection boundary.
+    """
+    try:
+        encoded_value = json.dumps(
+            value,
+            ensure_ascii=_PROJECTION_ENSURE_ASCII,
+            allow_nan=_PROJECTION_ALLOW_NAN,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ChapterSegmentationError(
+            f"Projection field '{field_name}' cannot be serialized: {exc}"
+        ) from exc
+
+    # Build the complete line as it appears at indent level 3 (6 spaces).
+    line = f'      "{field_name}": {encoded_value},'
+
+    if len(line) > _MAX_LINE_CHARS:
+        raise ChapterSegmentationError(
+            f"Projection field '{field_name}' would produce a "
+            f"{len(line)}-character physical line, exceeding the "
+            f"{_MAX_LINE_CHARS}-character budget.  The source content "
+            f"has invalid metadata for this field."
+        )
+
+    try:
+        line_bytes = line.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ChapterSegmentationError(
+            f"Projection field '{field_name}' cannot be encoded as UTF-8: {exc}"
+        ) from exc
+    if len(line_bytes) >= _MAX_LINE_BYTES:
+        raise ChapterSegmentationError(
+            f"Projection field '{field_name}' would produce a "
+            f"{len(line_bytes)}-byte physical line, exceeding the "
+            f"{_MAX_LINE_BYTES - 1}-byte record limit.  The source content "
+            f"has invalid metadata for this field."
+        )
+
+
 def _project_content(
     source_items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -529,12 +670,18 @@ def _project_content(
         text = item.get("text")
         if not isinstance(text, str):
             text = ""
+
+        item_type = item["type"]
+        _validate_projection_field(item_type, field_name="type")
+        _validate_projection_field(text_level, field_name="text_level")
+
+        chunks = _chunk_text(text)
         values: dict[str, Any] = {
             "content_idx": item["content_idx"],
             "page_idx": item["page_idx"],
-            "type": item["type"],
+            "type": item_type,
             "text_level": text_level,
-            "text": text,
+            "text_chunks": chunks,
         }
         projected.append(
             {field: values[field] for field in CONTENT_PROJECTION_CONTRACT[1]}
@@ -548,16 +695,23 @@ def _projection_bytes(source_items: Sequence[Mapping[str, Any]]) -> bytes:
         "schema_version": CONTENT_PROJECTION_SCHEMA_VERSION,
         "items": _project_content(source_items),
     }
-    return (
-        json.dumps(
+    try:
+        encoded = json.dumps(
             payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
+            ensure_ascii=_PROJECTION_ENSURE_ASCII,
+            sort_keys=_PROJECTION_SORT_KEYS,
+            indent=_PROJECTION_INDENT,
+            allow_nan=_PROJECTION_ALLOW_NAN,
         ).encode("utf-8")
-        + b"\n"
-    )
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        # Defense-in-depth: every projected field passes _validate_projection_field
+        # and every chunk line fits the character budget, so this only triggers on
+        # future field additions or content not covered by the per-field checks
+        # (for example lone surrogates inside item text).
+        raise ChapterSegmentationError(
+            f"Cannot serialize the content projection: {exc}"
+        ) from exc
+    return encoded + b"\n"
 
 
 def _prompt_sha256(identity: AgentIdentity) -> str:
@@ -583,6 +737,15 @@ def _contract_sha256() -> str:
         "response_schema": ChapterSegmentationResponse.model_json_schema(),
         "projection_schema": CONTENT_PROJECTION_SCHEMA,
         "projection_schema_version": CONTENT_PROJECTION_SCHEMA_VERSION,
+        "serialization": {
+            "max_line_chars": _MAX_LINE_CHARS,
+            "max_line_bytes": _MAX_LINE_BYTES,
+            "line_overhead": _LINE_OVERHEAD,
+            "indent": _PROJECTION_INDENT,
+            "ensure_ascii": _PROJECTION_ENSURE_ASCII,
+            "sort_keys": _PROJECTION_SORT_KEYS,
+            "allow_nan": _PROJECTION_ALLOW_NAN,
+        },
     }
     encoded = json.dumps(
         contract,

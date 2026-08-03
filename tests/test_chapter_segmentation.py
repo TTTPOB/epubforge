@@ -238,7 +238,7 @@ def test_success_filters_toc_and_embedded_heading_traps(tmp_path: Path) -> None:
     assert "dense table-of-contents title lists are not body starts" in task
     assert "embedded document or article titles" in task
     assert "surrounding content" in task
-    assert '"content_idx":10' in projection
+    assert '"content_idx": 10' in projection
     assert "an embedded article" in projection
     for forbidden in ("pdf", "render-page", "source.jpg", "image inspection"):
         assert forbidden not in projection
@@ -479,7 +479,7 @@ def test_projection_contract_change_invalidates_fresh_artifact(
     monkeypatch.setattr(
         segmentation,
         "CONTENT_PROJECTION_CONTRACT",
-        (3, ("content_idx", "page_idx", "type", "text_level", "text")),
+        (4, ("content_idx", "page_idx", "type", "text_level", "text_chunks")),
     )
     segment_chapters(content_path, tmp_path, fake)
 
@@ -650,3 +650,340 @@ def test_rejects_unsafe_stage3_output_parent(tmp_path: Path, parent_kind: str) -
         segment_chapters(
             content_path, unsafe_parent, FakeAgentRunner(_success_response())
         )
+
+
+# ---------------------------------------------------------------------------
+# Projection format regression tests
+# ---------------------------------------------------------------------------
+
+
+def _projection_for(items: list[dict[str, Any]]) -> bytes:
+    """Serialize *items* exactly as the stage-3 runner writes the projection."""
+    return segmentation._projection_bytes(items)
+
+
+def _assert_lines_within_char_budget(projection: bytes) -> None:
+    """Every physical line must stay at or below ``_MAX_LINE_CHARS`` chars."""
+    lines = projection.decode("utf-8").split("\n")
+    assert len(lines) > 2  # more than just schema + newline
+    for i, line in enumerate(lines):
+        assert len(line) <= segmentation._MAX_LINE_CHARS, (
+            f"line {i} too long: {len(line)} > {segmentation._MAX_LINE_CHARS}"
+        )
+
+
+def _assert_lines_within_byte_budget(projection: bytes) -> None:
+    """Every physical line must stay under ``_MAX_LINE_BYTES`` bytes."""
+    for i, line in enumerate(projection.split(b"\n")):
+        assert len(line) < segmentation._MAX_LINE_BYTES, (
+            f"line {i} too long: {len(line)} bytes >= {segmentation._MAX_LINE_BYTES}"
+        )
+
+
+def _assert_chunk_lines_within_budget(chunks: list[str]) -> None:
+    """Each chunk's pretty-printed JSON line must fit the character budget."""
+    for chunk in chunks:
+        encoded_text_len = len(json.dumps(chunk, ensure_ascii=False)) - 2
+        line_len = segmentation._LINE_OVERHEAD + encoded_text_len
+        assert line_len <= segmentation._MAX_LINE_CHARS, (
+            f"chunk produces line of {line_len} chars, "
+            f"exceeds {segmentation._MAX_LINE_CHARS}"
+        )
+
+
+def _assert_round_trip(projection: bytes, items: list[dict[str, Any]]) -> None:
+    """The parsed projection must reconstruct every item losslessly.
+
+    ``text_chunks`` concatenation equals the exact source text, scalar
+    metadata survives, and the payload carries the projection schema.
+    """
+    payload = json.loads(projection.decode("utf-8"))
+    assert payload["schema"] == segmentation.CONTENT_PROJECTION_SCHEMA
+    assert payload["schema_version"] == segmentation.CONTENT_PROJECTION_SCHEMA_VERSION
+    assert len(payload["items"]) == len(items)
+    for projected, original in zip(payload["items"], items):
+        assert "text" not in projected
+        assert projected["content_idx"] == original["content_idx"]
+        assert projected["page_idx"] == original["page_idx"]
+        assert projected["type"] == original["type"]
+        raw_text = original.get("text")
+        expected_text = raw_text if isinstance(raw_text, str) else ""
+        assert "".join(projected["text_chunks"]) == expected_text
+        if expected_text == "":
+            assert projected["text_chunks"] == [""]
+        text_level = original.get("text_level")
+        if isinstance(text_level, (str, int, float)) and not isinstance(
+            text_level, bool
+        ):
+            assert projected["text_level"] == text_level
+        else:
+            assert projected["text_level"] is None
+
+
+# (text, expect_multiple_chunks): one scenario per JSON expansion class, plus
+# empty and short control texts.  The mixed case interleaves CJK (1 encoded
+# char), quote/backslash (2), NUL (6), and ASCII (1) contributions.
+_MIXED_PATHOLOGICAL = "".join(
+    part for _ in range(200) for part in ("\u4e16", '"', "\\", "\x00", "a")
+)
+_PATHOLOGICAL_TEXTS: dict[str, tuple[str, bool]] = {
+    "long_ascii": ("a" * 5000, True),
+    "long_cjk": ("\u4e16\u754c" * 1500, True),
+    "nul_controls": ("\x00" * 500, True),
+    "quotes_and_backslashes": ('"\\"' * 1000, True),
+    "non_bmp": ("\U0001f600" * 2000, True),
+    "mixed_pathological": (_MIXED_PATHOLOGICAL, True),
+    "empty": ("", False),
+    "short": ("Short title", False),
+}
+
+
+@pytest.mark.parametrize("text_key", sorted(_PATHOLOGICAL_TEXTS))
+def test_chunked_text_line_byte_bounds_and_lossless(text_key: str) -> None:
+    """Pathological text chunking keeps every physical line within both the
+    character and UTF-8 byte budgets and reconstructs the exact source text."""
+    text, expect_multiple = _PATHOLOGICAL_TEXTS[text_key]
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "paragraph",
+            "text_level": 0,
+            "text": text,
+        }
+    ]
+    projection = _projection_for(items)
+    _assert_lines_within_char_budget(projection)
+    _assert_lines_within_byte_budget(projection)
+    _assert_round_trip(projection, items)
+
+    chunks = segmentation._chunk_text(text)
+    assert "".join(chunks) == text
+    if expect_multiple:
+        assert len(chunks) > 1
+    _assert_chunk_lines_within_budget(chunks)
+
+
+def test_projection_deterministic() -> None:
+    """Identical source items produce byte-identical projection output."""
+    items = _items()
+    assert _projection_for(items) == _projection_for(items)
+
+
+@pytest.mark.parametrize(
+    "ch",
+    [
+        "a",  # ASCII plain
+        "\u4e16",  # CJK stays as-is
+        "\U0001f600",  # non-BMP stays as-is
+        '"',  # \" (2 chars)
+        "\\",  # \\ (2 chars)
+        "\x00",  # \u0000 (6 chars)
+        "\x01",  # \u0001 (6 chars)
+        "\x08",  # \b (short escape, 2 chars)
+        "\x09",  # \t (short escape, 2 chars)
+        "\x0a",  # \n (short escape, 2 chars)
+        "\x0c",  # \f (short escape, 2 chars)
+        "\x0d",  # \r (short escape, 2 chars)
+        "\x1f",  # \u001f (6 chars)
+        " ",  # U+0020 is not escaped
+        "\x7f",  # DEL is not escaped
+        "\u0080",  # C1 control is not escaped
+    ],
+)
+def test_encoded_len_contribution_matches_json_dumps(ch: str) -> None:
+    """_encoded_len_contribution predicts the exact json.dumps expansion."""
+    actual = len(json.dumps(ch, ensure_ascii=False)) - 2
+    assert segmentation._encoded_len_contribution(ch) == actual, (
+        f"char {ch!r} (U+{ord(ch):04X}): contribution mismatch, "
+        f"json.dumps says {actual}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", "\x00" * 400),  # 400 NULs -> 2400 encoded chars
+        ("text_level", '"\\' * 1000),  # 2000 chars -> 4000 encoded chars
+        ("text_level", 10**2100),  # 2101-digit integer
+    ],
+)
+def test_rejects_oversized_projection_field(field: str, value: Any) -> None:
+    """Metadata whose physical line exceeds _MAX_LINE_CHARS is rejected as
+    ChapterSegmentationError at projection time."""
+    items = [
+        {"content_idx": 0, "page_idx": 0, "type": "text", "text_level": 1, "text": "ok"}
+    ]
+    items[0][field] = value
+    with pytest.raises(
+        ChapterSegmentationError,
+        match=f"field '{field}' would produce a .*-character physical line",
+    ):
+        segmentation._project_content(items)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", "a" * 1800),
+        ("text_level", "y" * 1700),
+        ("text_level", 10**1800),
+        ("type", "\U0001f600" * 1800),
+    ],
+)
+def test_large_valid_projection_field_preserved(field: str, value: Any) -> None:
+    """Metadata that fits the line budget projects deterministically within
+    both budgets and round-trips exactly."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "text",
+            "text_level": 1,
+            "text": "short",
+        }
+    ]
+    items[0][field] = value
+    projection = _projection_for(items)
+    _assert_lines_within_char_budget(projection)
+    _assert_lines_within_byte_budget(projection)
+    payload = json.loads(projection.decode("utf-8"))
+    assert payload["items"][0][field] == value
+
+
+@pytest.mark.parametrize("bad_level", [float("nan"), float("inf"), float("-inf")])
+def test_rejects_non_finite_text_level(bad_level: float) -> None:
+    """Non-finite floats in projected scalars surface as ChapterSegmentationError
+    instead of leaking ValueError out of the projection boundary."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "text",
+            "text_level": bad_level,
+            "text": "ok",
+        }
+    ]
+    with pytest.raises(
+        ChapterSegmentationError, match="field 'text_level' cannot be serialized"
+    ):
+        segmentation._project_content(items)
+
+
+def test_rejects_unserializable_type_value() -> None:
+    """A non-JSON-serializable 'type' value surfaces as ChapterSegmentationError."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": object(),
+            "text_level": 1,
+            "text": "ok",
+        }
+    ]
+    with pytest.raises(
+        ChapterSegmentationError, match="field 'type' cannot be serialized"
+    ):
+        segmentation._project_content(items)
+
+
+def test_projection_bytes_rejects_lone_surrogate_text() -> None:
+    """Lone surrogates (legal JSON escapes, invalid UTF-8) fail the projection
+    as ChapterSegmentationError at the byte-encoding boundary."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "text",
+            "text_level": 1,
+            "text": "bad \ud800 text",
+        }
+    ]
+    with pytest.raises(ChapterSegmentationError, match="Cannot serialize"):
+        segmentation._projection_bytes(items)
+
+
+@pytest.mark.parametrize("text_level", [1, None, 0.5])
+def test_scalar_text_level_values_round_trip(text_level: Any) -> None:
+    """Integer, null, and float text_level values project and round-trip."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "text",
+            "text_level": text_level,
+            "text": "a",
+        }
+    ]
+    projection = _projection_for(items)
+    _assert_lines_within_char_budget(projection)
+    _assert_round_trip(projection, items)
+
+
+def test_complete_projection_bounds_with_long_metadata() -> None:
+    """A complete projection with long metadata and control-character text
+    stays within both line budgets and reconstructs losslessly."""
+    items = [
+        {
+            "content_idx": 0,
+            "page_idx": 0,
+            "type": "x" * 1700,
+            "text_level": "y" * 1700,
+            "text": "\x00" * 500,
+        }
+    ]
+    projection = _projection_for(items)
+    _assert_lines_within_char_budget(projection)
+    _assert_lines_within_byte_budget(projection)
+    _assert_round_trip(projection, items)
+
+
+def test_projection_schema_version_in_written_output(tmp_path: Path) -> None:
+    """The projection written to the agent carries the schema contract, the
+    text_chunks-only item shape, and bounded lines."""
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    segment_chapters(content_path, tmp_path, fake)
+
+    projection_bytes = fake.calls[0].files["content-projection.json"]
+    _assert_lines_within_char_budget(projection_bytes)
+    _assert_round_trip(projection_bytes, _items())
+
+
+@pytest.mark.parametrize("attr", ["_MAX_LINE_CHARS", "_MAX_LINE_BYTES"])
+def test_serialization_param_change_invalidates_stale_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attr: str
+) -> None:
+    """Changing a serialization budget in the contract fingerprint
+    invalidates a previously-fresh artifact."""
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    segment_chapters(content_path, tmp_path, fake)
+    assert len(fake.calls) == 1
+
+    lowered = {"_MAX_LINE_CHARS": 1500, "_MAX_LINE_BYTES": 60000}[attr]
+    monkeypatch.setattr(segmentation, attr, lowered)
+    segment_chapters(content_path, tmp_path, fake)
+    assert len(fake.calls) == 2, f"{attr} change should invalidate fresh artifact"
+
+
+def test_rejects_lone_surrogate_items_in_normalized_content(tmp_path: Path) -> None:
+    """Normalized content whose items contain lone surrogates fails as
+    ChapterSegmentationError while hashing, not a raw UnicodeEncodeError."""
+    content_path = _write_content(tmp_path)
+    payload = json.loads(content_path.read_text(encoding="utf-8"))
+    payload["items"][0]["text"] = "\ud800"
+    # ensure_ascii=True keeps the lone surrogate as a legal JSON escape so the
+    # file itself stays valid UTF-8; the sha uses the same encoding.
+    payload["items_sha256"] = hashlib.sha256(
+        json.dumps(
+            payload["items"],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    content_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+
+    with pytest.raises(ChapterSegmentationError, match="cannot be hashed"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
