@@ -44,6 +44,13 @@ class RuntimeSettings(BaseModel):
     # book editor can run the local Paddle page CLI; "restricted" keeps the
     # legacy command-denied profile.
     execution_profile: Literal["development", "restricted"] = "development"
+    # Where the isolated agent workspace goes after each run: "never" removes
+    # it on every outcome; "on-failure" (default) keeps it after runner
+    # failures and semantic rejections and removes it only after an accepted
+    # publication; "always" keeps it for every outcome.  Retained workspaces
+    # stay mode 0700, contain no source PDF, and are logged so users can
+    # remove them after debugging.
+    workspace_retention: Literal["never", "on-failure", "always"] = "on-failure"
 
 
 class ChaptersSettings(BaseModel):
@@ -121,6 +128,12 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
         "EPUBFORGE_RUNTIME_EXECUTION_PROFILE",
         "runtime",
         "execution_profile",
+        str,
+    ),
+    (
+        "EPUBFORGE_RUNTIME_WORKSPACE_RETENTION",
+        "runtime",
+        "workspace_retention",
         str,
     ),
     ("EPUBFORGE_CHAPTERS_RENDER_DPI", "chapters", "render_dpi", int),

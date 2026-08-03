@@ -165,8 +165,8 @@ invalidates freshness.
 The runner drains stdout and stderr concurrently while enforcing total and
 per-line byte limits. It enforces a wall-clock timeout, terminates the complete
 process group, parses bounded JSON events for a session ID, snapshots declared
-regular output files without following symlinks, and removes the workspace in
-`finally`.
+regular output files without following symlinks, and removes the workspace
+under the configured retention policy.
 
 Termination is a guarantee, not a best effort: `_terminate_process_group`
 returns only after the leader is reaped and no process remains in the group,
@@ -179,9 +179,12 @@ process entry instead of recording a finish that never happened. Cleanup
 failures for the config home, the config probe directory, or the main
 workspace never replace an active timeout, parse, journal, or semantic error:
 they add a bounded note and a log line, and raise normally only when they are
-the sole failure. The config probe runs under its own fixed timeout bound,
-independent of the main task timeout, so a tiny task timeout cannot fail the
-probe first.
+the sole failure. Under deferred retention policies the runner no longer
+removes the main workspace on its own failure path, so the config home and
+probe directory keep these rules under every policy while the workspace
+follows the retention resolution described below. The config probe runs under
+its own fixed timeout bound, independent of the main task timeout, so a tiny
+task timeout cannot fail the probe first.
 
 Raw main-agent stdout/stderr are never journaled by default: the development
 bash profile can echo inherited environment or provider credentials into
@@ -214,6 +217,78 @@ completed intent (or none, for records predating the intent). This matters
 when publication already succeeded but the accepted marking failed: the
 published artifact stays in place, the manifest never claims acceptance, and
 the pending intent documents the attempted accepted transition.
+
+## Workspace Retention
+
+`[runtime] workspace_retention` (env `EPUBFORGE_RUNTIME_WORKSPACE_RETENTION`)
+selects where the isolated agent workspace goes after each run. The values are
+strict: `never`, `on-failure`, `always`.
+
+- `never` removes the workspace after runner success or failure, exactly as
+  the legacy runner did. This is the direct-runner default
+  (`OpenCodeAgentRunner` without an explicit policy), preserving the cleanup
+  expectations of scripts and tests that construct the runner directly.
+- `on-failure` is the production pipeline default. The runner keeps the
+  workspace after its own failures; the stages keep it after semantic
+  validation or publication rejection. Only an accepted publication
+  (Stage 3's `chapters.json` or Stage 5's `corrected.html`/`revision.json`
+  pair, atomically published and durably marked accepted) removes it.
+- `always` keeps the workspace for accepted, rejected, and runner-failed runs.
+
+The semantic accepted/rejected decision happens after `OpenCodeAgentRunner`
+returns, so the deferred policies cannot delete the workspace inside the
+runner call. Instead the runner returns an `AgentRunLifecycleHandle` as
+`AgentRunResult.journal`, wrapping the journal handle and owning the deferred
+cleanup: the existing Stage 3/5 `record_accepted` / `record_rejected` calls
+resolve the workspace disposition first and then delegate the mark. A handle
+that is never finalized leaves the workspace and a pending manifest
+disposition behind, so a caller crash conservatively keeps evidence rather
+than deleting it. Test fakes stay unaffected: they return their own journals
+or `None` and never see the handle.
+
+Every manifest carries a strict `workspace_disposition`
+(`pending`/`deleted`/`retained`) with bounded reason and timestamps, resolved
+before the terminal manifest is written. Terminal manifests never carry a
+`pending` disposition once a workspace was recorded; running and
+finalization-pending manifests may. The disposition resolution runs even
+without a durable journal: retained paths are always logged at INFO/WARNING
+with a bounded reason so direct callers can locate them, and a caller crash
+still leaves the workspace and its logged path behind.
+
+Retention is never claimed for a path that is not there. Before recording
+`retained`, the resolver opens the path with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`
+and verifies the pinned descriptor: a vanished workspace (the agent deleted
+its cwd, or cleanup partially removed it) is recorded and logged `deleted`; a
+symlink or plain file at the workspace path is not the original directory and
+is treated the same way — a symlink target is never followed and never
+chmodded. A real directory must be owned by the effective user with root mode
+0700; a mutated mode is restored through `fchmod` on the descriptor. After the
+mode restore the current path is re-opened no-follow and its `(st_dev,
+st_ino)` identity is compared with the pinned directory: if the path
+disappeared, became a symlink or non-directory, or now holds a different
+directory inode, the *current* path is classified truthfully and the original
+is never recorded as a verified retained workspace. A workspace that cannot
+be kept securely is removed instead (preferring safe deletion over accessible
+evidence), except paths not owned by the effective user and replacement
+directories not proven — by inode identity — to be the original workspace:
+they may hold another user's data and are never deleted, only recorded
+`retained` with a truthful bounded reason naming the unsafe state. When the
+secure-delete fallback raises after partial work, the resolver re-inspects
+the path and classifies its actual final state — missing, a retained
+directory, or a symlink/non-directory replacement — before recording, so
+`retained` is never recorded solely because removal raised; when re-securing
+and removal both fail, a clear security error is logged and the truthful
+existing state is recorded `retained` with the bounded reason. Under
+`AgentCleanupError` the workspace may still be reachable by a possibly-live
+process, so it is verified and re-secured but never removed, and the retained
+state is recorded. Cleanup failures never misreport deletion: an accepted run
+whose workspace deletion fails keeps the workspace, records `retained` with a
+bounded reason, logs an error, and stays accepted — the durable record carries
+exactly what happened. Retained workspaces stay mode 0700, keep their original
+path (so a resumed OpenCode session still finds its cwd), contain no source
+PDF, are logged, and may be removed manually after debugging. The config probe
+and private config home directories keep their unconditional cleanup rules
+under every policy.
 
 ## Freshness And Failure Handling
 

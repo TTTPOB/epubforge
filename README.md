@@ -49,8 +49,22 @@ canonical page geometry using `pages/page-NNNN.meta.json`, applies every
 Python creates each agent workspace as a mode-0700 system temporary directory
 outside the repository and book work directory. It disables project config and
 external skills, denies subagents, web tools, MCP, questions, and external
-paths, and removes the workspace after collecting bounded outputs. No source
-PDF enters an agent workspace.
+paths. No source PDF enters an agent workspace.
+
+Workspace retention is configurable via `[runtime] workspace_retention` (or
+`EPUBFORGE_RUNTIME_WORKSPACE_RETENTION`): `on-failure` (the default) removes
+the workspace after an accepted publication and keeps it after runner failures
+and semantic rejections; `never` removes it on every outcome; `always` keeps
+it for every outcome. Direct `OpenCodeAgentRunner` calls default to `never`,
+the legacy eager-cleanup behavior. Retention is never claimed for a path that
+is not there: the resolver inspects without following symlinks, restores a
+mutated root mode 0700, removes workspaces that cannot be kept securely, and
+keeps an accepted run accepted when its deletion fails, recording the truthful
+`retained` disposition with the bounded reason. `AgentCleanupError` keeps
+every path a possibly-live process may still reach. Retained workspaces keep
+their original mode-0700 path (so a resumed OpenCode session still finds its
+cwd), contain no source PDF, are logged with a bounded reason (even for
+journal-less direct runs), and may be removed manually after debugging.
 
 Execution profiles control bash inside the workspace. Stage 3 segmentation
 always runs `restricted` (bash denied). Stage 5 revision runs the configured

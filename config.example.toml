@@ -25,6 +25,7 @@ concurrency         = 4
 work_dir            = "work"
 log_level           = "INFO"   # DEBUG | INFO | WARNING
 execution_profile   = "development"  # development (local bash for the Paddle page CLI) | restricted (legacy command-denied profile)
+workspace_retention = "on-failure"  # never (remove the agent workspace on every outcome) | on-failure (keep it after runner failures and rejections; remove after accepted publications) | always (keep it for every outcome)
 
 [chapters]
 render_dpi   = 150  # chapter page JPEG rendering DPI; valid range 72-300

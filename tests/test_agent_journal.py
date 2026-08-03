@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import secrets
+import shutil
 import stat
 import sys
 from typing import Any
@@ -234,9 +235,14 @@ def _agent_process(manifest: Any) -> Any:
     return next(process for process in manifest.processes if process.label == "agent")
 
 
-def _drive_success(journal: Any, *, session_id: str | None = "ses_test") -> None:
+def _drive_success(
+    journal: Any,
+    *,
+    session_id: str | None = "ses_test",
+    workspace: str = "/tmp/journal-test-workspace",
+) -> None:
     """Replay the runner's recorder calls for one fully successful run."""
-    journal.record_workspace("/tmp/journal-test-workspace")
+    journal.record_workspace(workspace)
     journal.record_input("TASK.md", 5, hashlib.sha256(b"task\n").hexdigest())
     journal.process_started("config-probe", capture_streams=False)
     journal.process_pid("config-probe", 1001)
@@ -2384,3 +2390,706 @@ def test_initialization_cleanup_failure_preserves_primary_error(
     orphan = root / "20260803-120000-0123456789abcdef"
     assert orphan.is_dir()
     assert (orphan / "unexpected.bin").is_file()
+
+
+# -- workspace disposition ------------------------------------------------------
+
+
+def test_workspace_disposition_starts_pending_and_resolves(tmp_path: Path) -> None:
+    """The disposition lifecycle: none, pending, then deleted/retained."""
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="disposition lifecycle",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    payload = json.loads(journal.manifest_path.read_text(encoding="utf-8"))
+    assert payload["workspace_path"] is None
+    assert payload["workspace_disposition"] is None
+
+    recorded_workspace = tmp_path / "recorded-workspace"
+    journal.record_workspace(recorded_workspace)
+    payload = json.loads(journal.manifest_path.read_text(encoding="utf-8"))
+    assert payload["workspace_path"] == str(recorded_workspace)
+    assert payload["workspace_disposition"] == {
+        "disposition": "pending",
+        "deleted_at_utc": None,
+        "retained_at_utc": None,
+        "reason": None,
+    }
+
+    journal.record_workspace_disposition("deleted")
+    payload = json.loads(journal.manifest_path.read_text(encoding="utf-8"))
+    assert payload["workspace_disposition"]["disposition"] == "deleted"
+    assert payload["workspace_disposition"]["deleted_at_utc"] is not None
+    assert payload["workspace_disposition"]["retained_at_utc"] is None
+    assert payload["workspace_disposition"]["reason"] is None
+    journal.close()
+
+    retained = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="disposition retained",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    retained.record_workspace(recorded_workspace)
+    retained.record_workspace_disposition(
+        "retained", reason="manual cleanup required after debugging"
+    )
+    payload = json.loads(retained.manifest_path.read_text(encoding="utf-8"))
+    assert payload["workspace_disposition"]["disposition"] == "retained"
+    assert payload["workspace_disposition"]["retained_at_utc"] is not None
+    assert payload["workspace_disposition"]["deleted_at_utc"] is None
+    assert (
+        payload["workspace_disposition"]["reason"]
+        == "manual cleanup required after debugging"
+    )
+    retained.close()
+
+
+def test_workspace_disposition_reason_is_bounded(tmp_path: Path) -> None:
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="bounded disposition reason",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    journal.record_workspace(tmp_path / "recorded-workspace")
+    journal.record_workspace_disposition("retained", reason="x" * 5000)
+    payload = json.loads(journal.manifest_path.read_text(encoding="utf-8"))
+    assert len(payload["workspace_disposition"]["reason"]) == 2000
+    journal.close()
+
+
+def test_workspace_disposition_requires_recorded_workspace(tmp_path: Path) -> None:
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="no workspace",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    with pytest.raises(AgentRunJournalError, match="no workspace"):
+        journal.record_workspace_disposition("deleted")
+    journal.close()
+
+
+def test_workspace_disposition_after_finalize_raises(tmp_path: Path) -> None:
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="late disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal)
+    journal.mark_accepted()
+    with pytest.raises(AgentRunJournalError, match="already finalized"):
+        journal.record_workspace_disposition("deleted")
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    ["sometimes", "RETAINED", "Deleted", "", None, 5, ["deleted"]],
+)
+def test_workspace_disposition_rejects_invalid_values(
+    tmp_path: Path, disposition: Any
+) -> None:
+    """Only deleted and retained are accepted; nothing else maps to retained."""
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="invalid disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    journal.record_workspace(tmp_path / "recorded-workspace")
+    with pytest.raises(AgentRunJournalError, match="invalid workspace disposition"):
+        journal.record_workspace_disposition(disposition)
+    # the pending state survives the rejection
+    payload = json.loads(journal.manifest_path.read_text(encoding="utf-8"))
+    assert payload["workspace_disposition"]["disposition"] == "pending"
+    journal.close()
+
+
+@pytest.mark.parametrize("reason", [123, "", "   ", ["bounded"]])
+def test_workspace_disposition_rejects_incoherent_reasons(
+    tmp_path: Path, reason: Any
+) -> None:
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="invalid disposition reason",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    journal.record_workspace(tmp_path / "recorded-workspace")
+    with pytest.raises(AgentRunJournalError, match="reason"):
+        journal.record_workspace_disposition("retained", reason=reason)
+    journal.close()
+
+
+def test_unresolved_disposition_symlink_is_recorded_deleted(tmp_path: Path) -> None:
+    """A symlink at the workspace path is not the original directory."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    workspace.rmdir()
+    workspace.symlink_to(decoy, target_is_directory=True)
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="symlink disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_symlink", workspace=str(workspace))
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.reason is not None
+    assert "no longer the original directory" in manifest.workspace_disposition.reason
+
+
+def test_unresolved_disposition_plain_file_is_recorded_deleted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.write_text("not a directory", encoding="utf-8")
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="file disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_file", workspace=str(workspace))
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+
+
+def test_unresolved_disposition_restores_mode_0700_before_retention(
+    tmp_path: Path,
+) -> None:
+    """A mutated root mode is restored before the retained claim is recorded."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    os.chmod(workspace, 0o777)
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="mode restore disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_mode", workspace=str(workspace))
+    journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+
+
+def test_unresolved_disposition_resecure_never_touches_replaced_symlink_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A swap after the fd opens is classified by the current path, truthfully.
+
+    The resolution restores the root mode through ``fchmod`` on the pinned
+    descriptor, so the symlink target is never chmodded.  The identity
+    re-check then sees that the path now holds a symlink, which is not the
+    original directory: the workspace is recorded ``deleted`` and the
+    original path is never claimed as a verified retained workspace.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    os.chmod(workspace, 0o777)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    marker = decoy / "marker.txt"
+    marker.write_text("precious data", encoding="utf-8")
+    os.chmod(decoy, 0o755)
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="swap race disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_swap", workspace=str(workspace))
+    swapped = {"done": False}
+    real_open = journal_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            # replace the path right after the directory descriptor opened
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+            workspace.symlink_to(decoy, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(journal_module.os, "open", swapping_open)
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    # the symlink target was never chmodded and keeps its data
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o755
+    assert marker.read_text(encoding="utf-8") == "precious data"
+
+
+def test_unresolved_disposition_replaced_directory_is_never_recorded_as_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different-directory replacement is classified truthfully and kept.
+
+    The identity re-check compares the current path's ``(st_dev, st_ino)``
+    with the pinned descriptor: a replacement directory is a different inode,
+    so the record names the mismatch instead of claiming the original, and
+    the replacement's data is never deleted.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="replaced dir disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_replaced_dir", workspace=str(workspace))
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    marker = replacement / "marker.txt"
+    marker.write_text("other user's data", encoding="utf-8")
+    swapped = {"done": False}
+    real_open = journal_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+            workspace.mkdir()
+            (workspace / "marker.txt").write_text("replacement data", encoding="utf-8")
+        return descriptor
+
+    monkeypatch.setattr(journal_module.os, "open", swapping_open)
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "different directory" in manifest.workspace_disposition.reason
+    # the replacement directory and its data were never deleted
+    assert workspace.is_dir()
+    assert (workspace / "marker.txt").read_text(encoding="utf-8") == "replacement data"
+
+
+def test_unresolved_disposition_path_removed_after_open_records_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path that vanishes after the open is recorded deleted, not retained."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="vanished disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_vanished2", workspace=str(workspace))
+    swapped = {"done": False}
+    real_open = journal_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+        return descriptor
+
+    monkeypatch.setattr(journal_module.os, "open", swapping_open)
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert not workspace.exists()
+
+
+def test_unresolved_disposition_fchmod_failure_records_truthful_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed fd-based mode restore records the truthful retained reason."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    os.chmod(workspace, 0o777)
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="fchmod failure disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_fchmod", workspace=str(workspace))
+
+    def failing_fchmod(descriptor: int, mode: int) -> None:
+        raise OSError("injected fchmod failure")
+
+    monkeypatch.setattr(journal_module.os, "fchmod", failing_fchmod)
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "could not be restored to 0700" in manifest.workspace_disposition.reason
+
+
+def test_unresolved_disposition_foreign_owned_never_treated_as_safe_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreign-owned replacement gets a truthful unsafe-retention reason.
+
+    The journal never deletes a path it does not own; the record must name
+    the ownership problem instead of the generic conservative-retention
+    reason, so a reader never mistakes the replacement for a verified
+    workspace.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="foreign owned disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_foreign", workspace=str(workspace))
+    # simulate a foreign-owned replacement by changing the effective user
+    # identity the resolution compares against; the journal root and manifest
+    # writes never consult the effective uid again at finalize time
+    monkeypatch.setattr(journal_module.os, "geteuid", lambda: 424242)
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "not owned by the effective user" in manifest.workspace_disposition.reason
+    assert "conservatively" not in manifest.workspace_disposition.reason
+    # the foreign-owned path itself was never deleted
+    assert workspace.is_dir()
+
+
+def test_unresolved_disposition_is_resolved_conservatively_at_finalize(
+    tmp_path: Path,
+) -> None:
+    """A finalize with a pending disposition never produces an invalid manifest.
+
+    A workspace that still exists is recorded as retained; a vanished one as
+    deleted; a run without a recorded workspace carries no disposition.
+    """
+    kept = tmp_path / "kept-workspace"
+    kept.mkdir()
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="unresolved kept",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal, session_id="ses_kept", workspace=str(kept))
+    journal.mark_accepted()
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.reason is not None
+    assert "conservatively" in manifest.workspace_disposition.reason
+
+    vanished = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="unresolved vanished",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    vanished.record_workspace(tmp_path / "never-created-workspace")
+    _drive_success(vanished, session_id="ses_vanished")
+    vanished.mark_rejected("ChapterSegmentationError", "semantic rejection")
+    manifest = read_agent_run_manifest(vanished.manifest_path)
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+
+    none_ws = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="unresolved none",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    none_ws.mark_runner_failed("AgentRunnerError", "no workspace ever existed")
+    manifest = read_agent_run_manifest(none_ws.manifest_path)
+    assert manifest.workspace_path is None
+    assert manifest.workspace_disposition is None
+
+
+def test_unresolved_disposition_at_finalize_never_writes_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pending-intent write already carries the resolved disposition."""
+    journal = create_agent_run_journal(
+        tmp_path / "logs" / "agent-runs",
+        title="pending intent disposition",
+        identity=book_editor_identity(),
+        execution_profile="development",
+        declared_outputs={"result.json": 1024},
+    )
+    _drive_success(journal)
+    _fail_second_finalize_write(journal, monkeypatch)
+
+    with pytest.raises(AgentRunJournalError, match="injected terminal"):
+        journal.mark_accepted()
+
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.final_status == "started"
+    assert manifest.finalization is not None
+    assert manifest.finalization.status == "pending"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition != "pending"
+    journal.close()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda payload: payload["workspace_disposition"].update(
+                {"disposition": "pending"}
+            ),
+            id="terminal-with-pending-disposition",
+        ),
+        pytest.param(
+            lambda payload: payload["workspace_disposition"].update(
+                {"disposition": "retained"}
+            ),
+            id="retained-without-timestamp",
+        ),
+        pytest.param(
+            lambda payload: payload["workspace_disposition"].update(
+                {"deleted_at_utc": None}
+            ),
+            id="deleted-without-timestamp",
+        ),
+        pytest.param(
+            lambda payload: payload["workspace_disposition"].update(
+                {
+                    "disposition": "retained",
+                    "retained_at_utc": "2026-01-01T00:00:00+00:00",
+                    "deleted_at_utc": "2026-01-01T00:00:00+00:00",
+                }
+            ),
+            id="retained-with-deleted-timestamp",
+        ),
+        pytest.param(
+            lambda payload: payload["workspace_disposition"].update(
+                {
+                    "disposition": "pending",
+                    "retained_at_utc": "2026-01-01T00:00:00+00:00",
+                }
+            ),
+            id="pending-with-timestamp",
+        ),
+        pytest.param(
+            lambda payload: payload.update({"workspace_path": None}),
+            id="disposition-without-path",
+        ),
+        pytest.param(
+            lambda payload: payload.pop("workspace_disposition"),
+            id="path-without-disposition",
+        ),
+    ],
+)
+def test_manifest_reader_rejects_incoherent_workspace_dispositions(
+    tmp_path: Path, mutate: Any
+) -> None:
+    journal = _accepted_journal(tmp_path)
+    _rewrite_manifest(journal, mutate)
+    with pytest.raises(AgentRunJournalError, match="invalid"):
+        read_agent_run_manifest(journal.manifest_path)
+
+
+# -- retention policy through the production stages -----------------------------
+
+
+def test_segment_on_failure_rejection_retains_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "segmentation-bad")
+    work = tmp_path / "book"
+    content_path = _seg_content(work)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="restricted",
+        workspace_retention="on-failure",
+    )
+    with pytest.raises(ChapterSegmentationError):
+        segment_chapters(content_path, work / "03_chapters", runner)
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.reason is not None
+    assert "on-failure" in manifest.workspace_disposition.reason
+    assert Path(manifest.workspace_path).is_dir()
+    assert not (work / "03_chapters" / "chapters.json").exists()
+
+
+def test_segment_on_failure_acceptance_deletes_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "segmentation-ok")
+    work = tmp_path / "book"
+    content_path = _seg_content(work)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="restricted",
+        workspace_retention="on-failure",
+    )
+    output_path = segment_chapters(content_path, work / "03_chapters", runner)
+    assert output_path == work / "03_chapters" / "chapters.json"
+    assert output_path.is_file()
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+    assert not Path(manifest.workspace_path).exists()
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_segment_always_acceptance_retains_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "segmentation-ok")
+    work = tmp_path / "book"
+    content_path = _seg_content(work)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="restricted",
+        workspace_retention="always",
+    )
+    output_path = segment_chapters(content_path, work / "03_chapters", runner)
+    assert output_path.is_file()
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert Path(manifest.workspace_path).is_dir()
+    assert manifest.workspace_disposition.reason is not None
+    assert "always" in manifest.workspace_disposition.reason
+
+
+def test_revision_on_failure_acceptance_deletes_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "revision-ok")
+    workspace = _workspace(tmp_path)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="development",
+        workspace_retention="on-failure",
+    )
+    chapter_dir = workspace / "chapters/0002"
+    corrected = revise_chapter(chapter_dir, runner)
+    assert corrected == chapter_dir / "corrected.html"
+    assert (chapter_dir / "revision.json").is_file()
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+    assert not Path(manifest.workspace_path).exists()
+
+
+def test_revision_on_failure_rejection_retains_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "revision-bad")
+    workspace = _workspace(tmp_path)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="development",
+        workspace_retention="on-failure",
+    )
+    chapter_dir = workspace / "chapters/0002"
+    with pytest.raises(ChapterRevisionError):
+        revise_chapter(chapter_dir, runner)
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert Path(manifest.workspace_path).is_dir()
+
+
+def test_revision_on_failure_runner_failure_retains_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "exit-failure")
+    workspace = _workspace(tmp_path)
+    runner = _runner(
+        tmp_path,
+        journal_root=_journal_root(tmp_path),
+        execution_profile="development",
+        workspace_retention="on-failure",
+    )
+    chapter_dir = workspace / "chapters/0002"
+    with pytest.raises(ChapterRevisionError, match="agent failed"):
+        revise_chapter(chapter_dir, runner)
+
+    run_dir = _single_run_dir(_journal_root(tmp_path))
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert Path(manifest.workspace_path).is_dir()

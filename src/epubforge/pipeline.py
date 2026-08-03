@@ -1186,6 +1186,7 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 
         agent_runner = OpenCodeAgentRunner(
             execution_profile="restricted",
+            workspace_retention=cfg.runtime.workspace_retention,
             journal_root=work / "logs" / "agent-runs",
             # Raw main-agent streams stay uncaptured: development bash can echo
             # inherited or provider credentials into stdout/stderr.
@@ -1250,6 +1251,7 @@ def run_revise(
 
         agent_runner = OpenCodeAgentRunner(
             execution_profile=cfg.runtime.execution_profile,
+            workspace_retention=cfg.runtime.workspace_retention,
             journal_root=work / "logs" / "agent-runs",
             # Raw main-agent streams stay uncaptured: development bash can echo
             # inherited or provider credentials into stdout/stderr.

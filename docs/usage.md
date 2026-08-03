@@ -108,7 +108,9 @@ question。`[runtime] execution_profile` 控制工作区内的 bash：Stage 3 se
 `epubforge-paddle-page`；`restricted` 保持旧版完全拒绝命令的权限。development
 的 bash 是有意信任的模式，不是 OS 沙盒：agent 依靠提示词约束留在工作区内，未来
 可用更强的沙盒替换。Runner 限制运行时间、stdout、stderr、单行和输出文件大小，
-失败时终止进程组并清理目录。
+失败时终止进程组；工作区的去留由 `[runtime] workspace_retention` 决定（见
+"工作区保留策略"一节）：`never` 下失败后立即删除，`on-failure`（默认）与
+`always` 下失败后保留并记录日志。
 
 进程组清理是保证而非尽力而为：只有 leader 已被收割且组内没有残留进程时，
 `_terminate_process_group` 才返回，否则抛出有界的 `AgentExecutionError`。当
@@ -117,8 +119,11 @@ question。`[runtime] execution_profile` 控制工作区内的 bash：Stage 3 se
 **不会被删除**，会记录日志供人工清理，journal 也保留真实的运行中进程记录，
 不谎报结束。config home、config probe 目录或主工作区的清理失败不会覆盖已有
 的超时、解析、journal 或语义错误——它们只添加有界说明和日志，仅当它是唯一
-错误时才正常抛出。正常（成功）路径上如果工作区清理单独失败，运行记录会先标记
-为 `failed` 再传播清理错误，绝不留下 `started` 的 manifest 或未关闭的描述符。
+错误时才正常抛出。在 `never` 保留策略下，正常（成功）路径上如果工作区清理
+单独失败，运行记录会先标记为 `failed` 再传播清理错误，绝不留下 `started` 的
+manifest 或未关闭的描述符；在延迟保留策略下，成功路径不清理工作区，删除由
+调用方的 accepted 标记完成（删除失败时如实记录 retained 且运行保持
+accepted，见"工作区保留策略"一节）。
 
 ## 配置与日志
 
@@ -132,6 +137,7 @@ language = "ch"
 work_dir = "work"
 log_level = "INFO"
 execution_profile = "development"  # development（开工作区内 bash，供 Paddle CLI 使用）| restricted（旧版权限）
+workspace_retention = "on-failure"  # never（任何结果都删除 agent 工作区）| on-failure（默认；运行器失败与语义拒绝后保留，accepted 发布后删除）| always（任何结果都保留）
 
 [chapters]
 render_dpi = 150
@@ -145,6 +151,7 @@ EPUBFORGE_MINERU_API_KEY=...
 EPUBFORGE_RUNTIME_WORK_DIR=work
 EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
 EPUBFORGE_RUNTIME_EXECUTION_PROFILE=restricted
+EPUBFORGE_RUNTIME_WORKSPACE_RETENTION=always
 ```
 
 execution_profile 参与 agent fingerprint：切换 profile 会让对应阶段判定为不新鲜并
@@ -176,16 +183,17 @@ UTC 时间戳加随机十六进制组成，并发运行互不冲突）。目录�
   中标记为 `capture: "disabled"`，无流文件、大小或哈希）。
 - `manifest.json`：原子替换、严格版本化的 JSON 清单（
   `schema`/`schema_version`/`run_id`/`title`/agent 身份与执行 profile/UTC
-  起止时间/工作区路径/输入输出元数据（名称、大小、SHA-256 与上限，绝不含
-  输入内容）/每个进程的开始、结果与返回码（config probe 为
-   `capture: "disabled"`，无流元数据；主 agent 默认同为 `capture: "disabled"`，
-   捕获开启时含 stdout、stderr 的文件名、大小与 SHA-256）/`session_id`（解析
-   到后立即记录）/输出收集状态/最终语义校验与发布状态/`finalization`（终态
-   转换意图，运行中为 `null`，详见下段））。运行中与运行后的每个持久化
-   manifest 都满足严格校验：流捕获开启时进程从开始即带零字节
-   流记录，`capture_complete` 在进程结束前保持待定（`null`），因此宿主进程
-   在开始与结束之间崩溃时，最后一份 manifest 仍是合法的“运行中/不完整捕获”
-   记录。
+  起止时间/工作区路径与 `workspace_disposition`（严格处置：
+  `pending`/`deleted`/`retained`，含限长的原因与时间戳）/输入输出元数据
+  （名称、大小、SHA-256 与上限，绝不含输入内容）/每个进程的开始、结果与
+  返回码（config probe 为 `capture: "disabled"`，无流元数据；主 agent 默认
+  同为 `capture: "disabled"`，捕获开启时含 stdout、stderr 的文件名、大小与
+  SHA-256）/`session_id`（解析到后立即记录）/输出收集状态/最终语义校验与
+  发布状态/`finalization`（终态转换意图，运行中为 `null`，详见下段））。
+  运行中与运行后的每个持久化 manifest 都满足严格校验：流捕获开启时进程
+  从开始即带零字节流记录，`capture_complete` 在进程结束前保持待定
+  （`null`），因此宿主进程在开始与结束之间崩溃时，最后一份 manifest 仍是
+  合法的“运行中/不完整捕获”记录。
 
 主 agent 通信被中断时（超时、stdout/stderr 字节或行长超限、读取失败等），
 manifest 会用尽力解析已接收的完整 JSONL 行来抢救 session ID（
@@ -216,7 +224,35 @@ manifest 绝不谎报 accepted。失败运行同样保留 manifest 与
 None）；生产管道自动指向书本的 `logs/agent-runs`。即使配置了
 `journal_root`，主 agent 原始流默认也不落盘——只有构造 runner 时显式传入
 `capture_raw_main_streams=True` 的调试 opt-in 才持久化流文件。运行开始时
-日志会打印 manifest 路径，`session_id` 解析到后立即打印。agent 工作区在
-运行结束后立即清理；当进程组无法保证清空或目录删除失败时，工作区、config
-home 与 probe 路径会按上文规则保留并记录日志，供人工清理（工作区保留策略
-在后续版本提供）。
+日志会打印 manifest 路径，`session_id` 解析到后立即打印。
+
+## 工作区保留策略
+
+`[runtime] workspace_retention`（环境变量
+`EPUBFORGE_RUNTIME_WORKSPACE_RETENTION`）决定 agent 工作区在运行结束后
+的去向，取值为 `never`、`on-failure`、`always`：
+
+- `never`：运行器成功或失败后都立即删除工作区（直接构造
+  `OpenCodeAgentRunner` 的脚本与测试的默认值，保持旧版即时清理行为）；
+- `on-failure`（生产管道默认值）：运行器失败、语义校验拒绝或发布拒绝后
+  保留工作区；只有 Stage 3/5 原子发布成功且运行被标记 accepted 后才删除；
+- `always`：accepted、rejected 与运行器失败的运行都保留工作区。
+
+语义判定发生在 `OpenCodeAgentRunner` 返回之后，因此延迟保留时返回的
+`journal` 句柄是 `AgentRunLifecycleHandle`：Stage 3/5 现有的
+`record_accepted`/`record_rejected` 调用会触发正确的处置。调用方崩溃或
+未完成终态判定时，工作区与 manifest 的 `workspace_disposition` 保持
+`pending`，证据不会被删除；runner 在延迟保留时立即记录工作区路径日志，
+即使没有 durable journal 也照记（直接调用方可据此定位）。每次终态
+manifest 都会携带严格的 `workspace_disposition`（`pending`/`deleted`/
+`retained`，含限长的原因与时间戳）：终态清单绝不带 pending 处置，也不
+谎报删除。记录 `retained` 之前会不跟随符号链接地检查实际状态：路径已
+消失（agent 删除了自己的 cwd 或清理只删了一半）记 `deleted`；真实目录
+必须归有效用户所有且根模式为 0700（被改动的模式会先恢复）；无法安全
+保留的路径优先安全删除，重保安全与删除都失败时记录清晰的错误日志并
+如实记录现有状态与原因。accepted 后删除失败会保留工作区、记录限长的
+清理失败原因并保持 accepted；`AgentCleanupError`（进程组无法保证清空）
+在任何策略下都保留相关路径（验证与恢复 0700 仍会执行，但绝不删除）。
+保留的工作区保持 mode 0700、路径不变（resume 的 OpenCode 会话仍能找到
+它的 cwd）、不含 source PDF，可在调试后手动删除；config probe 与私有
+config home 目录不受该策略影响，沿用原有清理规则。

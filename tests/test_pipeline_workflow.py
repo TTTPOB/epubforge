@@ -212,6 +212,58 @@ def test_run_segment_force_skips_freshness_but_constructs_runner(
     assert calls == [True]
 
 
+def test_pipeline_passes_workspace_retention_to_runners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both agent stages forward the configured retention policy."""
+    pdf = _pdf_path(tmp_path)
+    cfg = _config(tmp_path)
+    work = cfg.book_work_dir(pdf)
+    content = work / "02_content/content.json"
+    content.parent.mkdir(parents=True)
+    content.write_text("{}", encoding="utf-8")
+    edit_dir = work / "04_edit"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    seen: list[tuple[str, str]] = []
+
+    class FakeRunner:
+        identity = book_editor_identity()
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen.append((kwargs["execution_profile"], kwargs["workspace_retention"]))
+
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.segment_chapters",
+        lambda *args, **kwargs: work / "03_chapters" / "chapters.json",
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.is_chapter_revision_fresh",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.revise_all_chapters",
+        lambda *args, **kwargs: ChapterRevisionReport(),
+    )
+
+    pipeline.run_segment(pdf, cfg)
+    pipeline.run_revise(pdf, cfg)
+
+    # Stage 3 always runs restricted; both stages forward the config policy
+    assert seen == [("restricted", "on-failure"), ("development", "on-failure")]
+
+    cfg.runtime.workspace_retention = "always"
+    seen.clear()
+    pipeline.run_segment(pdf, cfg)
+    assert seen == [("restricted", "always")]
+
+
 def test_run_revise_raises_with_report_failures_and_keeps_successes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+import errno
 import hashlib
 from importlib import resources
 import json
@@ -41,6 +42,23 @@ _EXECUTION_PROFILE_ADAPTER: TypeAdapter[Literal["development", "restricted"]] = 
     TypeAdapter(Literal["development", "restricted"])
 )
 DEFAULT_EXECUTION_PROFILE: Literal["development", "restricted"] = "development"
+
+# Workspace retention policies.  ``never`` (the direct-runner default) removes
+# the isolated agent workspace on every outcome exactly as the legacy runner
+# did.  ``on-failure`` (the production pipeline default) keeps the workspace
+# after runner failures and semantic rejections and removes it only after an
+# accepted publication.  ``always`` keeps it for accepted, rejected, and
+# runner-failed runs.  Retained workspaces stay mode 0700, contain no source
+# PDF, and are logged so users can remove them after debugging.
+WORKSPACE_RETENTION_VALUES: tuple[Literal["never", "on-failure", "always"], ...] = (
+    "never",
+    "on-failure",
+    "always",
+)
+_WORKSPACE_RETENTION_ADAPTER: TypeAdapter[Literal["never", "on-failure", "always"]] = (
+    TypeAdapter(Literal["never", "on-failure", "always"])
+)
+DEFAULT_WORKSPACE_RETENTION: Literal["never", "on-failure", "always"] = "never"
 
 DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_TERMINATE_GRACE_SECONDS = 3.0
@@ -247,6 +265,13 @@ class AgentRunRecorder(AgentRunJournalHandle, Protocol):
 
     def record_workspace(self, workspace: str | Path) -> None: ...
 
+    def record_workspace_disposition(
+        self,
+        disposition: Literal["deleted", "retained"],
+        *,
+        reason: str | None = None,
+    ) -> None: ...
+
     def record_input(self, name: str, size_bytes: int, sha256: str) -> None: ...
 
     def process_started(self, label: str, *, capture_streams: bool = False) -> None: ...
@@ -283,13 +308,92 @@ class AgentRunRecorder(AgentRunJournalHandle, Protocol):
 class AgentRunResult:
     """Bounded output snapshots collected before workspace cleanup.
 
-    ``journal`` exposes the caller-facing marks on the durable run record;
-    it is None when journaling is disabled.
+    ``journal`` exposes the caller-facing marks on the durable run record.
+    It is None when journaling is disabled under ``never`` retention.  With
+    deferred workspace retention (``on-failure`` or ``always``) the journal
+    is an :class:`AgentRunLifecycleHandle` that owns the workspace cleanup —
+    including when no durable journal exists (``journal_root`` unset) — so
+    the caller's accepted/rejected mark still resolves the disposition and
+    performs the deletion where the policy requires it.
     """
 
     outputs: Mapping[str, bytes]
     session_id: str | None = None
     journal: AgentRunJournalHandle | None = None
+
+
+class AgentRunLifecycleHandle(AgentRunJournalHandle):
+    """Caller-facing journal handle that owns deferred workspace cleanup.
+
+    ``OpenCodeAgentRunner`` returns this handle as ``AgentRunResult.journal``
+    whenever its retention policy keeps the workspace alive past the runner
+    call (``on-failure``: removed only after the caller marks the run
+    accepted, kept after rejections; ``always``: kept for every outcome).
+    The handle resolves the workspace disposition before delegating the
+    accepted/rejected mark, so the terminal manifest never claims a deletion
+    the handle did not carry out.  A handle that is never finalized leaves
+    the workspace and a pending manifest disposition behind: a caller crash
+    conservatively keeps evidence.  ``never``-policy runs never build this
+    handle: the runner removes the workspace eagerly and records the
+    deletion itself.  The journal may be None (journaling disabled); the
+    handle still performs the policy's deletion on acceptance, and records
+    nothing.
+    """
+
+    def __init__(
+        self,
+        journal: AgentRunRecorder | None,
+        workspace: Path | None,
+        workspace_retention: str,
+    ) -> None:
+        self._journal = journal
+        self._workspace = workspace
+        self._workspace_retention = workspace_retention
+        self._resolved = False
+
+    def mark_accepted(self) -> None:
+        self._resolve("accepted")
+        if self._journal is not None:
+            self._journal.mark_accepted()
+
+    def mark_rejected(self, error_type: str, message: str) -> None:
+        self._resolve("rejected")
+        if self._journal is not None:
+            self._journal.mark_rejected(error_type, message)
+
+    def _resolve(self, outcome: Literal["accepted", "rejected"]) -> None:
+        if self._resolved:
+            # The journal's own guard raises on a repeated terminal mark; the
+            # workspace must not be touched twice.
+            return
+        self._resolved = True
+        if self._workspace is None or self._workspace_retention == "never":
+            return
+        if self._workspace_retention == "on-failure" and outcome == "accepted":
+            try:
+                _remove_workspace(self._workspace)
+            except Exception as exc:
+                # Cleanup failure after a successful publication: keep the
+                # evidence, record the truth with a bounded reason, and let
+                # the run stay accepted — the durable accepted record must
+                # never claim a deletion that did not happen.  The retained
+                # path is still verified, re-secured, and logged.
+                _resolve_retained_workspace(
+                    self._journal,
+                    self._workspace,
+                    f"workspace cleanup failed after acceptance: {_bounded_text(exc)}",
+                )
+                return
+            _record_deleted_disposition(self._journal)
+            return
+        if self._workspace_retention == "always":
+            reason = "workspace retained by the 'always' retention policy"
+        else:
+            reason = (
+                "workspace retained by the 'on-failure' retention policy"
+                " after a rejected run"
+            )
+        _resolve_retained_workspace(self._journal, self._workspace, reason)
 
 
 class AgentRunner(Protocol):
@@ -384,6 +488,17 @@ class OpenCodeAgentRunner:
     it False; the config probe never captures streams regardless of this
     flag.  Session parsing, process outcome, output hashes, and semantic
     status stay durable in both modes.
+
+    ``workspace_retention`` selects where the isolated workspace goes after
+    the run: ``never`` (the direct-runner default) removes it on every
+    outcome as the legacy runner did; ``on-failure`` (the production pipeline
+    default) keeps it after runner failures and semantic rejections and
+    removes it only once the caller marks the run accepted; ``always`` keeps
+    it for every outcome.  Deferred policies return an
+    :class:`AgentRunLifecycleHandle` as ``AgentRunResult.journal`` so the
+    caller's accepted/rejected mark resolves the durable workspace
+    disposition.  The config probe and private config home directories keep
+    their own unconditional cleanup rules under every policy.
     """
 
     def __init__(
@@ -399,6 +514,7 @@ class OpenCodeAgentRunner:
         max_input_files: int = DEFAULT_MAX_INPUT_FILES,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+        workspace_retention: str = DEFAULT_WORKSPACE_RETENTION,
         temp_root: Path | None = None,
         journal_root: Path | None = None,
         capture_raw_main_streams: bool = False,
@@ -419,6 +535,7 @@ class OpenCodeAgentRunner:
         if not executable_text or "\x00" in executable_text:
             raise ValueError("OpenCode executable must be a safe non-empty path")
         _validate_execution_profile(execution_profile)
+        _validate_workspace_retention(workspace_retention)
 
         definition = _load_agent_definition()
         self.identity = _identity_for(definition, execution_profile)
@@ -435,6 +552,7 @@ class OpenCodeAgentRunner:
         self._max_input_files = max_input_files
         self._max_output_bytes = max_output_bytes
         self._temp_root = temp_root
+        self._workspace_retention = workspace_retention
         self._journal_root = journal_root
         self._capture_raw_main_streams = capture_raw_main_streams
 
@@ -504,26 +622,117 @@ class OpenCodeAgentRunner:
                 journal=journal,
             )
             if workspace is not None:
-                # Clean up before returning: a cleanup failure on this
-                # otherwise-successful path is itself a run failure, so the
-                # journal must be finalized as failed before the cleanup error
-                # propagates.  This never leaves a started manifest or open
-                # run/root descriptors behind.
-                _remove_workspace_preserving(workspace, "isolated agent workspace")
-                workspace = None
+                if self._workspace_retention == "never":
+                    # Clean up before returning: a cleanup failure on this
+                    # otherwise-successful path is itself a run failure, so the
+                    # journal must be finalized as failed before the cleanup
+                    # error propagates.  This never leaves a started manifest
+                    # or open run/root descriptors behind.
+                    _remove_workspace_preserving(workspace, "isolated agent workspace")
+                    if journal is not None:
+                        journal.record_workspace_disposition("deleted")
+                    workspace = None
+                else:
+                    # The workspace must survive the runner call: the caller
+                    # resolves its disposition when it marks the run accepted
+                    # or rejected through the returned lifecycle handle.  The
+                    # path is logged now so a caller crash still leaves a
+                    # discoverable record of where the workspace is.
+                    _log.info(
+                        "keeping agent workspace for deferred cleanup: %s"
+                        " (%s retention policy)",
+                        workspace,
+                        self._workspace_retention,
+                    )
+                    result = AgentRunResult(
+                        outputs=result.outputs,
+                        session_id=session_id,
+                        journal=AgentRunLifecycleHandle(
+                            journal,
+                            workspace,
+                            self._workspace_retention,
+                        ),
+                    )
             return result
         except BaseException as exc:
-            if journal is not None:
-                if workspace is None:
+            if workspace is None:
+                if journal is not None:
                     # Workspace creation failed before any child ran: close out
                     # the run record without masking the workspace error.
                     _mark_run_failed_best_effort(journal, exc)
-                else:
-                    _mark_runner_failed_preserving(journal, exc)
+            else:
+                # The disposition resolution runs with or without a journal:
+                # retained paths are always logged so direct callers can find
+                # them, and journal-less runs still record nothing.  The
+                # failed mark itself is a no-op without a journal.
+                self._resolve_workspace_before_failure(journal, workspace, exc)
+                workspace = None
+                _mark_runner_failed_preserving(journal, exc)
             raise
         finally:
-            if workspace is not None:
+            if workspace is not None and self._workspace_retention == "never":
                 _remove_workspace_preserving(workspace, "isolated agent workspace")
+
+    def _resolve_workspace_before_failure(
+        self,
+        journal: AgentRunRecorder | None,
+        workspace: Path,
+        error: BaseException,
+    ) -> None:
+        """Resolve the workspace disposition before a failed run is finalized.
+
+        ``never`` retention removes the workspace here rather than in the
+        ``finally`` so the recorded disposition always matches reality: a
+        removal failure leaves the directory and resolves the retention
+        truthfully, never claiming ``deleted`` for a path that still exists.
+        ``on-failure`` and ``always`` keep the workspace as evidence and
+        resolve the retention through the shared verify/re-secure/fallback
+        path.  A possibly-live process (``AgentCleanupError`` retaining the
+        workspace) keeps the directory: verification and re-securing still
+        run, but the path is never removed.  The config home and probe
+        directory keep their own unconditional cleanup rules: this policy
+        never applies to them.  The resolution runs with or without a
+        journal; retained paths are always logged.
+        """
+        if self._workspace_retention == "never":
+            _remove_workspace_preserving(workspace, "isolated agent workspace")
+            if workspace.exists() or workspace.is_symlink():
+                active_error = sys.exc_info()[1]
+                if (
+                    isinstance(active_error, AgentCleanupError)
+                    and workspace in active_error.retained_paths
+                ):
+                    _resolve_retained_workspace(
+                        journal,
+                        workspace,
+                        "workspace kept because the agent process group could"
+                        " not be guaranteed dead",
+                        allow_removal=False,
+                    )
+                else:
+                    _resolve_retained_workspace(
+                        journal,
+                        workspace,
+                        "workspace removal failed; kept for manual cleanup",
+                    )
+                return
+            _record_deleted_disposition(journal)
+            return
+        if isinstance(error, AgentCleanupError) and workspace in error.retained_paths:
+            _resolve_retained_workspace(
+                journal,
+                workspace,
+                "workspace kept because the agent process group could not be"
+                " guaranteed dead",
+                allow_removal=False,
+            )
+            return
+        _resolve_retained_workspace(
+            journal,
+            workspace,
+            f"workspace retained by the {self._workspace_retention!r} retention"
+            " policy after a runner failure",
+        )
 
     def _begin_journal(
         self, request: AgentRunRequest, normalized_outputs: Mapping[str, int]
@@ -961,6 +1170,323 @@ def _validate_execution_profile(execution_profile: str) -> None:
         raise ValueError(
             f"unsupported execution profile: {execution_profile!r}"
         ) from exc
+
+
+def _validate_workspace_retention(workspace_retention: str) -> None:
+    try:
+        _WORKSPACE_RETENTION_ADAPTER.validate_python(workspace_retention)
+    except Exception as exc:
+        raise ValueError(
+            f"unsupported workspace retention: {workspace_retention!r}"
+        ) from exc
+
+
+def _record_deleted_disposition(journal: AgentRunRecorder | None) -> None:
+    """Record the workspace as deleted without masking any active error."""
+    if journal is None:
+        return
+    try:
+        journal.record_workspace_disposition("deleted")
+    except BaseException:
+        _log.exception("cannot record the deleted agent workspace disposition")
+
+
+def _record_retained_disposition(journal: AgentRunRecorder | None, reason: str) -> None:
+    """Record the workspace as retained with a bounded reason, best effort."""
+    if journal is None:
+        return
+    try:
+        journal.record_workspace_disposition("retained", reason=_bounded_text(reason))
+    except BaseException:
+        _log.exception("cannot record the retained agent workspace disposition")
+
+
+def _path_absent(path: Path) -> bool:
+    """Return whether *path* does not exist, without following symlinks."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _inspect_workspace_for_retention(
+    workspace: Path,
+) -> tuple[str, str, tuple[int, int] | None]:
+    """No-follow fd-based inspection of a workspace the policy wants to keep.
+
+    The path is opened with ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW`` and every
+    check (directory type, effective-user ownership, root mode) runs against
+    the opened descriptor: ``fstat`` for type, owner, and the ``(st_dev,
+    st_ino)`` identity, ``fchmod`` for the mode restore, ``fstat`` again to
+    confirm.  A symlink at the path is never followed and never chmodded.  On
+    success the current path is re-opened no-follow and its identity is
+    compared with the pinned descriptor: only a path that still holds the
+    same directory inode is classified ``secure``.  If the path disappeared,
+    became a symlink or non-directory, or now points to a different directory
+    inode, the *current* path is classified truthfully and the original is
+    never recorded as a secure retained workspace.  Descriptors are closed on
+    every path.
+
+    Returns ``(state, reason, original_identity)`` where ``state`` is:
+
+    - ``"gone"``: the path does not exist, so retention must never be
+      claimed (the agent deleted its cwd or cleanup partially removed it);
+    - ``"secure"``: the current path still holds the original user-owned
+      directory with root mode 0700 — the mode is restored when a caller
+      mutated it;
+    - ``"insecure"``: the current path cannot be kept safely; *reason*
+      explains why (symlink, non-directory, foreign owner, failed mode
+      restore, or a replacement directory).
+
+    ``original_identity`` is the ``(st_dev, st_ino)`` of the directory that
+    was at the path when the inspection opened it, or None when the path
+    never held a verifiable directory (symlink, non-directory, or an
+    unreadable path).
+    """
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(
+                workspace,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            return "gone", "workspace no longer exists", None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return (
+                    "insecure",
+                    "workspace path is a symlink, not the original directory",
+                    None,
+                )
+            if exc.errno == errno.ENOTDIR:
+                return (
+                    "insecure",
+                    "workspace path is not the original directory",
+                    None,
+                )
+            return (
+                "insecure",
+                f"workspace cannot be inspected: {_bounded_text(exc)}",
+                None,
+            )
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino)
+        if not stat.S_ISDIR(info.st_mode):
+            return "insecure", "workspace path is not the original directory", identity
+        if info.st_uid != os.geteuid():
+            return (
+                "insecure",
+                "workspace is not owned by the effective user",
+                identity,
+            )
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            try:
+                os.fchmod(descriptor, 0o700)
+            except OSError as exc:
+                return (
+                    "insecure",
+                    f"workspace mode cannot be restored to 0700: {_bounded_text(exc)}",
+                    identity,
+                )
+            try:
+                restored = os.fstat(descriptor)
+            except OSError as exc:
+                return (
+                    "insecure",
+                    f"workspace cannot be re-inspected after chmod: {_bounded_text(exc)}",
+                    identity,
+                )
+            if (
+                not stat.S_ISDIR(restored.st_mode)
+                or stat.S_IMODE(restored.st_mode) != 0o700
+            ):
+                return (
+                    "insecure",
+                    "workspace mode is still not 0700 after re-securing",
+                    identity,
+                )
+        # The descriptor pinned the original directory; prove the current path
+        # still holds that same inode before any secure-retained claim.
+        current_descriptor: int | None = None
+        try:
+            try:
+                current_descriptor = os.open(
+                    workspace,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                return "gone", "workspace path no longer exists", identity
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    return (
+                        "insecure",
+                        "workspace path no longer holds the original directory",
+                        identity,
+                    )
+                return (
+                    "insecure",
+                    f"workspace path cannot be re-inspected: {_bounded_text(exc)}",
+                    identity,
+                )
+            current = os.fstat(current_descriptor)
+            if (current.st_dev, current.st_ino) != identity:
+                return (
+                    "insecure",
+                    "workspace path now points to a different directory",
+                    identity,
+                )
+        finally:
+            if current_descriptor is not None:
+                try:
+                    os.close(current_descriptor)
+                except OSError:
+                    pass
+        return "secure", "", identity
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _remove_unverified_workspace(
+    workspace: Path, original_identity: tuple[int, int] | None
+) -> None:
+    """Remove a workspace that failed retention verification.
+
+    A symlink or plain file at the path is unlinked as a path entry — the
+    target, if any, is never touched.  A directory is removed only when it is
+    owned by the effective user AND its ``(st_dev, st_ino)`` identity matches
+    *original_identity*: a replacement directory at the path may hold other
+    data and is refused, as is any path not owned by the effective user.  A
+    missing path is a successful no-op.  Any other failure raises.
+    """
+    try:
+        info = os.lstat(workspace)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OSError(f"cannot inspect the unsecurable workspace: {exc}") from exc
+    if info.st_uid != os.geteuid():
+        raise OSError("refusing to remove a path not owned by the effective user")
+    if not stat.S_ISDIR(info.st_mode):
+        # unlink the symlink or plain-file entry itself; never the target
+        os.unlink(workspace)
+        return
+    if original_identity is None or (info.st_dev, info.st_ino) != original_identity:
+        raise OSError(
+            "refusing to remove a directory not proven to be the original workspace"
+        )
+    _remove_workspace(workspace)
+
+
+def _resolve_retained_workspace(
+    journal: AgentRunRecorder | None,
+    workspace: Path,
+    reason: str,
+    *,
+    allow_removal: bool = True,
+) -> None:
+    """Verify, re-secure, record, and log one workspace the policy retains.
+
+    The path is inspected through a pinned no-follow descriptor before any
+    ``retained`` claim: a path that no longer exists (the agent deleted its
+    cwd, or cleanup partially removed it) is recorded and logged as
+    ``deleted`` — retention is never claimed for a path that is not there.
+    The current path must still hold the original user-owned directory with
+    root mode 0700 (identity compared by ``(st_dev, st_ino)``); a mutated
+    mode is restored on the pinned descriptor.  A path that cannot be kept
+    securely is removed instead, unless ``allow_removal`` is False (a
+    possibly-live process may still access it under ``AgentCleanupError``):
+    then a clear security error is logged and the truthful existing state is
+    recorded with the bounded reason.  Removal never deletes a replacement
+    directory not proven to be the original workspace, nor any path not owned
+    by the effective user.  When the secure-delete fallback raises after
+    partial work, the path is re-inspected and its actual final state
+    (missing, retained directory, or a symlink/non-directory replacement) is
+    recorded and logged — ``retained`` is never recorded solely because
+    removal raised.  The log line is emitted even without a journal so direct
+    callers can locate retained workspaces.
+    """
+    state, state_reason, identity = _inspect_workspace_for_retention(workspace)
+    if state == "gone":
+        _log.info(
+            "agent workspace no longer exists; recording deleted: %s (%s)",
+            workspace,
+            _bounded_text(reason),
+        )
+        _record_deleted_disposition(journal)
+        return
+    if state == "secure":
+        _log.info(
+            "retaining agent workspace for manual cleanup: %s (%s)",
+            workspace,
+            _bounded_text(reason),
+        )
+        _record_retained_disposition(journal, reason)
+        return
+    if not allow_removal:
+        _log.error(
+            "cannot securely keep agent workspace %s under a possibly-live process: %s",
+            workspace,
+            state_reason,
+        )
+        _record_retained_disposition(
+            journal, f"{state_reason}; {_bounded_text(reason)}"
+        )
+        return
+    try:
+        _remove_unverified_workspace(workspace, identity)
+    except Exception as exc:
+        # Never record retained solely because the removal raised: re-inspect
+        # the path without following symlinks and classify its actual final
+        # state before recording.  A path the partial removal actually took
+        # with it is recorded deleted; a path still present (a retained
+        # directory, or a symlink/non-directory replacement) is recorded
+        # retained with the truthful bounded state reason.
+        final_state, final_reason, _ = _inspect_workspace_for_retention(workspace)
+        if final_state == "gone":
+            _log.warning(
+                "unsecurable agent workspace was removed despite a removal"
+                " error: %s (%s)",
+                workspace,
+                _bounded_text(exc),
+            )
+            _record_deleted_disposition(journal)
+            return
+        if final_state == "secure":
+            effective_reason = f"{state_reason}; removal failed: {_bounded_text(exc)}"
+        else:
+            effective_reason = (
+                f"{state_reason}; removal failed: {_bounded_text(exc)};"
+                f" final state: {final_reason}"
+            )
+        _log.error(
+            "cannot securely keep or remove agent workspace %s: %s",
+            workspace,
+            effective_reason,
+        )
+        _record_retained_disposition(journal, effective_reason)
+        return
+    if not _path_absent(workspace):
+        _log.error(
+            "cannot fully remove agent workspace %s: %s",
+            workspace,
+            state_reason,
+        )
+        _record_retained_disposition(journal, f"{state_reason}; removal was incomplete")
+        return
+    _log.warning(
+        "removed unsecurable agent workspace instead of retaining it: %s (%s)",
+        workspace,
+        state_reason,
+    )
+    _record_deleted_disposition(journal)
 
 
 def _identity_for(
@@ -1730,6 +2256,7 @@ __all__ = [
     "AgentExecutionError",
     "AgentIdentity",
     "AgentRunJournalHandle",
+    "AgentRunLifecycleHandle",
     "AgentRunRecorder",
     "AgentRunRequest",
     "AgentRunResult",
@@ -1741,8 +2268,10 @@ __all__ = [
     "BOOK_EDITOR_VARIANT",
     "DEFAULT_EXECUTION_PROFILE",
     "DEFAULT_MAX_OUTPUT_BYTES",
+    "DEFAULT_WORKSPACE_RETENTION",
     "EXECUTION_PROFILE_VALUES",
     "OpenCodeAgentRunner",
+    "WORKSPACE_RETENTION_VALUES",
     "book_editor_identity",
     "_permissions_for",
 ]

@@ -211,6 +211,79 @@ def test_production_has_no_direct_openai_or_llm_client_architecture() -> None:
     assert '"openai>=' not in project
 
 
+def test_workspace_retention_defaults_on_failure_and_overrides(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pipeline default is on-failure; TOML and env override it."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[runtime]
+workspace_retention = "never"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    # the production configuration default differs from the direct-runner one
+    assert load_config(None).runtime.workspace_retention == "on-failure"
+    assert load_config(config_path).runtime.workspace_retention == "never"
+
+    monkeypatch.setenv("EPUBFORGE_RUNTIME_WORKSPACE_RETENTION", "always")
+    assert load_config(config_path).runtime.workspace_retention == "always"
+    assert load_config(None).runtime.workspace_retention == "always"
+
+    monkeypatch.delenv("EPUBFORGE_RUNTIME_WORKSPACE_RETENTION")
+    invalid_path = tmp_path / "invalid.toml"
+    invalid_path.write_text(
+        """
+[runtime]
+workspace_retention = "sometimes"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception):
+        load_config(invalid_path)
+
+    monkeypatch.setenv("EPUBFORGE_RUNTIME_WORKSPACE_RETENTION", "sometimes")
+    with pytest.raises(Exception):
+        load_config(None)
+
+
+def test_docs_and_config_declare_workspace_retention_policy() -> None:
+    """The retention policy is documented consistently across all surfaces."""
+
+    def text(path: Path) -> str:
+        return " ".join(path.read_text(encoding="utf-8").split())
+
+    config_text = (REPO_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    readme = text(REPO_ROOT / "README.md")
+    agents = text(REPO_ROOT / "AGENTS.md")
+    usage = text(REPO_ROOT / "docs" / "usage.md")
+    design = text(REPO_ROOT / "docs" / "design" / "agent-editing-workflow.md")
+
+    # the production default is on-failure, the direct runner default is never
+    assert 'workspace_retention = "on-failure"' in config_text
+    assert "EPUBFORGE_RUNTIME_WORKSPACE_RETENTION" in usage
+    assert "on-failure" in readme and "never" in readme and "always" in readme
+    assert "on-failure" in usage and "never" in usage and "always" in usage
+    assert "on-failure" in design and "never" in design and "always" in design
+    assert "Direct `OpenCodeAgentRunner` calls default to `never`" in readme
+    assert "the direct-runner default" in agents
+    assert "the direct-runner default" in design
+
+    # failed/rejected runs are retained under on-failure
+    assert "keeps it after runner failures and semantic rejections" in readme
+    assert "keeps it after runner failures and semantic rejections" in agents
+
+    # an accepted on-failure cleanup failure records retained and stays accepted
+    assert "stays accepted" in design
+    assert "run stays accepted" in agents
+
+    # AgentCleanupError retains the paths a possibly-live process may reach
+    assert "possibly-live" in design
+    assert "possibly-live" in agents
+
+
 def test_old_llm_environment_values_are_not_loaded(monkeypatch) -> None:
     monkeypatch.setenv("EPUBFORGE_LLM_API_KEY", "must-not-enter-config")
     monkeypatch.setenv("EPUBFORGE_RUNTIME_CACHE_DIR", "must-not-enter-config")

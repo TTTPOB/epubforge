@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1402,3 +1405,956 @@ def test_main_timeout_reaches_main_agent_while_probe_succeeds(tmp_path: Path) ->
     assert probe.returncode == 0
     assert manifest.final_status == "failed"
     assert list((tmp_path / "isolated").iterdir()) == []
+
+
+# -- workspace retention policies ----------------------------------------------
+def _retained_workspaces(temp_root: Path) -> list[Path]:
+    return [
+        path for path in temp_root.iterdir() if path.name.startswith("epubforge-agent-")
+    ]
+
+
+def _workspace_identity(workspace: Path) -> tuple[int, int] | None:
+    """Current (st_dev, st_ino) of *workspace*, or None when it is gone."""
+    try:
+        info = os.lstat(workspace)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def test_workspace_retention_defaults_are_never_for_direct_runners(
+    tmp_path: Path,
+) -> None:
+    """Direct runners keep the legacy eager-cleanup default."""
+    assert runner_module.DEFAULT_WORKSPACE_RETENTION == "never"
+    assert runner_module.WORKSPACE_RETENTION_VALUES == (
+        "never",
+        "on-failure",
+        "always",
+    )
+    runner = _runner(tmp_path)
+    assert runner._workspace_retention == "never"
+    result = runner(_request())
+    assert list((tmp_path / "isolated").iterdir()) == []
+    assert result.journal is None
+
+
+@pytest.mark.parametrize("value", ["", "sometimes", "NEVER", None])
+def test_invalid_workspace_retention_is_rejected(tmp_path: Path, value: Any) -> None:
+    with pytest.raises(ValueError, match="workspace retention"):
+        _runner(tmp_path, workspace_retention=value)
+
+
+def test_never_retention_records_deleted_disposition_after_runner_failure(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path, journal_root=tmp_path / "agent-runs")
+    runner._timeout_seconds = 0.1
+
+    with pytest.raises(AgentExecutionError, match="timed out"):
+        runner(_request("timeout"))
+
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "failed"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+    assert manifest.workspace_disposition.retained_at_utc is None
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+@pytest.mark.parametrize("policy", ["on-failure", "always"])
+def test_retention_keeps_workspace_after_runner_failure(
+    tmp_path: Path, policy: str
+) -> None:
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention=policy,
+    )
+    runner._timeout_seconds = 0.1
+
+    with pytest.raises(AgentExecutionError, match="timed out"):
+        runner(_request("timeout"))
+
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "failed"
+    assert manifest.runner_error is not None
+    assert manifest.runner_error.error_type == "AgentExecutionError"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.deleted_at_utc is None
+    assert manifest.workspace_disposition.reason is not None
+    assert "retention" in manifest.workspace_disposition.reason
+
+    workspace = Path(manifest.workspace_path)
+    retained = _retained_workspaces(tmp_path / "isolated")
+    assert retained == [workspace]
+    assert workspace.is_dir()
+    # the retained workspace stays mode 0700, keeps restrictive file modes,
+    # and never contains a source PDF
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert not list(workspace.rglob("*.pdf"))
+    task = workspace / "TASK.md"
+    assert task.is_file()
+    assert stat.S_IMODE(task.stat().st_mode) == 0o400
+    # config home and probe directories keep their unconditional cleanup rules
+    assert not any(
+        path.name.startswith("epubforge-opencode-")
+        for path in (tmp_path / "isolated").iterdir()
+    )
+
+
+def test_on_failure_retention_defers_cleanup_until_accepted(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    assert workspace.is_dir()
+    # the runner returned with the manifest still running and disposition
+    # pending: the caller owns the cleanup decision
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "started"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "pending"
+
+    result.journal.mark_accepted()
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    assert manifest.final_status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+
+
+def test_on_failure_retention_keeps_workspace_after_rejection(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert workspace.is_dir()
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert not list(workspace.rglob("*.pdf"))
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.validation.status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.reason is not None
+    assert "on-failure" in manifest.workspace_disposition.reason
+
+
+def test_always_retention_keeps_workspace_after_acceptance(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="always",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+
+    result.journal.mark_accepted()
+
+    assert workspace.is_dir()
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    assert not list(workspace.rglob("*.pdf"))
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "accepted"
+    assert manifest.validation.status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.deleted_at_utc is None
+    assert manifest.workspace_disposition.reason is not None
+    assert "always" in manifest.workspace_disposition.reason
+
+
+def test_unfinalized_lifecycle_handle_keeps_workspace_and_pending_disposition(
+    tmp_path: Path,
+) -> None:
+    """A caller crash without finalization keeps evidence, never deletes it."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    assert workspace.is_dir()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "started"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "pending"
+    assert manifest.workspace_disposition.deleted_at_utc is None
+    assert manifest.workspace_disposition.retained_at_utc is None
+
+
+def test_on_failure_accepted_cleanup_failure_retains_and_stays_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed deletion after acceptance never misreports: retained + reason."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    real_remove = runner_module._remove_workspace
+
+    def failing_remove(path: Any) -> None:
+        if Path(path).name.startswith("epubforge-agent-"):
+            raise OSError("injected cleanup failure")
+        real_remove(path)
+
+    monkeypatch.setattr(runner_module, "_remove_workspace", failing_remove)
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+
+    result.journal.mark_accepted()
+
+    assert workspace.is_dir()
+    run_dir = _single_run_dir(tmp_path / "agent-runs")
+    manifest = read_agent_run_manifest(run_dir / "manifest.json")
+    # publication stays accepted; the durable record carries the truth
+    assert manifest.final_status == "accepted"
+    assert manifest.validation.status == "accepted"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.retained_at_utc is not None
+    assert manifest.workspace_disposition.deleted_at_utc is None
+    assert manifest.workspace_disposition.reason is not None
+    assert "cleanup failed" in manifest.workspace_disposition.reason
+
+
+def test_on_failure_without_journal_still_defers_cleanup(tmp_path: Path) -> None:
+    """Deferred cleanup also works for journal-less direct runners."""
+    runner = _runner(tmp_path, workspace_retention="on-failure")
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    assert workspace.is_dir()
+
+    result.journal.mark_accepted()
+
+    assert not workspace.exists()
+    assert list((tmp_path / "isolated").iterdir()) == []
+
+
+def test_concurrent_on_failure_runs_keep_distinct_retained_workspaces(
+    tmp_path: Path,
+) -> None:
+    """Concurrent runs keep unique run dirs and retained workspaces.
+
+    Each thread gets its own helper executable and temp root: concurrently
+    exec-ing a single shared helper script from four threads intermittently
+    produces a silently empty config-probe subprocess in the pytest process,
+    which is unrelated to the runner and would make this test flaky.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    journal_root = tmp_path / "agent-runs"
+    errors: list[BaseException] = []
+
+    def run_one(index: int) -> None:
+        try:
+            isolated = tmp_path / f"iso-{index}"
+            isolated.mkdir()
+            runner = OpenCodeAgentRunner(
+                executable=_helper(isolated),
+                temp_root=isolated,
+                timeout_seconds=10,
+                terminate_grace_seconds=0.1,
+                journal_root=journal_root,
+                workspace_retention="always",
+            )
+            result = runner(_request())
+            assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+            result.journal.mark_accepted()
+        except BaseException as exc:  # pragma: no cover - failure diagnosis
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(run_one, range(8)))
+
+    assert errors == []
+    runs = sorted(journal_root.glob("*"))
+    assert len(runs) == 8
+    workspaces: list[Path] = []
+    for run_dir in runs:
+        manifest = read_agent_run_manifest(run_dir / "manifest.json")
+        assert manifest.final_status == "accepted"
+        assert manifest.workspace_path is not None
+        assert manifest.workspace_disposition is not None
+        assert manifest.workspace_disposition.disposition == "retained"
+        assert Path(manifest.workspace_path).is_dir()
+        workspaces.append(Path(manifest.workspace_path))
+    assert len(set(workspaces)) == 8
+
+
+# -- retention verification and truthful disposition ---------------------------
+
+
+def test_no_journal_on_failure_retains_and_logs_workspace(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without a journal the retained workspace is still logged and located."""
+    runner = _runner(tmp_path, workspace_retention="on-failure")
+    runner._timeout_seconds = 0.1
+    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
+
+    with pytest.raises(AgentExecutionError, match="timed out"):
+        runner(_request("timeout"))
+
+    workspaces = _retained_workspaces(tmp_path / "isolated")
+    assert len(workspaces) == 1
+    assert workspaces[0].is_dir()
+    assert stat.S_IMODE(workspaces[0].stat().st_mode) == 0o700
+    # the log names the exact path with the bounded reason
+    assert any(
+        "retaining agent workspace for manual cleanup" in record.message
+        and str(workspaces[0]) in record.message
+        for record in caplog.records
+    )
+
+
+def test_deferred_retention_logs_path_before_caller_finalizes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The retained path is logged at runner return, before any finalize."""
+    runner = _runner(tmp_path, workspace_retention="on-failure")
+    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    assert any(
+        "keeping agent workspace for deferred cleanup" in record.message
+        and str(workspace) in record.message
+        for record in caplog.records
+    )
+
+
+def test_agent_deleted_workspace_records_deleted_after_runner_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A workspace the agent already removed is never claimed retained."""
+    monkeypatch.setenv("EPUBFORGE_TEST_AGENT_MODE", "success")
+
+    def delete_then_fail(
+        self: Any, workspace: Path, request: AgentRunRequest, journal: Any
+    ) -> tuple[bytes, bytes]:
+        shutil.rmtree(workspace)
+        raise AgentExecutionError("agent removed its own workspace")
+
+    monkeypatch.setattr(runner_module.OpenCodeAgentRunner, "_invoke", delete_then_fail)
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
+
+    with pytest.raises(AgentExecutionError, match="removed its own workspace"):
+        runner(_request())
+
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "failed"
+    assert manifest.workspace_path is not None
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert not Path(manifest.workspace_path).exists()
+    assert any("no longer exists" in record.message for record in caplog.records)
+
+
+def test_agent_deleted_workspace_records_deleted_on_rejection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A workspace deleted between runner return and rejection: deleted."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    shutil.rmtree(workspace)
+    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert manifest.workspace_disposition.deleted_at_utc is not None
+    assert any("no longer exists" in record.message for record in caplog.records)
+
+
+def test_chmod_mutated_workspace_is_restored_before_retention(
+    tmp_path: Path,
+) -> None:
+    """A mutated root mode is restored to 0700 before retention is claimed."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    os.chmod(workspace, 0o777)
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o777
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert workspace.is_dir()
+    assert stat.S_IMODE(workspace.stat().st_mode) == 0o700
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+
+
+def test_resecure_failure_removes_unsecurable_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unsecurable workspace is safely removed instead of retained."""
+    monkeypatch.setattr(
+        runner_module,
+        "_inspect_workspace_for_retention",
+        lambda workspace: (
+            "insecure",
+            "injected re-secure failure",
+            _workspace_identity(workspace),
+        ),
+    )
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert any(
+        "removed unsecurable agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_resecure_and_removal_failure_keeps_truthful_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both failures keep the truthful existing state with a security error."""
+    monkeypatch.setattr(
+        runner_module,
+        "_inspect_workspace_for_retention",
+        lambda workspace: (
+            "insecure",
+            "injected re-secure failure",
+            _workspace_identity(workspace),
+        ),
+    )
+
+    def failing_remove(workspace: Path, original_identity: Any) -> None:
+        raise OSError("injected removal failure")
+
+    monkeypatch.setattr(runner_module, "_remove_unverified_workspace", failing_remove)
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert workspace.is_dir()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "injected re-secure failure" in manifest.workspace_disposition.reason
+    assert any(
+        "cannot securely keep or remove agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_symlink_at_workspace_path_is_removed_not_retained(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A symlink planted at the workspace path is never claimed retained.
+
+    The no-follow open fails on the symlink before any mode restore, so the
+    symlink target is never chmodded and keeps its data.
+    """
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    shutil.rmtree(workspace)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    marker = decoy / "marker.txt"
+    marker.write_text("precious data", encoding="utf-8")
+    os.chmod(decoy, 0o755)
+    workspace.symlink_to(decoy, target_is_directory=True)
+    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert not workspace.is_symlink()
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    # the symlink target was never chmodded and keeps its data
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o755
+    assert marker.read_text(encoding="utf-8") == "precious data"
+
+
+def test_resecure_after_path_replacement_classifies_current_path_truthfully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A swap after the fd opens is classified by the current path, truthfully.
+
+    The directory descriptor pins the original inode and the mode restore
+    runs through ``fchmod`` on it, so the symlink target is never chmodded.
+    The identity re-check then sees that the path now holds a symlink, which
+    is not the original directory: the workspace is recorded ``deleted`` and
+    the symlink entry is removed — the original path is never claimed as a
+    secure retained workspace.
+    """
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    # force the mode-restore branch: the workspace root is world-accessible
+    os.chmod(workspace, 0o777)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    marker = decoy / "marker.txt"
+    marker.write_text("precious data", encoding="utf-8")
+    os.chmod(decoy, 0o755)
+    swapped = {"done": False}
+    real_open = runner_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            # replace the path right after the directory descriptor opened
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+            workspace.symlink_to(decoy, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(runner_module.os, "open", swapping_open)
+    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    # the identity re-check classified the CURRENT path truthfully: the
+    # workspace is gone from the path, the symlink entry was removed, and the
+    # original path is never recorded as a secure retained workspace
+    assert not workspace.is_symlink()
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert any(
+        "removed unsecurable agent workspace" in record.message
+        for record in caplog.records
+    )
+    # the symlink target was never chmodded and keeps its data
+    assert stat.S_IMODE(decoy.stat().st_mode) == 0o755
+    assert marker.read_text(encoding="utf-8") == "precious data"
+
+
+def test_replaced_directory_after_open_is_never_deleted_or_claimed_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A different-directory replacement is kept and recorded truthfully.
+
+    The identity re-check sees a different ``(st_dev, st_ino)`` at the path;
+    the removal refuses to delete a directory not proven to be the original
+    workspace, so the replacement and its data survive and the record names
+    the mismatch.
+    """
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    swapped = {"done": False}
+    real_open = runner_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+            workspace.mkdir()
+            (workspace / "marker.txt").write_text("other user's data", encoding="utf-8")
+        return descriptor
+
+    monkeypatch.setattr(runner_module.os, "open", swapping_open)
+    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert workspace.is_dir()
+    assert (workspace / "marker.txt").read_text(encoding="utf-8") == "other user's data"
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "different directory" in manifest.workspace_disposition.reason
+    assert any(
+        "cannot securely keep or remove agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_path_removed_after_open_records_deleted_not_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A path that vanishes after the open is recorded deleted, never retained."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    swapped = {"done": False}
+    real_open = runner_module.os.open
+
+    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(workspace):
+            swapped["done"] = True
+            shutil.rmtree(workspace)
+        return descriptor
+
+    monkeypatch.setattr(runner_module.os, "open", swapping_open)
+    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert any("no longer exists" in record.message for record in caplog.records)
+
+
+def test_removal_raise_after_partial_delete_records_deleted_when_path_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A removal that raises after deleting the path records deleted, never retained.
+
+    The secure-delete fallback is first classified insecure, then actually
+    removes the workspace before raising; the resolver must re-inspect and
+    record the truthful missing state instead of blaming the raise.
+    """
+    real_inspect = runner_module._inspect_workspace_for_retention
+    calls = {"count": 0}
+
+    def flaky_inspect(workspace: Path) -> tuple[str, str, Any]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return ("insecure", "injected re-secure failure", None)
+        return real_inspect(workspace)
+
+    monkeypatch.setattr(
+        runner_module, "_inspect_workspace_for_retention", flaky_inspect
+    )
+
+    def remove_then_raise(workspace: Path, original_identity: Any) -> None:
+        shutil.rmtree(workspace)
+        raise OSError("injected removal failure after partial work")
+
+    monkeypatch.setattr(
+        runner_module, "_remove_unverified_workspace", remove_then_raise
+    )
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert any(
+        "was removed despite a removal error" in record.message
+        for record in caplog.records
+    )
+
+
+def test_removal_raise_after_partial_delete_records_replaced_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A removal that raises after replacing the path records the replacement.
+
+    The partial deletion swapped the workspace for a symlink before raising;
+    the resolver must re-inspect, recognize the non-directory replacement,
+    and record the truthful retained state with the bounded final-state
+    reason rather than claiming deleted.
+    """
+    real_inspect = runner_module._inspect_workspace_for_retention
+    calls = {"count": 0}
+
+    def flaky_inspect(workspace: Path) -> tuple[str, str, Any]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return ("insecure", "injected re-secure failure", None)
+        return real_inspect(workspace)
+
+    monkeypatch.setattr(
+        runner_module, "_inspect_workspace_for_retention", flaky_inspect
+    )
+
+    def replace_then_raise(workspace: Path, original_identity: Any) -> None:
+        shutil.rmtree(workspace)
+        decoy = tmp_path / "decoy"
+        decoy.mkdir()
+        workspace.symlink_to(decoy, target_is_directory=True)
+        raise OSError("injected removal failure after partial work")
+
+    monkeypatch.setattr(
+        runner_module, "_remove_unverified_workspace", replace_then_raise
+    )
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    # the replacement survives and the record names its actual state
+    assert workspace.is_symlink()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "final state" in manifest.workspace_disposition.reason
+    assert "not the original directory" in manifest.workspace_disposition.reason
+    assert any(
+        "cannot securely keep or remove agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_foreign_owned_workspace_is_never_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A foreign-owned replacement is refused removal and recorded truthfully."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    # simulate a foreign-owned replacement at resolve time only
+    monkeypatch.setattr(runner_module.os, "geteuid", lambda: 424242)
+    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    assert workspace.is_dir()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "not owned by the effective user" in manifest.workspace_disposition.reason
+    assert any(
+        "cannot securely keep or remove agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_fchmod_failure_classifies_unsecurable_and_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed fd-based mode restore never claims a secured workspace."""
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+    workspace = _retained_workspaces(tmp_path / "isolated")[0]
+    os.chmod(workspace, 0o777)
+
+    def failing_fchmod(descriptor: int, mode: int) -> None:
+        raise OSError("injected fchmod failure")
+
+    monkeypatch.setattr(runner_module.os, "fchmod", failing_fchmod)
+    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    # the unsecurable workspace was removed, never claimed retained
+    assert not workspace.exists()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "rejected"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
+    assert any(
+        "removed unsecurable agent workspace" in record.message
+        for record in caplog.records
+    )
+
+
+def test_insecure_workspace_under_cleanup_error_is_never_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A possibly-live process keeps the workspace even when unsecurable."""
+    captured: dict[str, int] = {}
+    monkeypatch.setattr(
+        journal_module.AgentRunJournal,
+        "process_pid",
+        _fail_process_pid_for(captured, "agent"),
+    )
+    monkeypatch.setattr(runner_module, "_signal_process_group", lambda *a, **k: True)
+    monkeypatch.setattr(runner_module, "_process_group_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        runner_module,
+        "_inspect_workspace_for_retention",
+        lambda workspace: (
+            "insecure",
+            "injected re-secure failure",
+            _workspace_identity(workspace),
+        ),
+    )
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
+
+    with pytest.raises(AgentCleanupError, match="cannot guarantee cleanup"):
+        runner(_request("inspect"))
+
+    retained = _retained_workspaces(tmp_path / "isolated")
+    assert len(retained) == 1
+    assert retained[0].is_dir()
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.final_status == "failed"
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "retained"
+    assert manifest.workspace_disposition.reason is not None
+    assert "injected re-secure failure" in manifest.workspace_disposition.reason
+    assert any("possibly-live process" in record.message for record in caplog.records)

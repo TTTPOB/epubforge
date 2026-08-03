@@ -29,10 +29,21 @@ the terminal manifest and marks the intent completed.  A failure or crash
 between the two writes leaves a strictly readable non-terminal manifest that
 carries the pending intent, so the last durable record never masquerades as
 an ordinary running run when a finalization attempt was interrupted.
+
+The manifest also carries a strict workspace disposition (``pending``,
+``deleted``, ``retained``) with bounded reason and timestamps.  ``record_workspace``
+starts the record as ``pending``; the runner or the lifecycle handle resolves
+it to ``deleted`` or ``retained`` before finalizing the run, so a terminal
+manifest never claims a disposition the caller did not carry out.  A run
+finalized while its workspace disposition is still unresolved is resolved
+conservatively from the filesystem: a still-existing workspace is recorded as
+``retained`` (evidence is kept, never silently deleted), a vanished one as
+``deleted``.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -50,7 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from epubforge.agent_runner import AgentIdentity, AgentRunJournalHandle
 
 AGENT_RUN_SCHEMA = "epubforge.agent-run"
-AGENT_RUN_SCHEMA_VERSION = 1
+AGENT_RUN_SCHEMA_VERSION = 2
 
 _MANIFEST_NAME = "manifest.json"
 _MAX_MESSAGE_CHARS = 2000
@@ -371,6 +382,7 @@ class AgentRunJournal:
         self._started_at_utc = _utc_now()
         self._ended_at_utc: str | None = None
         self._workspace_path: str | None = None
+        self._workspace_disposition: dict[str, Any] | None = None
         self._inputs: list[tuple[str, int, str]] = []
         self._outputs: dict[str, dict[str, Any]] = {
             name: {
@@ -428,6 +440,65 @@ class AgentRunJournal:
 
     def record_workspace(self, workspace: str | Path) -> None:
         self._workspace_path = os.fspath(workspace)
+        # Every recorded workspace starts with a pending disposition: only the
+        # runner (immediate deletion) or the lifecycle handle (deferred
+        # cleanup) may resolve it to deleted or retained, and the terminal
+        # manifest must carry that resolution whenever a workspace exists.
+        self._workspace_disposition = {
+            "disposition": "pending",
+            "deleted_at_utc": None,
+            "retained_at_utc": None,
+            "reason": None,
+        }
+        self._write_manifest()
+
+    def record_workspace_disposition(
+        self,
+        disposition: Literal["deleted", "retained"],
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Resolve the workspace disposition before the run is finalized.
+
+        ``pending`` is not caller-recordable: it is the initial state of a
+        recorded workspace and the durable marker of an unresolved cleanup.
+        Only ``deleted`` and ``retained`` are accepted; anything else raises
+        so no caller can map an arbitrary value onto a retention claim.
+        ``deleted`` carries the resolution timestamp; ``retained`` carries the
+        retention timestamp and an optional bounded non-empty string reason.
+        Recording after finalization raises, so a terminal manifest can never
+        be rewritten to change what happened to the workspace.
+        """
+        if self._workspace_path is None:
+            raise AgentRunJournalError(
+                f"agent run {self._run_id} has no workspace to dispose"
+            )
+        if self._finalized:
+            raise AgentRunJournalError(f"agent run {self._run_id} is already finalized")
+        if disposition not in ("deleted", "retained"):
+            raise AgentRunJournalError(
+                f"agent run {self._run_id} has an invalid workspace disposition:"
+                f" {disposition!r}"
+            )
+        if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+            raise AgentRunJournalError(
+                "agent run workspace disposition reason must be a non-empty string"
+            )
+        bounded_reason = _bounded_message(reason) if reason is not None else None
+        if disposition == "deleted":
+            self._workspace_disposition = {
+                "disposition": "deleted",
+                "deleted_at_utc": _utc_now(),
+                "retained_at_utc": None,
+                "reason": bounded_reason,
+            }
+        else:
+            self._workspace_disposition = {
+                "disposition": "retained",
+                "deleted_at_utc": None,
+                "retained_at_utc": _utc_now(),
+                "reason": bounded_reason,
+            }
         self._write_manifest()
 
     def record_input(self, name: str, size_bytes: int, sha256: str) -> None:
@@ -783,6 +854,7 @@ class AgentRunJournal:
             self._close_streams()
             if self._ended_at_utc is None:
                 self._ended_at_utc = _utc_now()
+            self._resolve_unresolved_workspace_disposition()
             # Durable pending finalization intent: the run ended and is about
             # to transition to *final_status*.  This write happens before the
             # terminal manifest, so a crash or write failure in between leaves
@@ -815,6 +887,234 @@ class AgentRunJournal:
             self._close_streams()
             self._close_fds()
         self._finalized = True
+
+    def _resolve_unresolved_workspace_disposition(self) -> None:
+        """Conservatively resolve a pending workspace disposition at finalize.
+
+        A run finalized while its recorded workspace still carries an
+        unresolved disposition (a direct journal user, or a crash between the
+        runner returning and the lifecycle handle acting) must never produce a
+        terminal manifest with a pending disposition.  The resolution opens
+        the path with ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW`` and verifies the
+        opened descriptor, so a symlink at the path is never followed and a
+        path replacement cannot redirect the mode restore onto another
+        target: a path that no longer exists, or whose final component is a
+        symlink or plain file, is recorded as ``deleted``; a real directory
+        owned by the effective user is recorded as ``retained`` with its root
+        mode restored to 0700 through ``fchmod`` on the pinned descriptor.  A
+        directory or replacement not owned by the effective user is never
+        treated as an ordinary retained workspace: it is recorded as
+        ``retained`` with a truthful bounded reason naming the unsafe state,
+        and it is never deleted — the journal only records, it never removes
+        paths, and a foreign-owned path may hold another user's data.
+        """
+        if (
+            self._workspace_path is None
+            or self._workspace_disposition is None
+            or self._workspace_disposition.get("disposition") != "pending"
+        ):
+            return
+        workspace = Path(self._workspace_path)
+        descriptor: int | None = None
+        try:
+            try:
+                descriptor = os.open(
+                    workspace,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                self._workspace_disposition = {
+                    "disposition": "deleted",
+                    "deleted_at_utc": _utc_now(),
+                    "retained_at_utc": None,
+                    "reason": (
+                        "workspace no longer exists when the run was finalized "
+                        "without an explicit disposition"
+                    ),
+                }
+                return
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    # The final component is a symlink or a plain file, never
+                    # the original directory; claiming retention would claim a
+                    # workspace that is no longer there.
+                    self._workspace_disposition = {
+                        "disposition": "deleted",
+                        "deleted_at_utc": _utc_now(),
+                        "retained_at_utc": None,
+                        "reason": (
+                            "workspace path is no longer the original directory "
+                            "when the run was finalized without an explicit "
+                            "disposition"
+                        ),
+                    }
+                    return
+                self._workspace_disposition = {
+                    "disposition": "retained",
+                    "deleted_at_utc": None,
+                    "retained_at_utc": _utc_now(),
+                    "reason": (
+                        "workspace could not be inspected when the run was "
+                        "finalized without an explicit disposition: "
+                        + _bounded_message(exc)
+                    ),
+                }
+                return
+            info = os.fstat(descriptor)
+            identity = (info.st_dev, info.st_ino)
+            if not stat.S_ISDIR(info.st_mode):
+                self._workspace_disposition = {
+                    "disposition": "deleted",
+                    "deleted_at_utc": _utc_now(),
+                    "retained_at_utc": None,
+                    "reason": (
+                        "workspace path is no longer the original directory when "
+                        "the run was finalized without an explicit disposition"
+                    ),
+                }
+                return
+            if info.st_uid != os.geteuid():
+                # A foreign-owned replacement is never silently treated as an
+                # ordinary retained workspace: the journal records the truthful
+                # unsafe state with a bounded reason and never deletes the path.
+                self._workspace_disposition = {
+                    "disposition": "retained",
+                    "deleted_at_utc": None,
+                    "retained_at_utc": _utc_now(),
+                    "reason": (
+                        "workspace is not owned by the effective user when the run "
+                        "was finalized without an explicit disposition; kept for "
+                        "manual inspection, not verified as a safe retained "
+                        "workspace"
+                    ),
+                }
+                return
+            if stat.S_IMODE(info.st_mode) != 0o700:
+                try:
+                    os.fchmod(descriptor, 0o700)
+                except OSError as exc:
+                    self._workspace_disposition = {
+                        "disposition": "retained",
+                        "deleted_at_utc": None,
+                        "retained_at_utc": _utc_now(),
+                        "reason": (
+                            "workspace mode could not be restored to 0700 when the "
+                            "run was finalized without an explicit disposition: "
+                            + _bounded_message(exc)
+                        ),
+                    }
+                    return
+                try:
+                    restored = os.fstat(descriptor)
+                except OSError as exc:
+                    self._workspace_disposition = {
+                        "disposition": "retained",
+                        "deleted_at_utc": None,
+                        "retained_at_utc": _utc_now(),
+                        "reason": (
+                            "workspace could not be re-inspected after mode restore "
+                            "when the run was finalized without an explicit "
+                            "disposition: " + _bounded_message(exc)
+                        ),
+                    }
+                    return
+                if (
+                    not stat.S_ISDIR(restored.st_mode)
+                    or stat.S_IMODE(restored.st_mode) != 0o700
+                ):
+                    self._workspace_disposition = {
+                        "disposition": "retained",
+                        "deleted_at_utc": None,
+                        "retained_at_utc": _utc_now(),
+                        "reason": (
+                            "workspace mode is still not 0700 after the restore "
+                            "attempt when the run was finalized without an "
+                            "explicit disposition"
+                        ),
+                    }
+                    return
+            # The descriptor pinned the original directory; prove the current path
+            # still holds that same inode before any retained claim is recorded.
+            # A path that disappeared, became a symlink or non-directory, or now
+            # points to a different directory inode is classified truthfully and
+            # the original is never recorded as a verified retained workspace.
+            current_descriptor: int | None = None
+            try:
+                try:
+                    current_descriptor = os.open(
+                        workspace,
+                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                except FileNotFoundError:
+                    self._workspace_disposition = {
+                        "disposition": "deleted",
+                        "deleted_at_utc": _utc_now(),
+                        "retained_at_utc": None,
+                        "reason": (
+                            "workspace path no longer exists when the run was "
+                            "finalized without an explicit disposition"
+                        ),
+                    }
+                    return
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        self._workspace_disposition = {
+                            "disposition": "deleted",
+                            "deleted_at_utc": _utc_now(),
+                            "retained_at_utc": None,
+                            "reason": (
+                                "workspace path no longer holds the original "
+                                "directory when the run was finalized without an "
+                                "explicit disposition"
+                            ),
+                        }
+                        return
+                    self._workspace_disposition = {
+                        "disposition": "retained",
+                        "deleted_at_utc": None,
+                        "retained_at_utc": _utc_now(),
+                        "reason": (
+                            "workspace path could not be re-inspected when the run "
+                            "was finalized without an explicit disposition: "
+                            + _bounded_message(exc)
+                        ),
+                    }
+                    return
+                current = os.fstat(current_descriptor)
+                if (current.st_dev, current.st_ino) != identity:
+                    self._workspace_disposition = {
+                        "disposition": "retained",
+                        "deleted_at_utc": None,
+                        "retained_at_utc": _utc_now(),
+                        "reason": (
+                            "workspace path now points to a different directory than "
+                            "the recorded workspace when the run was finalized "
+                            "without an explicit disposition; not verified as the "
+                            "original workspace"
+                        ),
+                    }
+                    return
+            finally:
+                if current_descriptor is not None:
+                    try:
+                        os.close(current_descriptor)
+                    except OSError:
+                        pass
+            self._workspace_disposition = {
+                "disposition": "retained",
+                "deleted_at_utc": None,
+                "retained_at_utc": _utc_now(),
+                "reason": (
+                    "workspace disposition was not resolved before finalization; "
+                    "the workspace was kept conservatively"
+                ),
+            }
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
     def _close_streams(self) -> None:
         for state in self._streams.values():
@@ -866,6 +1166,11 @@ class AgentRunJournal:
             "started_at_utc": self._started_at_utc,
             "ended_at_utc": self._ended_at_utc,
             "workspace_path": self._workspace_path,
+            "workspace_disposition": (
+                dict(self._workspace_disposition)
+                if self._workspace_disposition is not None
+                else None
+            ),
             "inputs": [
                 {"name": name, "size_bytes": size, "sha256": digest}
                 for name, size, digest in self._inputs
@@ -1247,6 +1552,53 @@ class AgentRunFinalizationRecord(BaseModel):
         return self
 
 
+class AgentRunWorkspaceDisposition(BaseModel):
+    """Strict record of what happened to one run's agent workspace.
+
+    ``pending`` marks a recorded workspace whose cleanup was never resolved
+    (a running run, a crash-left finalization intent, or a run without a
+    recorded workspace at all).  ``deleted`` and ``retained`` are terminal:
+    they carry the resolution timestamp, and ``retained`` may carry a bounded
+    reason.  A terminal manifest with a recorded workspace must never carry a
+    ``pending`` disposition: evidence is either gone or explicitly kept.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    disposition: Literal["pending", "deleted", "retained"]
+    deleted_at_utc: str | None = None
+    retained_at_utc: str | None = None
+    reason: str | None = Field(
+        default=None, min_length=1, max_length=_MAX_MESSAGE_CHARS
+    )
+
+    @model_validator(mode="after")
+    def _coherent(self) -> AgentRunWorkspaceDisposition:
+        if self.disposition == "pending":
+            if self.deleted_at_utc is not None or self.retained_at_utc is not None:
+                raise ValueError(
+                    "pending workspace disposition cannot carry a timestamp"
+                )
+        elif self.disposition == "deleted":
+            if self.deleted_at_utc is None:
+                raise ValueError(
+                    "deleted workspace disposition lacks a deletion timestamp"
+                )
+            if self.retained_at_utc is not None:
+                raise ValueError(
+                    "deleted workspace disposition cannot carry a retention timestamp"
+                )
+        elif self.retained_at_utc is None:
+            raise ValueError(
+                "retained workspace disposition lacks a retention timestamp"
+            )
+        elif self.deleted_at_utc is not None:
+            raise ValueError(
+                "retained workspace disposition cannot carry a deletion timestamp"
+            )
+        return self
+
+
 class AgentRunManifest(BaseModel):
     """Strict contract for a persisted ``manifest.json`` run record."""
 
@@ -1255,13 +1607,14 @@ class AgentRunManifest(BaseModel):
     schema_name: Literal["epubforge.agent-run"] = Field(
         default=AGENT_RUN_SCHEMA, alias="schema"
     )
-    schema_version: Literal[1] = AGENT_RUN_SCHEMA_VERSION
+    schema_version: Literal[2] = AGENT_RUN_SCHEMA_VERSION
     run_id: str = Field(pattern=_RUN_ID_PATTERN)
     title: str = Field(min_length=1)
     agent: AgentRunAgentInfo
     started_at_utc: str
     ended_at_utc: str | None = None
     workspace_path: str | None = None
+    workspace_disposition: AgentRunWorkspaceDisposition | None = None
     inputs: list[AgentRunInputRecord] = Field(default_factory=list)
     outputs: list[AgentRunOutputRecord] = Field(default_factory=list)
     processes: list[AgentRunProcessRecord] = Field(default_factory=list)
@@ -1280,6 +1633,19 @@ class AgentRunManifest(BaseModel):
             raise ValueError("session parsing completed without a parsing mode")
         if not self.session_parsed and self.session_parse_mode is not None:
             raise ValueError("session parsing mode without completed parsing")
+        if self.workspace_path is None:
+            if self.workspace_disposition is not None:
+                raise ValueError("workspace disposition without a workspace path")
+        else:
+            if self.workspace_disposition is None:
+                raise ValueError("workspace path without a workspace disposition")
+            if (
+                self.final_status in ("accepted", "rejected", "failed")
+                and self.workspace_disposition.disposition == "pending"
+            ):
+                raise ValueError(
+                    "terminal runs cannot carry a pending workspace disposition"
+                )
         if self.final_status in ("accepted", "rejected"):
             if self.validation.status != self.final_status:
                 raise ValueError(
@@ -1447,6 +1813,7 @@ __all__ = [
     "AgentRunProcessRecord",
     "AgentRunStreamRecord",
     "AgentRunValidationRecord",
+    "AgentRunWorkspaceDisposition",
     "create_agent_run_journal",
     "read_agent_run_manifest",
     "record_accepted",

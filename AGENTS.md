@@ -49,7 +49,17 @@ Agent workspaces use mode 0700 system temporary directories outside the
 repository and book workspace. The runner disables project config and external
 skills. It always denies subagents, external directories, web tools, skills,
 questions, and MCP tools, and allows file reads, listing, globbing, grep, and
-edits only inside the isolated directory.
+edits only inside the isolated directory. `[runtime] workspace_retention`
+(default `on-failure`) decides where the workspace goes after each run:
+`never` removes it on every outcome (the direct-runner default),
+`on-failure` keeps it after runner failures and semantic rejections and
+removes it only after an accepted publication (a failed deletion keeps the
+workspace, records the truthful `retained` disposition with a bounded reason,
+and the run stays accepted), and `always` keeps it for every outcome.
+Retained workspaces are verified without following symlinks, restored to mode
+0700, logged with a bounded reason (also for journal-less direct runs), and
+may be removed manually after debugging. `AgentCleanupError` retains every
+path a possibly-live process may still reach under every policy.
 
 Execution profiles widen the permission baseline: `[runtime]
 execution_profile` selects `development` (default) or `restricted`. Stage 3
@@ -68,13 +78,15 @@ defaults and the listed environment variables. `config.example.toml` contains
 the complete section shape:
 
 - `[mineru]`: API key, endpoint, polling, archive limits, and extraction options
-- `[runtime]`: concurrency, work directory, log level, and execution profile
+- `[runtime]`: concurrency, work directory, log level, execution profile, and
+  agent workspace retention (`never` | `on-failure` default | `always`)
 - `[chapters]`: page JPEG DPI and quality
 
 The epubforge credential is `EPUBFORGE_MINERU_API_KEY`. Leaf overrides include
 the documented `EPUBFORGE_MINERU_*` fields,
 `EPUBFORGE_RUNTIME_CONCURRENCY`, `EPUBFORGE_RUNTIME_WORK_DIR`,
-`EPUBFORGE_RUNTIME_LOG_LEVEL`, `EPUBFORGE_RUNTIME_EXECUTION_PROFILE`, and the
+`EPUBFORGE_RUNTIME_LOG_LEVEL`, `EPUBFORGE_RUNTIME_EXECUTION_PROFILE`,
+`EPUBFORGE_RUNTIME_WORKSPACE_RETENTION`, and the
 chapter rendering fields. OpenCode owns
 model authentication and provider configuration. Logs go to
 `work/<book_name>/logs/` and stderr.
