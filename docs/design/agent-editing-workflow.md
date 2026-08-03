@@ -1,5 +1,9 @@
 # Isolated OpenCode Book-Editing Workflow
 
+The proposed next Stage 5 contract is documented in
+[HTML IR Diff Audit for Agent Revisions](html-ir-diff-audit.md). That proposal
+is not implemented yet.
+
 ## Design
 
 epubforge keeps the ingestion path linear:
