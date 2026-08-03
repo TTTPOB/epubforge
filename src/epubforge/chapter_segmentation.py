@@ -40,7 +40,7 @@ from epubforge.strict_json import (
 CHAPTERS_SCHEMA = "epubforge.chapter-segmentation"
 CHAPTERS_SCHEMA_VERSION = 2
 CONTENT_PROJECTION_SCHEMA = "epubforge.chapter-content-projection"
-CONTENT_PROJECTION_SCHEMA_VERSION = 2
+CONTENT_PROJECTION_SCHEMA_VERSION = 3
 MAX_INPUT_JSON_BYTES = DEFAULT_MAX_JSON_BYTES
 
 SEGMENTATION_TASK = """# Chapter segmentation task
@@ -55,10 +55,28 @@ as evidence. Dense table-of-contents title lists are not body starts.
 Running headers, quotations, and embedded document or article titles can
 resemble chapter starts.
 
-Write `boundaries.json` as one JSON object with exactly this shape:
+The projection's top-level `coverage` object identifies the complete input
+range and content: `item_count`, the first and last `content_idx`, the first
+and last `page_idx`, and `items_sha256`, a SHA-256 digest of the projected
+items. Inspect the entire projection before answering. Copy every `coverage`
+value exactly from the projection's `coverage` object into your
+`boundaries.json`; never compute, guess, or alter them. Missing, stale, or
+mismatched coverage fails the run.
+
+Write `boundaries.json` as one JSON object with exactly this shape.  The
+`coverage` values shown below are illustrative placeholders; replace every
+one with the exact value copied from the projection's `coverage` object:
 
 ```json
 {
+  "coverage": {
+    "item_count": 1,
+    "first_content_idx": 0,
+    "last_content_idx": 0,
+    "first_page_idx": 0,
+    "last_page_idx": 0,
+    "items_sha256": "64 hex characters copied from the projection"
+  },
   "boundaries": [
     {
       "title": "exact source text",
@@ -81,8 +99,23 @@ order. Write no other files.
 # The projection contract belongs in freshness fingerprints because changing
 # any projected field changes the model input even when the prose stays put.
 CONTENT_PROJECTION_CONTRACT: tuple[int, tuple[str, ...]] = (
-    3,
+    4,
     ("content_idx", "page_idx", "type", "text_level", "text_chunks"),
+)
+
+# The coverage acknowledgement is a deterministic identity/range check, not a
+# cryptographic proof that the model read every item.  The field set and the
+# digest canonicalization belong in the contract fingerprint so format
+# changes invalidate previously-fresh artifacts.
+COVERAGE_SCHEMA = "epubforge.chapter-projection-coverage"
+COVERAGE_SCHEMA_VERSION = 1
+_COVERAGE_FIELDS = (
+    "item_count",
+    "first_content_idx",
+    "last_content_idx",
+    "first_page_idx",
+    "last_page_idx",
+    "items_sha256",
 )
 
 # Physical line budget: every chunk line must stay comfortably below
@@ -170,12 +203,30 @@ class ChapterBoundary(BaseModel):
     evidence: str = Field(min_length=1, max_length=500)
 
 
+class ProjectionCoverageAcknowledgement(BaseModel):
+    """Exact input identity/range the agent claims to have inspected.
+
+    This is a deterministic acknowledgement, not a cryptographic proof that
+    the model read every projected item.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    item_count: int = Field(ge=1)
+    first_content_idx: int = Field(ge=0)
+    last_content_idx: int = Field(ge=0)
+    first_page_idx: int = Field(ge=0)
+    last_page_idx: int = Field(ge=0)
+    items_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+
 class ChapterSegmentationResponse(BaseModel):
     """Strict contents accepted from the agent's ``boundaries.json``."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     boundaries: list[ChapterBoundary] = Field(min_length=1)
+    coverage: ProjectionCoverageAcknowledgement
 
 
 class ChapterSegmentationArtifact(BaseModel):
@@ -268,6 +319,7 @@ def segment_chapters(
             )
         )
         response = _parse_agent_response(result.outputs.get("boundaries.json"))
+        validate_coverage_acknowledgement(response.coverage, source_items)
         validate_boundaries(response.boundaries, source_items)
     except ValidationError as exc:
         raise ChapterSegmentationError(
@@ -409,6 +461,33 @@ def validate_boundaries(
 
     if not seen_chapter:
         raise ChapterSegmentationError("At least one chapter boundary is required")
+
+
+def validate_coverage_acknowledgement(
+    coverage: ProjectionCoverageAcknowledgement | Mapping[str, Any],
+    source_items: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require the agent's coverage acknowledgement to match the projection.
+
+    Every expected field must match exactly.  This is a deterministic
+    identity/range acknowledgement, not a cryptographic proof that the model
+    read every projected item.  Call it before accepting any boundary.
+    """
+    if not isinstance(coverage, ProjectionCoverageAcknowledgement):
+        try:
+            coverage = ProjectionCoverageAcknowledgement.model_validate(coverage)
+        except ValidationError as exc:
+            raise ChapterSegmentationError(
+                f"Agent coverage acknowledgement failed schema validation: {exc}"
+            ) from exc
+    expected = _projection_coverage(_project_content(source_items))
+    for field in _COVERAGE_FIELDS:
+        actual = getattr(coverage, field)
+        if actual != expected[field]:
+            raise ChapterSegmentationError(
+                f"Agent coverage {field} {actual} does not match "
+                f"projection {expected[field]}"
+            )
 
 
 def _resolve_content_path(path: Path) -> Path:
@@ -689,13 +768,36 @@ def _project_content(
     return projected
 
 
-def _projection_bytes(source_items: Sequence[Mapping[str, Any]]) -> bytes:
-    payload = {
-        "schema": CONTENT_PROJECTION_SCHEMA,
-        "schema_version": CONTENT_PROJECTION_SCHEMA_VERSION,
-        "items": _project_content(source_items),
+def _projection_coverage(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compute deterministic coverage metadata over canonical projected items.
+
+    ``items`` must already be projected (see :func:`_project_content`).  The
+    digest uses the same canonical JSON serialization as ``_items_sha256``,
+    which is independent of the pretty-printed projection layout.
+    """
+    if not items:
+        raise ChapterSegmentationError(
+            "Cannot compute coverage for an empty projection"
+        )
+    return {
+        "item_count": len(items),
+        "first_content_idx": items[0]["content_idx"],
+        "last_content_idx": items[-1]["content_idx"],
+        "first_page_idx": items[0]["page_idx"],
+        "last_page_idx": items[-1]["page_idx"],
+        "items_sha256": _items_sha256(items),
     }
+
+
+def _projection_bytes(source_items: Sequence[Mapping[str, Any]]) -> bytes:
     try:
+        projected = _project_content(source_items)
+        payload = {
+            "schema": CONTENT_PROJECTION_SCHEMA,
+            "schema_version": CONTENT_PROJECTION_SCHEMA_VERSION,
+            "coverage": _projection_coverage(projected),
+            "items": projected,
+        }
         encoded = json.dumps(
             payload,
             ensure_ascii=_PROJECTION_ENSURE_ASCII,
@@ -707,7 +809,7 @@ def _projection_bytes(source_items: Sequence[Mapping[str, Any]]) -> bytes:
         # Defense-in-depth: every projected field passes _validate_projection_field
         # and every chunk line fits the character budget, so this only triggers on
         # future field additions or content not covered by the per-field checks
-        # (for example lone surrogates inside item text).
+        # (for example lone surrogates inside item text or the coverage digest).
         raise ChapterSegmentationError(
             f"Cannot serialize the content projection: {exc}"
         ) from exc
@@ -737,6 +839,17 @@ def _contract_sha256() -> str:
         "response_schema": ChapterSegmentationResponse.model_json_schema(),
         "projection_schema": CONTENT_PROJECTION_SCHEMA,
         "projection_schema_version": CONTENT_PROJECTION_SCHEMA_VERSION,
+        "coverage": {
+            "schema": COVERAGE_SCHEMA,
+            "schema_version": COVERAGE_SCHEMA_VERSION,
+            "fields": list(_COVERAGE_FIELDS),
+            "items_digest_serialization": {
+                "ensure_ascii": False,
+                "sort_keys": True,
+                "separators": (",", ":"),
+                "allow_nan": False,
+            },
+        },
         "serialization": {
             "max_line_chars": _MAX_LINE_CHARS,
             "max_line_bytes": _MAX_LINE_BYTES,
@@ -1065,13 +1178,17 @@ __all__ = [
     "CHAPTERS_SCHEMA_VERSION",
     "CONTENT_PROJECTION_SCHEMA",
     "CONTENT_PROJECTION_CONTRACT",
+    "COVERAGE_SCHEMA",
+    "COVERAGE_SCHEMA_VERSION",
     "SEGMENTATION_TASK",
     "ChapterBoundary",
     "ChapterSegmentationArtifact",
     "ChapterSegmentationError",
     "ChapterSegmentationPublicationError",
     "ChapterSegmentationResponse",
+    "ProjectionCoverageAcknowledgement",
     "is_chapter_segmentation_fresh",
     "segment_chapters",
     "validate_boundaries",
+    "validate_coverage_acknowledgement",
 ]

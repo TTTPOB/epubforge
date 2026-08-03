@@ -427,8 +427,12 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
         def __call__(self, request: AgentRunRequest) -> AgentRunResult:
             self.__class__.total_calls += 1
             if "boundaries.json" in request.output_limits:
+                # Copy the coverage acknowledgement from the projection, as
+                # the segmentation task instructs the real agent.
+                projection = json.loads(request.files["content-projection.json"])
                 output = json.dumps(
                     {
+                        "coverage": projection["coverage"],
                         "boundaries": [
                             {
                                 "title": "Chapter One",
@@ -438,7 +442,7 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
                                 "confidence": 1.0,
                                 "evidence": "The first heading starts the chapter.",
                             }
-                        ]
+                        ],
                     }
                 ).encode("utf-8")
                 outputs = {"boundaries.json": output}

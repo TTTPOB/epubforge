@@ -25,6 +25,7 @@ from epubforge.chapter_segmentation import (
     ChapterSegmentationResponse,
     segment_chapters,
     validate_boundaries,
+    validate_coverage_acknowledgement,
 )
 
 
@@ -135,6 +136,32 @@ def _items_sha256(items: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
+def _projected_sha256(projected: list[dict[str, Any]]) -> str:
+    """Canonical digest of projected items, computed independently of the
+    implementation so coverage assertions are not circular."""
+    return hashlib.sha256(
+        json.dumps(
+            projected,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _coverage_for(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """The exact coverage acknowledgement matching *items* after projection."""
+    projected = segmentation._project_content(items)
+    return {
+        "item_count": len(projected),
+        "first_content_idx": projected[0]["content_idx"],
+        "last_content_idx": projected[-1]["content_idx"],
+        "first_page_idx": projected[0]["page_idx"],
+        "last_page_idx": projected[-1]["page_idx"],
+        "items_sha256": _projected_sha256(projected),
+    }
+
+
 def _content_sha256(items: list[dict[str, Any]], geometry: list[dict[str, Any]]) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -180,6 +207,7 @@ def _write_content(tmp_path: Path) -> Path:
 
 def _success_response() -> dict[str, Any]:
     return {
+        "coverage": _coverage_for(_items()),
         "boundaries": [
             {
                 "title": "Contents",
@@ -213,7 +241,7 @@ def _success_response() -> dict[str, Any]:
                 "confidence": 0.88,
                 "evidence": "Notes follows the final chapter.",
             },
-        ]
+        ],
     }
 
 
@@ -242,6 +270,9 @@ def test_success_filters_toc_and_embedded_heading_traps(tmp_path: Path) -> None:
     assert "an embedded article" in projection
     for forbidden in ("pdf", "render-page", "source.jpg", "image inspection"):
         assert forbidden not in projection
+    payload = json.loads(request.files["content-projection.json"])
+    assert payload["coverage"] == _coverage_for(_items())
+    assert payload["coverage"]["item_count"] == len(_items())
 
 
 def test_fresh_skip_model_prompt_and_force(tmp_path: Path, monkeypatch) -> None:
@@ -359,22 +390,29 @@ def test_boundary_validation_failures(change: str, match: str) -> None:
         for boundary in response:
             boundary["kind"] = "frontmatter"
 
-    parsed = ChapterSegmentationResponse.model_validate({"boundaries": response})
+    parsed = ChapterSegmentationResponse.model_validate(
+        {"boundaries": response, "coverage": _coverage_for(source)}
+    )
     with pytest.raises(ChapterSegmentationError, match=match):
         validate_boundaries(parsed.boundaries, source)
 
 
 def test_strict_response_and_confidence_range() -> None:
+    coverage = _coverage_for(_items())
     with pytest.raises(ValidationError):
         ChapterSegmentationResponse.model_validate(
-            {"boundaries": [{**_success_response()["boundaries"][1], "extra": True}]}
+            {
+                "coverage": coverage,
+                "boundaries": [{**_success_response()["boundaries"][1], "extra": True}],
+            }
         )
     with pytest.raises(ValidationError):
         ChapterSegmentationResponse.model_validate(
             {
+                "coverage": coverage,
                 "boundaries": [
                     {**_success_response()["boundaries"][1], "confidence": 1.1}
-                ]
+                ],
             }
         )
 
@@ -479,7 +517,7 @@ def test_projection_contract_change_invalidates_fresh_artifact(
     monkeypatch.setattr(
         segmentation,
         "CONTENT_PROJECTION_CONTRACT",
-        (4, ("content_idx", "page_idx", "type", "text_level", "text_chunks")),
+        (5, ("content_idx", "page_idx", "type", "text_level", "text_chunks")),
     )
     segment_chapters(content_path, tmp_path, fake)
 
@@ -701,6 +739,8 @@ def _assert_round_trip(projection: bytes, items: list[dict[str, Any]]) -> None:
     assert payload["schema"] == segmentation.CONTENT_PROJECTION_SCHEMA
     assert payload["schema_version"] == segmentation.CONTENT_PROJECTION_SCHEMA_VERSION
     assert len(payload["items"]) == len(items)
+    assert payload["coverage"] == _coverage_for(items)
+    assert payload["coverage"]["items_sha256"] == _projected_sha256(payload["items"])
     for projected, original in zip(payload["items"], items):
         assert "text" not in projected
         assert projected["content_idx"] == original["content_idx"]
@@ -987,3 +1027,164 @@ def test_rejects_lone_surrogate_items_in_normalized_content(tmp_path: Path) -> N
 
     with pytest.raises(ChapterSegmentationError, match="cannot be hashed"):
         segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
+
+
+# ---------------------------------------------------------------------------
+# Projection coverage acknowledgement contract
+# ---------------------------------------------------------------------------
+
+
+def test_missing_coverage_acknowledgement_fails(tmp_path: Path) -> None:
+    content_path = _write_content(tmp_path)
+    response = _success_response()
+    del response["coverage"]
+
+    with pytest.raises(ChapterSegmentationError, match="schema validation"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(response))
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "extra_field",
+        "missing_field",
+        "non_integer_count",
+        "invalid_digest",
+        "non_integer_page",
+    ],
+)
+def test_malformed_coverage_acknowledgement_fails(tmp_path: Path, tamper: str) -> None:
+    content_path = _write_content(tmp_path)
+    coverage = _coverage_for(_items())
+    if tamper == "extra_field":
+        coverage["unexpected"] = True
+    elif tamper == "missing_field":
+        del coverage["items_sha256"]
+    elif tamper == "non_integer_count":
+        coverage["item_count"] = "eleven"
+    elif tamper == "invalid_digest":
+        coverage["items_sha256"] = "zz" * 32
+    else:
+        coverage["last_page_idx"] = "seven"
+    response = _success_response()
+    response["coverage"] = coverage
+
+    with pytest.raises(ChapterSegmentationError, match="schema validation"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(response))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "item_count",
+        "first_content_idx",
+        "last_content_idx",
+        "first_page_idx",
+        "last_page_idx",
+        "items_sha256",
+    ],
+)
+def test_mismatched_coverage_acknowledgement_fails(tmp_path: Path, field: str) -> None:
+    """A structurally valid acknowledgement with a wrong value fails."""
+    content_path = _write_content(tmp_path)
+    coverage = _coverage_for(_items())
+    wrong: dict[str, Any] = {
+        "item_count": len(_items()) + 1,
+        "first_content_idx": 1,
+        "last_content_idx": len(_items()) - 2,
+        "first_page_idx": 1,
+        "last_page_idx": 6,
+        "items_sha256": "b" * 64,
+    }
+    coverage[field] = wrong[field]
+    response = _success_response()
+    response["coverage"] = coverage
+
+    with pytest.raises(ChapterSegmentationError, match="does not match projection"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(response))
+
+
+def test_stale_coverage_acknowledgement_fails_after_content_change(
+    tmp_path: Path,
+) -> None:
+    """Changing the projected content invalidates an old acknowledgement."""
+    content_path = _write_content(tmp_path)
+    payload = json.loads(content_path.read_text(encoding="utf-8"))
+    payload["items"][0]["text"] = "Contents Changed"
+    payload["items_sha256"] = _items_sha256(payload["items"])
+    content_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ChapterSegmentationError, match="does not match projection"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
+
+
+def test_validate_coverage_acknowledgement_accepts_raw_mapping() -> None:
+    source = _items()
+    validate_coverage_acknowledgement(_coverage_for(source), source)
+
+
+def test_projection_coverage_digest_is_deterministic() -> None:
+    items = _items()
+    first = _coverage_for(items)
+    second = _coverage_for(items)
+    assert first == second
+    digest = first["items_sha256"]
+    assert len(digest) == 64
+    assert set(digest) <= set("0123456789abcdef")
+
+
+def _projection_digest(items: list[dict[str, Any]]) -> str:
+    """The coverage digest as serialized in the production projection."""
+    payload = json.loads(_projection_for(items).decode("utf-8"))
+    return payload["coverage"]["items_sha256"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["content_idx", "page_idx", "type", "text_level", "text"],
+)
+def test_projection_coverage_digest_changes_per_projected_field(field: str) -> None:
+    """Changing any projected item field changes the coverage digest.
+
+    Source ``text`` maps to the projected ``text_chunks`` field.  The digest
+    comes from the production projection payload and is cross-checked against
+    the independent oracle."""
+    items = _items()
+    changed = _items()
+    if field == "content_idx":
+        changed[0]["content_idx"] = 1000
+    elif field == "page_idx":
+        changed[0]["page_idx"] = 100
+    elif field == "type":
+        changed[0]["type"] = "heading"
+    elif field == "text_level":
+        changed[0]["text_level"] = 9
+    else:
+        changed[0]["text"] = "Different Contents"  # maps to text_chunks
+    assert _projection_digest(items) != _projection_digest(changed)
+    assert _projection_digest(items) == _coverage_for(items)["items_sha256"]
+    assert _projection_digest(changed) == _coverage_for(changed)["items_sha256"]
+
+
+def test_projection_coverage_digest_ignores_unprojected_fields() -> None:
+    """Fields outside the projection contract do not enter the digest."""
+    items = _items()
+    changed = _items()
+    changed[10]["img_path"] = "different.jpg"
+    assert _projection_digest(items) == _projection_digest(changed)
+
+
+def test_projection_coverage_block_exact_field_set() -> None:
+    """The coverage block carries exactly the acknowledged fields.
+
+    Physical line bounds for the whole projection, coverage block included,
+    are already asserted by the full-file budget tests."""
+    payload = json.loads(_projection_for(_items()).decode("utf-8"))
+    assert set(payload["coverage"]) == {
+        "item_count",
+        "first_content_idx",
+        "last_content_idx",
+        "first_page_idx",
+        "last_page_idx",
+        "items_sha256",
+    }
