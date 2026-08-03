@@ -111,3 +111,29 @@ directory.
 
 Keep code comments in English. Do not add compatibility modules for removed
 workflow stages.
+
+## Review Risk Standard
+
+epubforge is a local, single-user upper-layer application. The development
+profile is intentionally trusted and is not an OS sandbox.
+
+Ground every blocking finding in a realistic trigger under a supported
+workflow: state the actor and preconditions, the user impact, and the
+simplest proportionate mitigation. Blocking priorities are data loss or a
+corrupt or incomplete publication accepted as valid; accidental credential
+or content persistence; leaked child processes; session or run evidence
+that cannot be located or recovered; normal timeout, crash, concurrency, or
+cleanup failures; and straightforward PDF, external-path, or symlink
+trust-boundary violations.
+
+Usually non-blocking residual risks: a malicious same-UID local process
+swapping filesystem inodes in narrow races; an intentionally malicious
+development agent using its already-trusted bash access; and attacks that
+require permissions equivalent to the application with no realistic
+workflow trigger.
+
+Do not start open-ended hardening loops. When a mitigation adds substantial
+code or test complexity relative to its likely impact, record the residual
+risk and ask the user before implementing it. This standard is
+proportionality, not permission to skip evidence: keep review strict for
+realistic correctness and security regressions.
