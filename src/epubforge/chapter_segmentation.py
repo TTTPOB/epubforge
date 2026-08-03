@@ -12,9 +12,9 @@ import json
 import os
 from pathlib import Path
 import secrets
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from epubforge.agent_runner import (
     AgentIdentity,
@@ -43,32 +43,67 @@ CONTENT_PROJECTION_SCHEMA = "epubforge.chapter-content-projection"
 CONTENT_PROJECTION_SCHEMA_VERSION = 3
 MAX_INPUT_JSON_BYTES = DEFAULT_MAX_JSON_BYTES
 
+# Fail-closed codes the book-editor may return instead of boundaries.  The
+# set stays closed and minimal: each maps to one unrecoverable inspection
+# condition named in the segmentation task.
+SegmentationFailureCode = Literal[
+    "input_truncated",
+    "projection_unreadable",
+    "tool_failure",
+    "inspection_incomplete",
+]
+SEGMENTATION_FAILURE_CODES: tuple[SegmentationFailureCode, ...] = (
+    "input_truncated",
+    "projection_unreadable",
+    "tool_failure",
+    "inspection_incomplete",
+)
+_FAILURE_DETAILS_MAX_LENGTH = 500
+
 SEGMENTATION_TASK = """# Chapter segmentation task
 
 Mode: `segmentation`
 
-Read `content-projection.json`. Each item carries its `content_idx`, `page_idx`,
-`type`, `text_level`, and `text_chunks`. Concatenate all `text_chunks` strings
-in order to recover the exact original text. Identify ordered starts for front
-matter, chapters, and back matter. Use `text_level`, `type`, and surrounding content
-as evidence. Dense table-of-contents title lists are not body starts.
-Running headers, quotations, and embedded document or article titles can
-resemble chapter starts.
+Read `content-projection.json` in full before answering. The projection can
+span many pages of text; paginate through it with repeated reads until the
+tool confirms the end of the file, and confirm every projected item has been
+seen. Each item carries its `content_idx`, `page_idx`, `type`, `text_level`,
+and `text_chunks`. Concatenate all `text_chunks` strings in order to recover
+the exact original text. Identify ordered starts for front matter, chapters,
+and back matter. Use `text_level`, `type`, and surrounding content as
+evidence. Dense table-of-contents title lists are not body starts. Running
+headers, quotations, and embedded document or article titles can resemble
+chapter starts.
 
 The projection's top-level `coverage` object identifies the complete input
 range and content: `item_count`, the first and last `content_idx`, the first
 and last `page_idx`, and `items_sha256`, a SHA-256 digest of the projected
-items. Inspect the entire projection before answering. Copy every `coverage`
-value exactly from the projection's `coverage` object into your
-`boundaries.json`; never compute, guess, or alter them. Missing, stale, or
-mismatched coverage fails the run.
+items. Copy every `coverage` value exactly from the projection's `coverage`
+object into your `boundaries.json`; never compute, guess, or alter them.
+Missing, stale, or mismatched coverage fails the run.
 
-Write `boundaries.json` as one JSON object with exactly this shape.  The
-`coverage` values shown below are illustrative placeholders; replace every
-one with the exact value copied from the projection's `coverage` object:
+A complete inspection is mandatory. If you cannot confirm it, fail the task;
+never guess, never shrink the inspected range, and never minimize boundaries
+to fit what you actually read. Return a failure result when any of these
+happens:
+
+- a read reports line truncation or a truncated file: code `input_truncated`
+- a required tool fails and cannot be recovered after retrying: code `tool_failure`
+- any section of the projection is inaccessible or unreadable: code `projection_unreadable`
+- you cannot confirm that the complete projection was inspected and the end
+  of file reached: code `inspection_incomplete`
+
+Recoverable exploratory tool errors may be retried; one harmless transient
+error does not force a failure when the full inspection then succeeds.
+
+Write `boundaries.json` as one JSON object with a `status` field. On success
+use exactly this shape.  The `coverage` values shown below are illustrative
+placeholders; replace every one with the exact value copied from the
+projection's `coverage` object:
 
 ```json
 {
+  "status": "success",
   "coverage": {
     "item_count": 1,
     "first_content_idx": 0,
@@ -90,10 +125,21 @@ one with the exact value copied from the projection's `coverage` object:
 }
 ```
 
-Preserve exact title text and source indices. Keep boundaries in source order.
-Use only `frontmatter`, `chapter`, or `backmatter` for `kind`, and include at
-least one `chapter` boundary. Do not repair OCR, text, geometry, or content
-order. Write no other files.
+On failure write exactly this shape and nothing else:
+
+```json
+{
+  "status": "failure",
+  "code": "inspection_incomplete",
+  "details": "concise reason, at most 500 characters"
+}
+```
+
+A success result must never carry `code` or `details`; a failure result must
+never carry `coverage` or `boundaries`. Preserve exact title text and source
+indices. Keep boundaries in source order. Use only `frontmatter`, `chapter`,
+or `backmatter` for `kind`, and include at least one `chapter` boundary. Do
+not repair OCR, text, geometry, or content order. Write no other files.
 """
 
 # The projection contract belongs in freshness fingerprints because changing
@@ -220,13 +266,45 @@ class ProjectionCoverageAcknowledgement(BaseModel):
     items_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
-class ChapterSegmentationResponse(BaseModel):
-    """Strict contents accepted from the agent's ``boundaries.json``."""
+class SegmentationSuccess(BaseModel):
+    """Successful complete inspection: coverage acknowledgement plus boundaries."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    status: Literal["success"]
     boundaries: list[ChapterBoundary] = Field(min_length=1)
     coverage: ProjectionCoverageAcknowledgement
+
+
+class SegmentationFailure(BaseModel):
+    """Fail-closed inspection result: no boundaries, never guessed or minimized.
+
+    ``code`` comes from the closed set in :data:`SEGMENTATION_FAILURE_CODES`;
+    ``details`` stays bounded so a failure can never smuggle in boundary data.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    status: Literal["failure"]
+    code: SegmentationFailureCode
+    details: str = Field(min_length=1, max_length=_FAILURE_DETAILS_MAX_LENGTH)
+
+
+class ChapterSegmentationResponse(
+    RootModel[
+        Annotated[
+            SegmentationSuccess | SegmentationFailure,
+            Field(discriminator="status"),
+        ]
+    ]
+):
+    """Strict discriminated result accepted from the agent's ``boundaries.json``.
+
+    The ``status`` field selects exactly one branch: a success carries the
+    coverage acknowledgement and boundaries, a failure carries a closed-set
+    failure code and bounded details.  Mixed payloads and extra fields fail
+    validation on the selected branch.
+    """
 
 
 class ChapterSegmentationArtifact(BaseModel):
@@ -319,8 +397,16 @@ def segment_chapters(
             )
         )
         response = _parse_agent_response(result.outputs.get("boundaries.json"))
-        validate_coverage_acknowledgement(response.coverage, source_items)
-        validate_boundaries(response.boundaries, source_items)
+        outcome = response.root
+        if isinstance(outcome, SegmentationFailure):
+            # Fail closed before any boundary or coverage validation: the
+            # agent explicitly refused to certify a complete inspection.
+            raise ChapterSegmentationError(
+                f"book-editor reported segmentation failure {outcome.code}: "
+                f"{outcome.details}"
+            )
+        validate_coverage_acknowledgement(outcome.coverage, source_items)
+        validate_boundaries(outcome.boundaries, source_items)
     except ValidationError as exc:
         raise ChapterSegmentationError(
             f"agent chapter boundary response failed schema validation: {exc}"
@@ -341,7 +427,7 @@ def segment_chapters(
         prompt_sha256=prompt_sha256,
         contract_sha256=contract_sha256,
         session_id=result.session_id,
-        boundaries=response.boundaries,
+        boundaries=outcome.boundaries,
     )
     _write_artifact_atomic(output_path, artifact)
     return output_path
@@ -850,6 +936,10 @@ def _contract_sha256() -> str:
                 "allow_nan": False,
             },
         },
+        "failure": {
+            "codes": list(SEGMENTATION_FAILURE_CODES),
+            "details_max_length": _FAILURE_DETAILS_MAX_LENGTH,
+        },
         "serialization": {
             "max_line_chars": _MAX_LINE_CHARS,
             "max_line_bytes": _MAX_LINE_BYTES,
@@ -1180,6 +1270,7 @@ __all__ = [
     "CONTENT_PROJECTION_CONTRACT",
     "COVERAGE_SCHEMA",
     "COVERAGE_SCHEMA_VERSION",
+    "SEGMENTATION_FAILURE_CODES",
     "SEGMENTATION_TASK",
     "ChapterBoundary",
     "ChapterSegmentationArtifact",
@@ -1187,6 +1278,8 @@ __all__ = [
     "ChapterSegmentationPublicationError",
     "ChapterSegmentationResponse",
     "ProjectionCoverageAcknowledgement",
+    "SegmentationFailure",
+    "SegmentationSuccess",
     "is_chapter_segmentation_fresh",
     "segment_chapters",
     "validate_boundaries",

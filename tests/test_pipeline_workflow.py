@@ -432,6 +432,7 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
                 projection = json.loads(request.files["content-projection.json"])
                 output = json.dumps(
                     {
+                        "status": "success",
                         "coverage": projection["coverage"],
                         "boundaries": [
                             {

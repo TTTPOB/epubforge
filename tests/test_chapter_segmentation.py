@@ -10,7 +10,8 @@ import stat
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ConfigDict, Field, RootModel, ValidationError
+from typing import Annotated
 
 from epubforge import chapter_segmentation as segmentation
 from epubforge.agent_runner import (
@@ -23,6 +24,8 @@ from epubforge.chapter_segmentation import (
     ChapterSegmentationError,
     ChapterSegmentationPublicationError,
     ChapterSegmentationResponse,
+    SegmentationFailure,
+    SegmentationSuccess,
     segment_chapters,
     validate_boundaries,
     validate_coverage_acknowledgement,
@@ -207,6 +210,7 @@ def _write_content(tmp_path: Path) -> Path:
 
 def _success_response() -> dict[str, Any]:
     return {
+        "status": "success",
         "coverage": _coverage_for(_items()),
         "boundaries": [
             {
@@ -243,6 +247,12 @@ def _success_response() -> dict[str, Any]:
             },
         ],
     }
+
+
+def _failure_response(
+    code: str, details: str = "Read reported a truncated projection line."
+) -> dict[str, Any]:
+    return {"status": "failure", "code": code, "details": details}
 
 
 def test_success_filters_toc_and_embedded_heading_traps(tmp_path: Path) -> None:
@@ -391,10 +401,15 @@ def test_boundary_validation_failures(change: str, match: str) -> None:
             boundary["kind"] = "frontmatter"
 
     parsed = ChapterSegmentationResponse.model_validate(
-        {"boundaries": response, "coverage": _coverage_for(source)}
+        {
+            "status": "success",
+            "boundaries": response,
+            "coverage": _coverage_for(source),
+        }
     )
+    assert isinstance(parsed.root, SegmentationSuccess)
     with pytest.raises(ChapterSegmentationError, match=match):
-        validate_boundaries(parsed.boundaries, source)
+        validate_boundaries(parsed.root.boundaries, source)
 
 
 def test_strict_response_and_confidence_range() -> None:
@@ -402,6 +417,7 @@ def test_strict_response_and_confidence_range() -> None:
     with pytest.raises(ValidationError):
         ChapterSegmentationResponse.model_validate(
             {
+                "status": "success",
                 "coverage": coverage,
                 "boundaries": [{**_success_response()["boundaries"][1], "extra": True}],
             }
@@ -409,6 +425,7 @@ def test_strict_response_and_confidence_range() -> None:
     with pytest.raises(ValidationError):
         ChapterSegmentationResponse.model_validate(
             {
+                "status": "success",
                 "coverage": coverage,
                 "boundaries": [
                     {**_success_response()["boundaries"][1], "confidence": 1.1}
@@ -1188,3 +1205,207 @@ def test_projection_coverage_block_exact_field_set() -> None:
         "last_page_idx",
         "items_sha256",
     }
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed discriminated response contract
+# ---------------------------------------------------------------------------
+
+
+def test_discriminated_response_validates_success_and_failure_branches() -> None:
+    success = ChapterSegmentationResponse.model_validate(_success_response())
+    assert isinstance(success.root, SegmentationSuccess)
+    assert success.root.coverage.model_dump() == _coverage_for(_items())
+    assert [b.title for b in success.root.boundaries] == [
+        "Contents",
+        "Chapter One",
+        "Chapter Two",
+        "Notes",
+    ]
+    failure = ChapterSegmentationResponse.model_validate(
+        _failure_response("tool_failure", "Paddle CLI is unavailable")
+    )
+    assert isinstance(failure.root, SegmentationFailure)
+    assert failure.root.code == "tool_failure"
+    assert failure.root.details == "Paddle CLI is unavailable"
+
+
+def test_task_instructs_complete_inspection_and_fail_closed(tmp_path: Path) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    segment_chapters(content_path, tmp_path, fake)
+    task = fake.calls[0].files["TASK.md"].decode("utf-8")
+    assert "paginate through it with repeated reads" in task
+    assert "end of the file" in task
+    for code in segmentation.SEGMENTATION_FAILURE_CODES:
+        assert code in task
+    assert "never guess" in task
+    assert "never minimize boundaries" in task
+    assert '"status": "success"' in task
+    assert '"status": "failure"' in task
+    assert "never carry `coverage` or `boundaries`" in task
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "input_truncated",
+        "projection_unreadable",
+        "tool_failure",
+        "inspection_incomplete",
+    ],
+)
+def test_each_failure_code_fails_closed(tmp_path: Path, code: str) -> None:
+    """Every closed-set failure code raises a precise error and publishes nothing."""
+    content_path = _write_content(tmp_path)
+    details = "Read reported a truncated projection line."
+    with pytest.raises(ChapterSegmentationError, match=code) as caught:
+        segment_chapters(
+            content_path, tmp_path, FakeAgentRunner(_failure_response(code, details))
+        )
+    assert details in str(caught.value)
+    assert not (tmp_path / "03_chapters" / "chapters.json").exists()
+
+
+def test_failure_result_preserves_published_artifact(tmp_path: Path) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    output_path = segment_chapters(content_path, tmp_path, fake)
+    old_bytes = output_path.read_bytes()
+
+    with pytest.raises(ChapterSegmentationError, match="input_truncated"):
+        segment_chapters(
+            content_path,
+            tmp_path,
+            FakeAgentRunner(_failure_response("input_truncated")),
+            force=True,
+        )
+    assert output_path.read_bytes() == old_bytes
+
+
+def test_failure_payload_with_success_fields_fails_schema(tmp_path: Path) -> None:
+    """A failure result smuggling coverage or boundaries must be rejected."""
+    content_path = _write_content(tmp_path)
+    mixed = _failure_response("tool_failure")
+    mixed["coverage"] = _coverage_for(_items())
+    mixed["boundaries"] = _success_response()["boundaries"]
+    with pytest.raises(ChapterSegmentationError, match="schema validation"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(mixed))
+
+
+def test_success_payload_with_failure_fields_fails_schema(tmp_path: Path) -> None:
+    """A success result carrying failure-only fields must be rejected."""
+    content_path = _write_content(tmp_path)
+    mixed = _success_response()
+    mixed["code"] = "tool_failure"
+    mixed["details"] = "must not appear on success"
+    with pytest.raises(ChapterSegmentationError, match="schema validation"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(mixed))
+
+
+def test_omitted_status_fails_schema() -> None:
+    success = _success_response()
+    del success["status"]
+    with pytest.raises(ValidationError):
+        ChapterSegmentationResponse.model_validate(success)
+    failure = _failure_response("tool_failure")
+    del failure["status"]
+    with pytest.raises(ValidationError):
+        ChapterSegmentationResponse.model_validate(failure)
+
+
+@pytest.mark.parametrize(
+    ("tamper", "match"),
+    [
+        ("unknown_status", "schema validation"),
+        ("unknown_code", "schema validation"),
+        ("missing_code", "schema validation"),
+        ("missing_details", "schema validation"),
+        ("empty_details", "schema validation"),
+        ("oversized_details", "schema validation"),
+    ],
+)
+def test_malformed_failure_payload_fails_schema(
+    tmp_path: Path, tamper: str, match: str
+) -> None:
+    content_path = _write_content(tmp_path)
+    payload = _failure_response("inspection_incomplete")
+    if tamper == "unknown_status":
+        payload = {
+            "status": "maybe",
+            "coverage": _coverage_for(_items()),
+            "boundaries": _success_response()["boundaries"],
+        }
+    elif tamper == "unknown_code":
+        payload["code"] = "model_made_up"
+    elif tamper == "missing_code":
+        del payload["code"]
+    elif tamper == "missing_details":
+        del payload["details"]
+    elif tamper == "empty_details":
+        payload["details"] = ""
+    else:
+        payload["details"] = "x" * 501
+    with pytest.raises(ChapterSegmentationError, match=match):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(payload))
+
+
+def test_failure_detected_before_coverage_and_boundary_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid failure result short-circuits before any boundary or coverage
+    validation: boundaries from a failure payload can never be accepted."""
+    content_path = _write_content(tmp_path)
+    validated: list[str] = []
+
+    def spy_coverage(*args: object, **kwargs: object) -> None:
+        validated.append("coverage")
+
+    def spy_boundaries(*args: object, **kwargs: object) -> None:
+        validated.append("boundaries")
+
+    monkeypatch.setattr(segmentation, "validate_coverage_acknowledgement", spy_coverage)
+    monkeypatch.setattr(segmentation, "validate_boundaries", spy_boundaries)
+
+    with pytest.raises(ChapterSegmentationError, match="inspection_incomplete"):
+        segment_chapters(
+            content_path,
+            tmp_path,
+            FakeAgentRunner(_failure_response("inspection_incomplete")),
+        )
+    assert validated == []
+
+
+def test_success_result_still_runs_semantic_validation(tmp_path: Path) -> None:
+    """Failure detection must not swallow the success path: a success payload
+    with invalid boundaries still raises the boundary error."""
+    content_path = _write_content(tmp_path)
+    invalid = _success_response()
+    invalid["boundaries"][1]["title"] = "wrong title"
+    with pytest.raises(ChapterSegmentationError, match="exactly match"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(invalid))
+
+
+def test_response_schema_change_invalidates_fresh_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing the discriminated response schema invalidates a fresh artifact."""
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    segment_chapters(content_path, tmp_path, fake)
+    assert len(fake.calls) == 1
+
+    class AltSuccess(SegmentationSuccess):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        marker: str | None = None
+
+    class AltResponse(
+        RootModel[
+            Annotated[AltSuccess | SegmentationFailure, Field(discriminator="status")]
+        ]
+    ):
+        pass
+
+    monkeypatch.setattr(segmentation, "ChapterSegmentationResponse", AltResponse)
+    segment_chapters(content_path, tmp_path, fake)
+    assert len(fake.calls) == 2
