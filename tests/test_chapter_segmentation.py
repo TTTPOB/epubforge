@@ -670,7 +670,7 @@ def test_failed_rollback_fsync_preserves_recovery_evidence(
     assert output_path.read_bytes() == old_bytes
 
 
-def test_hardlinked_artifact_is_not_reused(
+def test_hardlinked_artifact_is_reused_without_breaking_external_link(
     tmp_path: Path,
 ) -> None:
     content_path = _write_content(tmp_path)
@@ -678,12 +678,25 @@ def test_hardlinked_artifact_is_not_reused(
     output_path = segment_chapters(content_path, tmp_path, fake)
     backing_path = tmp_path / "chapters-backup.json"
     os.link(output_path, backing_path)
+    old_inode = output_path.stat().st_ino
+    old_bytes = output_path.read_bytes()
 
+    # A hard-linked artifact still satisfies the content and contract checks.
     segment_chapters(content_path, tmp_path, fake)
+
+    assert len(fake.calls) == 1
+    assert output_path.stat().st_ino == old_inode
+
+    # A forced re-publish atomically replaces the directory entry: the
+    # external hard link keeps the old inode with its old content.
+    segment_chapters(content_path, tmp_path, fake, force=True)
 
     assert len(fake.calls) == 2
     assert output_path.stat().st_nlink == 1
-    assert backing_path.stat().st_nlink == 1
+    assert output_path.stat().st_ino != old_inode
+    assert backing_path.stat().st_ino == old_inode
+    assert backing_path.read_bytes() == old_bytes
+    assert output_path.read_bytes() == old_bytes
 
 
 @pytest.mark.parametrize("parent_kind", ["symlink", "file", "fifo"])

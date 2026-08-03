@@ -893,6 +893,59 @@ def test_symlink_source_parent_is_rejected_before_publication(
     assert list(external.iterdir()) == []
 
 
+def test_symlink_source_pdf_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real_pdf = real_dir / "book.pdf"
+    _write_pdf(real_pdf, 1)
+    pdf_path = tmp_path / "book.pdf"
+    try:
+        pdf_path.symlink_to(real_pdf)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+
+    pipeline.run_parse(pdf_path, cfg)
+
+    source_path = tmp_path / "work" / "book" / "source" / "source.pdf"
+    assert not source_path.is_symlink()
+    assert source_path.read_bytes() == real_pdf.read_bytes()
+    meta = json.loads(
+        (tmp_path / "work" / "book" / "source" / "source_meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert meta["sha256"] == hashlib.sha256(real_pdf.read_bytes()).hexdigest()
+    assert meta["size_bytes"] == real_pdf.stat().st_size
+
+
+def test_symlink_source_parent_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real_pdf = real_dir / "book.pdf"
+    _write_pdf(real_pdf, 1)
+    link_dir = tmp_path / "books"
+    try:
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    _FakeMineruClient.instances.clear()
+    monkeypatch.setattr(pipeline, "MineruClient", _FakeMineruClient)
+    cfg = _config(tmp_path / "work")
+
+    pipeline.run_parse(link_dir / "book.pdf", cfg)
+
+    source_path = tmp_path / "work" / "book" / "source" / "source.pdf"
+    assert not source_path.is_symlink()
+    assert source_path.read_bytes() == real_pdf.read_bytes()
+
+
 def test_orphan_stage1_directories_are_cleaned_without_touching_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2277,7 +2277,7 @@ def test_manifest_target_symlink_is_rejected(tmp_path: Path) -> None:
     journal.close()
 
 
-def test_manifest_target_hardlink_is_rejected(tmp_path: Path) -> None:
+def test_manifest_target_hardlink_is_replaced_atomically(tmp_path: Path) -> None:
     journal = create_agent_run_journal(
         tmp_path / "logs" / "agent-runs",
         title="hardlink target",
@@ -2288,11 +2288,19 @@ def test_manifest_target_hardlink_is_rejected(tmp_path: Path) -> None:
     journal.process_started("agent", capture_streams=False)
     extra = journal.manifest_path.with_name("manifest-extra.json")
     os.link(journal.manifest_path, extra)
-    with pytest.raises(AgentRunJournalError, match="hardlink"):
-        journal.process_pid("agent", 1002)
-    os.unlink(extra)
-    # the journal stays usable once the unsafe link is gone
+    old_inode = journal.manifest_path.stat().st_ino
+    old_bytes = journal.manifest_path.read_bytes()
+
+    # A hard-linked old manifest does not block the atomic directory-entry
+    # replacement; the external hard link keeps the old inode and snapshot.
     journal.process_pid("agent", 1002)
+
+    assert journal.manifest_path.stat().st_ino != old_inode
+    manifest = read_agent_run_manifest(journal.manifest_path)
+    assert manifest.processes[0].pid == 1002
+    assert extra.stat().st_ino == old_inode
+    assert extra.read_bytes() == old_bytes
+    os.unlink(extra)
     journal.close()
 
 

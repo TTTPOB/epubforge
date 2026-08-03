@@ -1033,7 +1033,6 @@ def _load_fresh_artifact(
             path,
             "chapter segmentation artifact",
             max_bytes=MAX_INPUT_JSON_BYTES,
-            require_single_link=True,
         )
         artifact = ChapterSegmentationArtifact.model_validate(payload)
         if (

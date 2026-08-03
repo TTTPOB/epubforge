@@ -24,7 +24,6 @@ def read_json_document(
     label: str,
     *,
     max_bytes: int = DEFAULT_MAX_JSON_BYTES,
-    require_single_link: bool = False,
 ) -> tuple[Any, bytes]:
     """Read and parse one fd-backed JSON snapshot.
 
@@ -32,12 +31,7 @@ def read_json_document(
     descriptor stays independent from later replacement of the path name.
     """
     path = Path(path)
-    data = _read_regular_snapshot(
-        path,
-        label,
-        max_bytes=max_bytes,
-        require_single_link=require_single_link,
-    )
+    data = _read_regular_snapshot(path, label, max_bytes=max_bytes)
     return parse_json_document(data, label=label, max_bytes=max_bytes), data
 
 
@@ -71,10 +65,9 @@ def _read_regular_snapshot(
     label: str,
     *,
     max_bytes: int,
-    require_single_link: bool,
 ) -> bytes:
     _validate_limit(max_bytes)
-    fd = _open_regular_fd(path, label, require_single_link=require_single_link)
+    fd = _open_regular_fd(path, label)
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
@@ -97,8 +90,6 @@ def _read_regular_snapshot(
             chunks.append(chunk)
 
         after = os.fstat(fd)
-        if require_single_link and after.st_nlink != 1:
-            raise StrictJsonError(f"{label} gained multiple hard links: {path}")
         if not _same_snapshot(before, after) or total != before.st_size:
             raise StrictJsonError(f"{label} changed while being read: {path}")
         return b"".join(chunks)
@@ -117,9 +108,7 @@ def _same_snapshot(before: os.stat_result, after: os.stat_result) -> bool:
     )
 
 
-def _open_regular_fd(
-    path: Path, label: str, *, require_single_link: bool = False
-) -> int:
+def _open_regular_fd(path: Path, label: str) -> int:
     if (
         os.name != "posix"
         or not hasattr(os, "O_NOFOLLOW")
@@ -169,10 +158,6 @@ def _open_regular_fd(
                 os.close(fd)
                 fd = None
                 raise StrictJsonError(f"{label} is not a regular file: {path}")
-            if require_single_link and os.fstat(fd).st_nlink != 1:
-                os.close(fd)
-                fd = None
-                raise StrictJsonError(f"{label} has multiple hard links: {path}")
             return fd
         except OSError as exc:
             if fd is not None:

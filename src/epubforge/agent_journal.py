@@ -546,16 +546,12 @@ class AgentRunJournal:
                         f"cannot create agent run stream {name}"
                     ) from exc
                 opened.append((stream, _StreamState(descriptor, hashlib.sha256(), 0)))
-                # O_EXCL|O_NOFOLLOW guarantee a fresh single-link regular
-                # file; verify it so a placeholder can never alias an
-                # existing target through a symlink or unsafe hardlink.  The
+                # O_EXCL|O_NOFOLLOW guarantee a fresh regular file that can
+                # never alias an existing target through a symlink; the
                 # descriptor is already tracked so a failure here unlinks
                 # the placeholder in the cleanup below.
                 placeholder_info = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(placeholder_info.st_mode)
-                    or placeholder_info.st_nlink != 1
-                ):
+                if not stat.S_ISREG(placeholder_info.st_mode):
                     raise AgentRunJournalError(
                         f"agent run stream placeholder is unsafe: {name}"
                     )
@@ -1095,14 +1091,10 @@ class AgentRunJournal:
                 0o600,
                 dir_fd=self._run_fd,
             )
-            # O_EXCL|O_NOFOLLOW guarantee a fresh single-link regular file;
-            # verify it so the placeholder can never alias an existing
-            # target through a symlink or unsafe hardlink.
+            # O_EXCL|O_NOFOLLOW guarantee a fresh regular file that can
+            # never alias an existing target through a symlink.
             placeholder_info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(placeholder_info.st_mode)
-                or placeholder_info.st_nlink != 1
-            ):
+            if not stat.S_ISREG(placeholder_info.st_mode):
                 raise AgentRunJournalError(
                     "the agent run manifest temporary is not a fresh regular file"
                 )
@@ -1116,15 +1108,12 @@ class AgentRunJournal:
             os.close(descriptor)
             descriptor = None
             target_info = self._lstat_target()
-            if target_info is not None:
-                if stat.S_ISLNK(target_info.st_mode):
-                    raise AgentRunJournalError(
-                        "the agent run manifest target is a symlink"
-                    )
-                if target_info.st_nlink > 1:
-                    raise AgentRunJournalError(
-                        "the agent run manifest target is an unsafe hardlink"
-                    )
+            if target_info is not None and stat.S_ISLNK(target_info.st_mode):
+                raise AgentRunJournalError("the agent run manifest target is a symlink")
+            # A hard-linked manifest target is safe: os.replace swaps the
+            # directory entry, so external hard links keep the old inode with
+            # its complete previous snapshot while the journal name moves to
+            # the freshly written inode.
             try:
                 os.replace(
                     temporary,
