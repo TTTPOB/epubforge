@@ -255,13 +255,14 @@ def test_pipeline_passes_workspace_retention_to_runners(
     pipeline.run_segment(pdf, cfg)
     pipeline.run_revise(pdf, cfg)
 
-    # Stage 3 always runs restricted; both stages forward the config policy
-    assert seen == [("restricted", "on-failure"), ("development", "on-failure")]
+    # Both stages run the configured development profile and forward the
+    # configured retention policy.
+    assert seen == [("development", "on-failure"), ("development", "on-failure")]
 
     cfg.runtime.workspace_retention = "always"
     seen.clear()
     pipeline.run_segment(pdf, cfg)
-    assert seen == [("restricted", "always")]
+    assert seen == [("development", "always")]
 
 
 def test_run_revise_raises_with_report_failures_and_keeps_successes(
@@ -470,8 +471,8 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
         total_calls = 0
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            # Stage 3 runs restricted, Stage 5 uses the configured profile, so
-            # the fake must adopt the runner's profile for freshness to match.
+            # Both agent stages use the configured profile, so the fake adopts
+            # the runner's profile for freshness to match on reruns.
             self.identity = book_editor_identity(
                 kwargs.get("execution_profile", "development")
             )
@@ -551,25 +552,84 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
     assert (chapter_dir / "revision.json").read_bytes() == revision_before
 
 
-def test_run_segment_always_uses_restricted_profile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("profile", ["development", "restricted"])
+def test_run_segment_uses_configured_execution_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
 ) -> None:
     pdf = _pdf_path(tmp_path)
-    cfg = _config(tmp_path)
+    cfg = Config(
+        runtime=RuntimeSettings(
+            work_dir=tmp_path / "work",
+            execution_profile=profile,  # type: ignore[arg-type]
+        )
+    )
     content = cfg.book_work_dir(pdf) / "02_content/content.json"
     content.parent.mkdir(parents=True)
     content.write_text("{}", encoding="utf-8")
     identity_profiles: list[str] = []
     runner_profiles: list[str] = []
+    freshness_identities: list[Any] = []
 
     class FakeRunner:
-        identity = book_editor_identity("restricted")
+        identity = book_editor_identity(profile)  # type: ignore[arg-type]
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             runner_profiles.append(str(kwargs.get("execution_profile")))
 
-    def fake_identity(profile: str) -> Any:
-        identity_profiles.append(profile)
+    def fake_identity(requested: str) -> Any:
+        identity_profiles.append(requested)
+        return FakeRunner.identity
+
+    def fake_fresh(*args: Any, **kwargs: Any) -> bool:
+        # Freshness must consult the effective configured identity, so an
+        # explicit restricted switch invalidates Stage 3 artifacts.
+        freshness_identities.append(kwargs["agent_identity"])
+        return False
+
+    monkeypatch.setattr(pipeline, "book_editor_identity", fake_identity)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
+        fake_fresh,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.segment_chapters",
+        lambda *args, **kwargs: None,
+    )
+
+    pipeline.run_segment(pdf, cfg)
+
+    assert identity_profiles == [profile]
+    assert runner_profiles == [profile]
+    assert [i.fingerprint for i in freshness_identities] == [
+        FakeRunner.identity.fingerprint
+    ]
+
+
+def test_default_profile_constructs_development_runners_for_both_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default workflow runs Stage 3 and Stage 5 under development."""
+    pdf = _pdf_path(tmp_path)
+    cfg = _config(tmp_path)
+    work = cfg.book_work_dir(pdf)
+    content = work / "02_content/content.json"
+    content.parent.mkdir(parents=True)
+    content.write_text("{}", encoding="utf-8")
+    edit_dir = work / "04_edit"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    identity_profiles: list[str] = []
+    runner_profiles: list[str] = []
+
+    class FakeRunner:
+        identity = book_editor_identity()
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            runner_profiles.append(str(kwargs.get("execution_profile")))
+
+    def fake_identity(requested: str) -> Any:
+        identity_profiles.append(requested)
         return FakeRunner.identity
 
     monkeypatch.setattr(pipeline, "book_editor_identity", fake_identity)
@@ -582,12 +642,20 @@ def test_run_segment_always_uses_restricted_profile(
         "epubforge.chapter_segmentation.segment_chapters",
         lambda *args, **kwargs: None,
     )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.is_chapter_revision_fresh",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.revise_all_chapters",
+        lambda *args, **kwargs: ChapterRevisionReport(),
+    )
 
-    # cfg defaults to the development profile; segmentation must ignore it.
     pipeline.run_segment(pdf, cfg)
+    pipeline.run_revise(pdf, cfg)
 
-    assert identity_profiles == ["restricted"]
-    assert runner_profiles == ["restricted"]
+    assert identity_profiles == ["development", "development"]
+    assert runner_profiles == ["development", "development"]
 
 
 @pytest.mark.parametrize("profile", ["development", "restricted"])

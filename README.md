@@ -66,10 +66,12 @@ their original mode-0700 path (so a resumed OpenCode session still finds its
 cwd), contain no source PDF, are logged with a bounded reason (even for
 journal-less direct runs), and may be removed manually after debugging.
 
-Execution profiles control bash inside the workspace. Stage 3 segmentation
-always runs `restricted` (bash denied). Stage 5 revision runs the configured
-profile: `development` (default) opens local bash so the book editor can call
-`epubforge-paddle-page`; `restricted` keeps the legacy command-denied profile.
+Execution profiles control bash inside the workspace. Both Stage 3
+segmentation and Stage 5 revision run the configured `[runtime]
+execution_profile`: `development` (the default workflow for both agent
+stages) opens local bash so the book editor can call
+`epubforge-paddle-page`; `restricted` is an explicit opt-in that keeps the
+legacy command-denied profile and is not required by the default workflow.
 Development bash is an intentionally trusted mode, not an OS sandbox: the
 agent is expected to stay inside the workspace and rely on prompt
 constraints, and a stronger sandbox may replace it later.
@@ -118,12 +120,13 @@ The configuration sections are `[mineru]`, `[runtime]`, and `[chapters]`.
 Environment variables override individual fields. The only epubforge API
 credential is `EPUBFORGE_MINERU_API_KEY`.
 
-`[runtime] execution_profile` selects the Stage 5 agent permission profile:
-`development` (default) opens local bash inside the isolated workspace so the
-book editor can call `epubforge-paddle-page`; `restricted` keeps the legacy
-command-denied permissions. Stage 3 segmentation always uses `restricted`
-regardless of this setting. The profile participates in the agent fingerprint,
-so switching profiles reruns segment and revise.
+`[runtime] execution_profile` selects the agent permission profile for both
+Stage 3 segmentation and Stage 5 revision: `development` (default) opens
+local bash inside the isolated workspace so the book editor can call
+`epubforge-paddle-page`; `restricted` is an explicit opt-in that keeps the
+legacy command-denied permissions and is not required by the default
+workflow. The profile participates in the agent fingerprint, so switching
+profiles reruns segment and revise.
 
 ## Tests
 

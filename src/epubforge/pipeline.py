@@ -1163,8 +1163,11 @@ def run_normalize(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     """Run Stage 3 with the isolated book-editor agent.
 
-    Segmentation always uses the restricted execution profile: it only reads
-    the content projection and writes boundaries, so it never needs bash.
+    Stage 3 uses the configured execution profile exactly like Stage 5: the
+    default workflow runs both agent stages under ``development``, while
+    ``restricted`` stays an explicit opt-in for environments that must deny
+    shell commands. Segmentation only reads the content projection and writes
+    boundaries, so it never needs bash.
     """
     from epubforge.chapter_segmentation import (
         is_chapter_segmentation_fresh,
@@ -1175,7 +1178,7 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     content_path = _require_stage_file(work, "02_content/content.json", 3)
     output_dir = work / "03_chapters"
     with stage_timer(log, "3 segment"):
-        identity = book_editor_identity("restricted")
+        identity = book_editor_identity(cfg.runtime.execution_profile)
         if not force and is_chapter_segmentation_fresh(
             content_path,
             output_dir,
@@ -1185,7 +1188,7 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
             return
 
         agent_runner = OpenCodeAgentRunner(
-            execution_profile="restricted",
+            execution_profile=cfg.runtime.execution_profile,
             workspace_retention=cfg.runtime.workspace_retention,
             journal_root=work / "logs" / "agent-runs",
             # Raw main-agent streams stay uncaptured: development bash can echo

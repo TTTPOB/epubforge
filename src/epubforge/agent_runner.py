@@ -31,9 +31,12 @@ BOOK_EDITOR_MODEL = "openai/gpt-5.6-luna"
 BOOK_EDITOR_VARIANT = "medium"
 BOOK_EDITOR_PROMPT = "Read TASK.md and complete the requested book-editing task."
 
-# "development" opens local bash inside the isolated workspace so the book
-# editor can run the local Paddle page CLI; "restricted" keeps the legacy
-# command-denied profile.
+# Execution profiles select the agent permission map.  The default workflow
+# runs both Stage 3 segmentation and Stage 5 revision under "development",
+# which opens local bash inside the isolated workspace so the book editor
+# can run the local Paddle page CLI.  "restricted" is an explicit opt-in
+# reserved path that keeps the legacy command-denied profile; the default
+# workflow does not require it.
 EXECUTION_PROFILE_VALUES: tuple[Literal["development", "restricted"], ...] = (
     "development",
     "restricted",

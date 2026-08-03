@@ -146,9 +146,10 @@ external directories, web fetch/search, skills, questions, LSP, and todo
 tools. The wildcard denial also covers MCP tools, and project config disabling
 keeps the repository PDF MCP out of the session.
 
-The `[runtime] execution_profile` setting selects the Stage 5 revision
-permission profile; Stage 3 segmentation always runs `restricted` regardless
-of the setting:
+The `[runtime] execution_profile` setting selects the agent permission
+profile for both Stage 3 segmentation and Stage 5 revision. The default
+workflow runs both stages under `development`; `restricted` is an explicit
+opt-in reserved path that the default workflow does not require:
 
 - `development` (default) opens local bash inside the isolated workspace, so
   the agent can run `epubforge-paddle-page` and workspace-local patch

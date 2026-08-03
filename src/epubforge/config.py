@@ -40,9 +40,11 @@ class RuntimeSettings(BaseModel):
     concurrency: int = 4
     work_dir: Path = Path("work")
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
-    # "development" opens local bash inside the isolated agent workspace so the
-    # book editor can run the local Paddle page CLI; "restricted" keeps the
-    # legacy command-denied profile.
+    # "development" (default) opens local bash inside the isolated agent
+    # workspace so the book editor can run the local Paddle page CLI; both
+    # agent stages (3 and 5) use this profile by default.  "restricted" is an
+    # explicit opt-in reserved path that keeps the legacy command-denied
+    # profile and is not required by the default workflow.
     execution_profile: Literal["development", "restricted"] = "development"
     # Where the isolated agent workspace goes after each run: "never" removes
     # it on every outcome; "on-failure" (default) keeps it after runner

@@ -24,7 +24,7 @@ language              = "ch"  # ch | en | korean | japan
 concurrency         = 4
 work_dir            = "work"
 log_level           = "INFO"   # DEBUG | INFO | WARNING
-execution_profile   = "development"  # development (local bash for the Paddle page CLI) | restricted (legacy command-denied profile)
+execution_profile   = "development"  # development (default; both agent stages open local bash for the Paddle page CLI) | restricted (explicit opt-in; legacy command-denied profile, not required by the default workflow)
 workspace_retention = "on-failure"  # never (remove the agent workspace on every outcome) | on-failure (keep it after runner failures and rejections; remove after accepted publications) | always (keep it for every outcome)
 
 [chapters]

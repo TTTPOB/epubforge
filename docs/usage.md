@@ -103,9 +103,10 @@ CLI 输出 `evidence.json`、`candidate.json` 和证据 JPEG，缓存原始检�
 Runner 在系统临时目录创建 mode 0700 工作区，不把仓库、book workdir 或 PDF 暴露给
 agent。它禁用项目配置和外部 skills，拒绝 subagent、外部目录、web、MCP、skill 和
 question。`[runtime] execution_profile` 控制工作区内的 bash：Stage 3 segmentation
-始终使用 `restricted`（拒绝命令）；Stage 5 revision 使用配置的 profile——
-`development`（默认）在工作区内打开本地 bash，供 agent 调用
-`epubforge-paddle-page`；`restricted` 保持旧版完全拒绝命令的权限。development
+与 Stage 5 revision 都使用配置的 profile——`development`（默认，两个 agent 阶段
+的默认工作流）在工作区内打开本地 bash，供 agent 调用
+`epubforge-paddle-page`；`restricted` 是显式 opt-in（保留路径），保持旧版完全
+拒绝命令的权限，默认工作流不需要它。development
 的 bash 是有意信任的模式，不是 OS 沙盒：agent 依靠提示词约束留在工作区内，未来
 可用更强的沙盒替换。Runner 限制运行时间、stdout、stderr、单行和输出文件大小，
 失败时终止进程组；工作区的去留由 `[runtime] workspace_retention` 决定（见
@@ -136,7 +137,7 @@ language = "ch"
 [runtime]
 work_dir = "work"
 log_level = "INFO"
-execution_profile = "development"  # development（开工作区内 bash，供 Paddle CLI 使用）| restricted（旧版权限）
+execution_profile = "development"  # development（默认；两个 agent 阶段都在工作区内开 bash，供 Paddle CLI 使用）| restricted（显式 opt-in；旧版权限，默认工作流不需要）
 workspace_retention = "on-failure"  # never（任何结果都删除 agent 工作区）| on-failure（默认；运行器失败与语义拒绝后保留，accepted 发布后删除）| always（任何结果都保留）
 
 [chapters]
@@ -154,8 +155,8 @@ EPUBFORGE_RUNTIME_EXECUTION_PROFILE=restricted
 EPUBFORGE_RUNTIME_WORKSPACE_RETENTION=always
 ```
 
-execution_profile 参与 agent fingerprint：切换 profile 会让对应阶段判定为不新鲜并
-重跑；Stage 3 固定使用 restricted，不受此配置影响。epubforge 配置不接收模型
+execution_profile 参与 agent fingerprint：切换 profile 会让 Stage 3 与 Stage 5
+判定为不新鲜并重跑。epubforge 配置不接收模型
 endpoint、model 或 API key。OpenCode 从自己的配置与认证存储中取得这些信息。
 
 日志默认写入 `work/<name>/logs/`，同时输出到 stderr：

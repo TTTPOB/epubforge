@@ -62,11 +62,12 @@ may be removed manually after debugging. `AgentCleanupError` retains every
 path a possibly-live process may still reach under every policy.
 
 Execution profiles widen the permission baseline: `[runtime]
-execution_profile` selects `development` (default) or `restricted`. Stage 3
-segmentation always runs `restricted`, which denies shell commands. Stage 5
-revision runs the configured profile: `development` opens local bash inside
-the workspace so the agent can call `epubforge-paddle-page`, while
-`restricted` keeps bash denied. Development bash is an intentionally trusted
+execution_profile` selects `development` (default) or `restricted`. Both
+Stage 3 segmentation and Stage 5 revision run the configured profile:
+`development` (the default workflow for both agent stages) opens local bash
+inside the workspace so the agent can call `epubforge-paddle-page`, while
+`restricted` keeps bash denied as an explicit opt-in that the default
+workflow does not require. Development bash is an intentionally trusted
 mode, not an OS sandbox: the agent is expected to stay inside the workspace
 and rely on prompt constraints, and a stronger sandbox may replace it later.
 Never place a PDF in an agent workspace.
