@@ -86,6 +86,13 @@ def test_multimodal_request_contains_complete_html_and_ordered_images(
     assert request.files["corrected.html"] == request.files["chapter.html"]
     assert "chapter.json" in request.files
     assert "TASK.md" in request.files
+    assert "PADDLE.md" in request.files
+    paddle_guide = request.files["PADDLE.md"].decode("utf-8")
+    assert "patch_page(context)" in paddle_guide
+    assert "candidate_boxes" in paddle_guide
+    task = request.files["TASK.md"].decode("utf-8")
+    assert "You own the final quality" in task
+    assert "You may create temporary files" in task
     assert [name for name in request.files if name.startswith("pages/")] == [
         "pages/page-0001.jpg",
         "pages/page-0001.annotated.jpg",
@@ -130,6 +137,24 @@ def test_valid_heading_header_removal_and_bbox_marker_publish(
     assert record["applied_bbox_repairs"] == []
     assert "notes" not in record
     assert "open_questions" not in record
+
+
+def test_agent_may_remove_source_blocks_and_local_images(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    seed = (chapter / "chapter.html").read_text()
+    paragraph_start = seed.index('<p id="content-00000004"')
+    paragraph_end = seed.index("</p>", paragraph_start) + len("</p>")
+    corrected = seed[:paragraph_start] + seed[paragraph_end:]
+    image_start = corrected.index("<img ")
+    image_end = corrected.index(">", image_start) + 1
+    corrected = corrected[:image_start] + corrected[image_end:]
+
+    revise_chapter(chapter, _FakeAgentRunner(lambda _: corrected))
+
+    published = (chapter / "corrected.html").read_text()
+    assert 'data-content-idx="4"' not in published
+    assert "<img " not in published
 
 
 def test_invalid_reference_or_bbox_preserves_previous_output(tmp_path: Path) -> None:

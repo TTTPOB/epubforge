@@ -94,9 +94,6 @@ _BACKUP_PREFIX = ".revision-backup-"
 _RECOVERY_PREFIX = ".revision-recovery-"
 _log = logging.getLogger(__name__)
 
-_REMOVABLE_TYPES = frozenset(
-    {"header", "page_header", "footer", "page_footer", "page_number", "number"}
-)
 _VOID_TAGS = frozenset({"br", "col", "hr", "img", "meta"})
 _ALLOWED_TAGS = frozenset(
     {
@@ -171,34 +168,101 @@ _TAG_ATTRS: dict[str, frozenset[str]] = {
     "td": frozenset({"colspan", "rowspan"}),
 }
 
+PADDLE_GUIDE = """# Paddle page workflow
+
+Use `epubforge-paddle-page` on clean page JPEGs when you need stronger layout
+or text-box evidence. You own the iteration: inspect the generated JSON and
+JPEGs, adjust postprocessing, or write a page patch, then rerun until the final
+candidates match your reading of the page.
+
+Start with one or more pages:
+
+```sh
+epubforge-paddle-page --image pages/page-0001.jpg --page-idx 1 \\
+  --output .paddle --evidence-out paddle-evidence.json
+```
+
+Rerun postprocessing without repeating model inference by keeping the same
+inference options and adding `--reuse-raw`. Options such as `--vertical-gap`,
+`--horizontal-overlap`, `--caption-gap`, `--figure-text-policy`,
+`--figure-obstacle-split`, and `--candidate-source` control postprocessing.
+
+For page-specific control, create a Python file and pass `--page-patch FILE`.
+It must export `patch_page(context)` and return a list of candidate mappings.
+The context contains:
+
+- `page`: page index
+- `image`: `width` and `height` in raster pixels
+- `layout_evidence` and `db_evidence`: raw evidence with `evidence_id` values
+- `normalized_layout_boxes` and `normalized_text_lines`
+- `candidate_boxes`: the current generated candidates
+- `postprocess_params`: the active postprocessing options
+
+Return existing candidates unchanged, remove candidates, or add adjusted
+candidates. A new candidate needs `type`, `x0`, `y0`, `x1`, `y1`, and a
+non-empty `source_evidence_ids` list drawn from the supplied evidence. `score`
+is optional. The CLI validates the box, assigns its stable ID, writes it to
+`candidate.json`, and draws it in `annotated.jpg`.
+
+```python
+def patch_page(context):
+    boxes = list(context["candidate_boxes"])
+    if not context["db_evidence"]:
+        return boxes
+    evidence_id = context["db_evidence"][0]["evidence_id"]
+    boxes.append(
+        {
+            "type": "BODY",
+            "x0": 100,
+            "y0": 200,
+            "x1": 900,
+            "y1": 420,
+            "source_evidence_ids": [evidence_id],
+        }
+    )
+    return boxes
+```
+
+When one patch handles several pages, branch on `context["page"]`. Inspect the
+latest `.paddle/page-NNNN/candidate.json` and `annotated.jpg`; use only IDs from
+the final candidates in `bbox-repairs.json`. Reprocessing a page updates that
+page in `paddle-evidence.json`.
+"""
+
+
 REVISION_TASK_PREFIX = """# Chapter correction task
 
 Mode: `revision`
 
-Read `chapter.json`, `chapter.html`, referenced files under `assets/`, and the
-page evidence under `pages/` in the order listed below. Python has pre-seeded
-`corrected.html` with the complete source HTML. Edit only `corrected.html`;
-keep it as one complete HTML document.
+You own the final quality of this chapter. Read `chapter.json`, `chapter.html`,
+the referenced files under `assets/`, and the page evidence under `pages/`.
+Python has pre-seeded `corrected.html` with the complete source HTML. Inspect
+the evidence, use your editorial judgment, and edit `corrected.html` into the
+best complete HTML document supported by the pages. A chapter may need many
+changes or none.
 
 Correct headings and section boundaries, semantic block tags, reading order,
 OCR text, repeated headers or footers, page numbers, tables, figures,
 captions, footnotes, and paragraphs that continue across pages when the
 supplied evidence supports the change.
 
-Keep every substantive `data-content-idx` reference. You may remove a
-reference only when the evidence identifies it as a repeated header, footer,
-or page number. One element may use an ordered space-separated list to merge
-content IDs. A split may repeat one ID only with `data-content-part="n/N"`;
-use every part exactly once and in order.
+You may remove any source block that the evidence shows is an artifact,
+duplicate, repeated running matter, or otherwise absent from the intended
+chapter. Keep source `data-content-idx` references on retained source-grounded
+content. One element may use an ordered space-separated list to merge content
+IDs. A split may repeat one ID only with `data-content-part="n/N"`; use every
+part exactly once and in order. You may remove or rearrange local images, but
+do not invent asset paths or read files outside this workspace.
 
 ## Bounding boxes
 
 Never change a `data-bbox` value in `corrected.html`. Python owns all
 coordinate changes and applies them from `bbox-repairs.json` after you finish.
 
-Review each `data-bbox` against the clean page image, the annotated page
-image, and `pages/page-NNNN.meta.json` (which records the canonical page
-geometry and the raster conversion contract). For each unreliable rectangle:
+Use your judgment to review relevant `data-bbox` values against the clean page
+image, annotated page image, and `pages/page-NNNN.meta.json`. Read `PADDLE.md`
+before bbox work. When a rectangle looks unreliable, use the local Paddle page
+pipeline as an iterative visual tool:
 
 1. Run the local Paddle page CLI on the clean page image only. Batch pages in
    one invocation by repeating `--image` and `--page-idx`, and always pass
@@ -208,14 +272,12 @@ geometry and the raster conversion contract). For each unreliable rectangle:
      --image pages/page-0002.jpg --page-idx 2 \\
      --output .paddle --evidence-out paddle-evidence.json
 
-   The CLI writes `evidence.json`, `candidate.json`, `layout_raw.jpg`,
-   `text_raw.jpg`, and `annotated.jpg` under `.paddle/page-NNNN/` and caches
-   the raw model output. Rerun with `--reuse-raw` after adjusting postprocess
-   flags, or write a `patch_page(context)` Python hook and pass it with
-   `--page-patch` (see `epubforge-paddle-page --help`). Files under
-   `.paddle/` are temporary working evidence, not deliverables.
-2. Inspect the evidence JSON and JPEGs plus the candidates. Choose only
-   candidate IDs from `candidate.json`.
+   The CLI writes evidence, candidates, and visualizations under
+   `.paddle/page-NNNN/` and caches the raw model output.
+2. Inspect the JSON and JPEG outputs. Adjust postprocessing or write a
+   `patch_page(context)` hook, rerun with `--reuse-raw`, and repeat until you
+   consider the candidates accurate. Choose IDs only from the final
+   `candidate.json`.
 3. Record one repair per unreliable element in `bbox-repairs.json`. If no
    rectangle needs repair, write `{"schema_version": 1, "repairs": []}`. If
    Paddle produced no reliable candidate, keep the original `data-bbox` value
@@ -248,15 +310,14 @@ candidates whose boxes are combined); `candidate_ids` must come from the
 explanation. Never repair an element that carries
 `data-bbox-status="needs-repair"`.
 
-`paddle-evidence.json` is the `--evidence-out` file the CLI produced; when
-you ran Paddle, write `{"schema_version": 1, "pages": []}` otherwise. Do not
-change `data-bbox` values, do not invent coordinates, and never create a new
+`paddle-evidence.json` is the final `--evidence-out` file produced by the CLI.
+If you did not run Paddle, write `{"schema_version": 1, "pages": []}`. Do not
+change `data-bbox` values in HTML, invent candidate IDs, or create a new
 `data-bbox` on an element that lacks one.
 
 Correct headings, blocks, and text as usual: mark uncertain text with
-`<span data-uncertain="true">...</span>`, remove only identified repeated
-headers, footers, or page numbers, and keep local asset `src` values
-unchanged.
+`<span data-uncertain="true">...</span>`. Keep each retained local image's
+asset `src` value unchanged.
 
 Ordered page evidence:
 """
@@ -440,7 +501,6 @@ class _ChapterManifest(BaseModel):
 class _SourceElement:
     content_id: str
     bbox: tuple[str, str, str, str] | None
-    removable: bool
 
 
 @dataclass(frozen=True)
@@ -780,12 +840,19 @@ def _revision_task(chapter: _ChapterInput) -> str:
             start=1,
         )
     )
-    return REVISION_TASK_PREFIX + ordered_pages + "\n\nWrite no other files.\n"
+    return (
+        REVISION_TASK_PREFIX
+        + ordered_pages
+        + "\n\nYou may create temporary files and scripts while investigating. "
+        "The required final outputs are `corrected.html`, `bbox-repairs.json`, "
+        "and `paddle-evidence.json`.\n"
+    )
 
 
 def _agent_workspace_files(chapter: _ChapterInput, task: str) -> dict[str, bytes]:
     files = {
         "TASK.md": task.encode("utf-8"),
+        "PADDLE.md": PADDLE_GUIDE.encode("utf-8"),
         "chapter.json": chapter.chapter_manifest_bytes,
         "chapter.html": chapter.chapter_html.encode("utf-8"),
         "corrected.html": chapter.chapter_html.encode("utf-8"),
@@ -810,6 +877,7 @@ def _prompt_sha256(identity: AgentIdentity, task: str) -> str:
             "agent_prompt_sha256": identity.prompt_sha256,
             "invocation_prompt": BOOK_EDITOR_PROMPT,
             "task": task,
+            "paddle_guide_sha256": _sha256_bytes(PADDLE_GUIDE.encode("utf-8")),
         }
     )
 
@@ -847,6 +915,7 @@ def _contract_sha256() -> str:
                 "page_source": "clean workspace page image pages/page-NNNN.jpg",
                 "requires_page_meta": "raster dimensions must match pages/page-NNNN.meta.json",
             },
+            "paddle_guide_sha256": _sha256_bytes(PADDLE_GUIDE.encode("utf-8")),
         }
     )
 
@@ -2329,10 +2398,6 @@ def _validate_seed_html(html_text: str, assets: frozenset[str]) -> _SeedInfo:
         source[content_id] = _SourceElement(
             content_id=content_id,
             bbox=_bbox(node.attrs.get("data-bbox")),
-            removable=(
-                node.tag in {"header", "footer"}
-                or node.attrs.get("data-type", "").lower() in _REMOVABLE_TYPES
-            ),
         )
     if not source:
         raise ChapterRevisionError("chapter HTML has no content references")
@@ -2352,13 +2417,6 @@ def _validate_corrected_html(
     if len(html_text.encode("utf-8")) > MAX_HTML_BYTES:
         raise ChapterRevisionError("corrected HTML exceeds the size limit")
     root = _parse_and_validate_html(html_text, seed.assets, label="corrected HTML")
-    corrected_assets = frozenset(
-        node.attrs["src"]
-        for node in _walk_nodes(root)
-        if node.tag == "img" and "src" in node.attrs
-    )
-    if corrected_assets != seed.referenced_assets:
-        raise ChapterRevisionError("corrected HTML changes local asset references")
     occurrences: dict[str, list[tuple[_HTMLNode, str | None]]] = {
         content_id: [] for content_id in seed.source
     }
@@ -2388,14 +2446,10 @@ def _validate_corrected_html(
             occurrences[token].append((node, part))
         _validate_output_bbox(node, tokens, seed.source, expected_repairs)
 
-    for content_id, source_element in seed.source.items():
+    for content_id in seed.source:
         values = occurrences[content_id]
         if not values:
-            if source_element.removable:
-                continue
-            raise ChapterRevisionError(
-                f"corrected HTML removes substantive content ID: {content_id}"
-            )
+            continue
         parts = [part for _, part in values]
         if len(values) == 1 and parts[0] is None:
             continue
