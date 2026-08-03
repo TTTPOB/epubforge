@@ -14,14 +14,18 @@ import pymupdf
 from typer.testing import CliRunner
 
 from epubforge import pipeline
+from epubforge.agent_runner import (
+    AgentRunRequest,
+    AgentRunResult,
+    book_editor_identity,
+)
 from epubforge.chapter_revision import ChapterRevisionReport
 from epubforge.cli import app
-from epubforge.config import Config, ProviderSettings, RuntimeSettings
+from epubforge.config import Config, RuntimeSettings
 
 
-def _config(tmp_path: Path, *, api_key: str | None = "test-key") -> Config:
+def _config(tmp_path: Path) -> Config:
     return Config(
-        llm=ProviderSettings(api_key=api_key, model="configured-model"),
         runtime=RuntimeSettings(work_dir=tmp_path / "work"),
     )
 
@@ -79,33 +83,7 @@ def test_run_normalize_emits_stage_timer_logs(
     assert "Stage 2 normalize done" in caplog.text
 
 
-def test_run_segment_requires_llm_credentials_before_client_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pdf = _pdf_path(tmp_path)
-    work = _config(tmp_path, api_key=None).book_work_dir(pdf)
-    content = work / "02_content" / "content.json"
-    content.parent.mkdir(parents=True)
-    content.write_text("{}", encoding="utf-8")
-    client_created = False
-
-    class UnexpectedClient:
-        def __init__(self, _cfg: Config) -> None:
-            nonlocal client_created
-            client_created = True
-
-    monkeypatch.setattr(pipeline, "LLMClient", UnexpectedClient)
-    monkeypatch.setattr(
-        "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
-        lambda *args, **kwargs: False,
-    )
-
-    with pytest.raises(SystemExit, match="LLM API key"):
-        pipeline.run_segment(pdf, _config(tmp_path, api_key=None))
-    assert client_created is False
-
-
-def test_run_segment_passes_configured_model_and_force_to_module(
+def test_run_segment_constructs_runner_after_freshness_and_passes_force(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pdf = _pdf_path(tmp_path)
@@ -114,34 +92,47 @@ def test_run_segment_passes_configured_model_and_force_to_module(
     content = work / "02_content" / "content.json"
     content.parent.mkdir(parents=True)
     content.write_text("{}", encoding="utf-8")
-    calls: list[tuple[Path, Path, str, bool]] = []
+    calls: list[tuple[Path, Path, bool]] = []
+    order: list[str] = []
 
-    class FakeClient:
-        model = "client-model"
+    class FakeRunner:
+        identity = book_editor_identity()
 
-        def __init__(self, _cfg: Config) -> None:
-            pass
+    runner = FakeRunner()
+
+    def fake_fresh(*args: Any, **kwargs: Any) -> bool:
+        assert kwargs["agent_identity"] == runner.identity
+        order.append("freshness")
+        return False
+
+    def make_runner() -> FakeRunner:
+        order.append("construct")
+        return runner
 
     def fake_segment(
         content_path: Path,
         output_dir: Path,
-        client: FakeClient,
+        agent_runner: FakeRunner,
         *,
         force: bool,
     ) -> Path:
-        calls.append((content_path, output_dir, client.model, force))
+        assert agent_runner is runner
+        order.append("segment")
+        calls.append((content_path, output_dir, force))
         return output_dir / "chapters.json"
 
-    monkeypatch.setattr(pipeline, "LLMClient", FakeClient)
+    monkeypatch.setattr(pipeline, "book_editor_identity", lambda: runner.identity)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", make_runner)
     monkeypatch.setattr(
         "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
-        lambda *args, **kwargs: False,
+        fake_fresh,
     )
     monkeypatch.setattr("epubforge.chapter_segmentation.segment_chapters", fake_segment)
 
-    pipeline.run_segment(pdf, cfg, force=True)
+    pipeline.run_segment(pdf, cfg)
 
-    assert calls == [(content, work / "03_chapters", "client-model", True)]
+    assert order == ["freshness", "construct", "segment"]
+    assert calls == [(content, work / "03_chapters", False)]
 
 
 def test_run_segment_fresh_output_reuses_offline(
@@ -150,26 +141,25 @@ def test_run_segment_fresh_output_reuses_offline(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     pdf = _pdf_path(tmp_path)
-    cfg = _config(tmp_path, api_key=None)
+    cfg = _config(tmp_path)
     work = cfg.book_work_dir(pdf)
     content = work / "02_content/content.json"
     content.parent.mkdir(parents=True)
     content.write_text("{}", encoding="utf-8")
-    client_created = False
+    runner_created = False
     segment_called = False
 
-    class UnexpectedClient:
-        def __init__(self, _cfg: Config) -> None:
-            nonlocal client_created
-            client_created = True
-            raise AssertionError("fresh Stage 3 must not construct an LLM client")
+    def unexpected_runner() -> None:
+        nonlocal runner_created
+        runner_created = True
+        raise AssertionError("fresh Stage 3 must not construct an agent runner")
 
     def unexpected_segment(*args: Any, **kwargs: Any) -> Path:
         nonlocal segment_called
         segment_called = True
-        raise AssertionError("fresh Stage 3 must not call the provider module")
+        raise AssertionError("fresh Stage 3 must not call the agent module")
 
-    monkeypatch.setattr(pipeline, "LLMClient", UnexpectedClient)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", unexpected_runner)
     monkeypatch.setattr(
         "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
         lambda *args, **kwargs: True,
@@ -181,29 +171,40 @@ def test_run_segment_fresh_output_reuses_offline(
 
     pipeline.run_segment(pdf, cfg)
 
-    assert client_created is False
+    assert runner_created is False
     assert segment_called is False
     assert "Stage 3 segment started" in caplog.text
     assert "Stage 3 segment done" in caplog.text
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_run_segment_stale_or_forced_output_requires_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+def test_run_segment_force_skips_freshness_but_constructs_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pdf = _pdf_path(tmp_path)
-    cfg = _config(tmp_path, api_key=None)
+    cfg = _config(tmp_path)
     content = cfg.book_work_dir(pdf) / "02_content/content.json"
     content.parent.mkdir(parents=True)
     content.write_text("{}", encoding="utf-8")
-    if not force:
-        monkeypatch.setattr(
-            "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
-            lambda *args, **kwargs: False,
-        )
+    calls: list[bool] = []
 
-    with pytest.raises(SystemExit, match="LLM API key"):
-        pipeline.run_segment(pdf, cfg, force=force)
+    class FakeRunner:
+        identity = book_editor_identity()
+
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.is_chapter_segmentation_fresh",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("forced Stage 3 must skip freshness")
+        ),
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_segmentation.segment_chapters",
+        lambda *args, **kwargs: calls.append(kwargs["force"]),
+    )
+
+    pipeline.run_segment(pdf, cfg, force=True)
+
+    assert calls == [True]
 
 
 def test_run_revise_raises_with_report_failures_and_keeps_successes(
@@ -223,19 +224,20 @@ def test_run_revise_raises_with_report_failures_and_keeps_successes(
     )
     calls: list[dict[str, Any]] = []
 
-    class FakeClient:
-        model = "client-model"
+    class FakeRunner:
+        identity = book_editor_identity()
 
-        def __init__(self, _cfg: Config) -> None:
-            pass
+    runner = FakeRunner()
 
     def fake_revise(
-        edit_path: Path, client: FakeClient, **kwargs: Any
+        edit_path: Path, agent_runner: FakeRunner, **kwargs: Any
     ) -> ChapterRevisionReport:
-        calls.append({"edit_path": edit_path, "model": client.model, **kwargs})
+        assert agent_runner is runner
+        calls.append({"edit_path": edit_path, **kwargs})
         return report
 
-    monkeypatch.setattr(pipeline, "LLMClient", FakeClient)
+    monkeypatch.setattr(pipeline, "book_editor_identity", lambda: runner.identity)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", lambda: runner)
     monkeypatch.setattr(
         "epubforge.chapter_revision.is_chapter_revision_fresh",
         lambda *args, **kwargs: False,
@@ -251,7 +253,6 @@ def test_run_revise_raises_with_report_failures_and_keeps_successes(
     assert calls == [
         {
             "edit_path": edit_dir,
-            "model": "client-model",
             "force": False,
             "continue_on_error": False,
         }
@@ -264,25 +265,24 @@ def test_run_revise_fresh_output_reuses_offline(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     pdf = _pdf_path(tmp_path)
-    cfg = _config(tmp_path, api_key=None)
+    cfg = _config(tmp_path)
     edit_dir = cfg.book_work_dir(pdf) / "04_edit"
     edit_dir.mkdir(parents=True)
     (edit_dir / "manifest.json").write_text("{}", encoding="utf-8")
-    client_created = False
+    runner_created = False
     revise_called = False
 
-    class UnexpectedClient:
-        def __init__(self, _cfg: Config) -> None:
-            nonlocal client_created
-            client_created = True
-            raise AssertionError("fresh Stage 5 must not construct an LLM client")
+    def unexpected_runner() -> None:
+        nonlocal runner_created
+        runner_created = True
+        raise AssertionError("fresh Stage 5 must not construct an agent runner")
 
     def unexpected_revise(*args: Any, **kwargs: Any) -> ChapterRevisionReport:
         nonlocal revise_called
         revise_called = True
-        raise AssertionError("fresh Stage 5 must not call the provider module")
+        raise AssertionError("fresh Stage 5 must not call the agent module")
 
-    monkeypatch.setattr(pipeline, "LLMClient", UnexpectedClient)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", unexpected_runner)
     monkeypatch.setattr(
         "epubforge.chapter_revision.is_chapter_revision_fresh",
         lambda *args, **kwargs: True,
@@ -294,29 +294,41 @@ def test_run_revise_fresh_output_reuses_offline(
 
     pipeline.run_revise(pdf, cfg)
 
-    assert client_created is False
+    assert runner_created is False
     assert revise_called is False
     assert "Stage 5 revise started" in caplog.text
     assert "Stage 5 revise done" in caplog.text
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_run_revise_stale_or_forced_output_requires_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+def test_run_revise_force_skips_freshness_and_needs_no_epubforge_llm_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pdf = _pdf_path(tmp_path)
-    cfg = _config(tmp_path, api_key=None)
+    cfg = _config(tmp_path)
     edit_dir = cfg.book_work_dir(pdf) / "04_edit"
     edit_dir.mkdir(parents=True)
     (edit_dir / "manifest.json").write_text("{}", encoding="utf-8")
-    if not force:
-        monkeypatch.setattr(
-            "epubforge.chapter_revision.is_chapter_revision_fresh",
-            lambda *args, **kwargs: False,
-        )
+    calls: list[bool] = []
 
-    with pytest.raises(SystemExit, match="LLM API key"):
-        pipeline.run_revise(pdf, cfg, force=force)
+    class FakeRunner:
+        identity = book_editor_identity()
+
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.is_chapter_revision_fresh",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("forced Stage 5 must skip freshness")
+        ),
+    )
+    monkeypatch.setattr(
+        "epubforge.chapter_revision.revise_all_chapters",
+        lambda *args, **kwargs: calls.append(kwargs["force"])
+        or ChapterRevisionReport(),
+    )
+
+    pipeline.run_revise(pdf, cfg, force=True)
+
+    assert calls == [True]
 
 
 def test_new_cli_commands_and_run_help() -> None:
@@ -382,10 +394,7 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[llm]\n"
-        'api_key = "fake-key"\n'
-        'model = "openai/gpt-5.6-luna"\n'
-        f"\n[runtime]\nwork_dir = {str(work_root)!r}\n",
+        f"[runtime]\nwork_dir = {str(work_root)!r}\n",
         encoding="utf-8",
     )
     parse_calls = 0
@@ -395,45 +404,34 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
         nonlocal parse_calls
         parse_calls += 1
 
-    class FakeLLM:
-        model = "openai/gpt-5.6-luna"
+    class FakeAgentRunner:
+        identity = book_editor_identity()
         total_calls = 0
 
-        def __init__(self, _cfg: Config) -> None:
-            pass
-
-        def chat_parsed(
-            self,
-            messages: list[dict[str, Any]],
-            *,
-            response_format: type[Any],
-            validator=None,
-            bypass_cache: bool = False,
-        ) -> Any:
-            del bypass_cache
+        def __call__(self, request: AgentRunRequest) -> AgentRunResult:
             self.__class__.total_calls += 1
-            if response_format.__name__ == "ChapterSegmentationResponse":
-                response = response_format(
-                    boundaries=[
-                        {
-                            "title": "Chapter One",
-                            "kind": "chapter",
-                            "start_content_idx": 0,
-                            "start_page_idx": 0,
-                            "confidence": 1.0,
-                            "evidence": "The first heading starts the chapter.",
-                        }
-                    ]
-                )
+            if "boundaries.json" in request.output_limits:
+                output = json.dumps(
+                    {
+                        "boundaries": [
+                            {
+                                "title": "Chapter One",
+                                "kind": "chapter",
+                                "start_content_idx": 0,
+                                "start_page_idx": 0,
+                                "confidence": 1.0,
+                                "evidence": "The first heading starts the chapter.",
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+                outputs = {"boundaries.json": output}
             else:
-                html = messages[1]["content"][0]["text"].split("COMPLETE HTML:\n", 1)[1]
-                response = response_format(corrected_html=html)
-            if validator is not None:
-                validator(response)
-            return response
+                outputs = {"corrected.html": request.files["corrected.html"]}
+            return AgentRunResult(outputs=outputs, session_id="ses_vertical_test")
 
     monkeypatch.setattr(pipeline, "run_parse", fake_parse)
-    monkeypatch.setattr(pipeline, "LLMClient", FakeLLM)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", FakeAgentRunner)
 
     result = CliRunner().invoke(
         app,
@@ -453,21 +451,19 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
     assert (chapter_dir / "corrected.html").is_file()
     assert (chapter_dir / "revision.json").is_file()
     assert parse_calls == 1
-    assert FakeLLM.total_calls == 2
+    assert FakeAgentRunner.total_calls == 2
 
     corrected_before = (chapter_dir / "corrected.html").read_bytes()
     revision_before = (chapter_dir / "revision.json").read_bytes()
 
-    class UnexpectedClient:
-        def __init__(self, _cfg: Config) -> None:
-            raise AssertionError("fresh rerun must remain offline")
+    class UnexpectedRunner:
+        def __init__(self) -> None:
+            raise AssertionError("fresh rerun must not construct an agent runner")
 
-    monkeypatch.setattr(pipeline, "LLMClient", UnexpectedClient)
+    monkeypatch.setattr(pipeline, "OpenCodeAgentRunner", UnexpectedRunner)
     offline_config = tmp_path / "offline-config.toml"
     offline_config.write_text(
-        "[llm]\n"
-        'model = "openai/gpt-5.6-luna"\n'
-        f"\n[runtime]\nwork_dir = {str(work_root)!r}\n",
+        f"[runtime]\nwork_dir = {str(work_root)!r}\n",
         encoding="utf-8",
     )
     rerun = CliRunner().invoke(
@@ -477,6 +473,6 @@ def test_cli_run_vertical_workflow_writes_and_reuses_real_chapter_outputs(
 
     assert rerun.exit_code == 0, rerun.output
     assert parse_calls == 2
-    assert FakeLLM.total_calls == 2
+    assert FakeAgentRunner.total_calls == 2
     assert (chapter_dir / "corrected.html").read_bytes() == corrected_before
     assert (chapter_dir / "revision.json").read_bytes() == revision_before

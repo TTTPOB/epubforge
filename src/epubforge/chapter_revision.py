@@ -1,14 +1,8 @@
-"""Multimodal semantic revision of one prepared chapter.
-
-The module accepts only the immutable chapter workspace contract.  It keeps
-the transport contract small and puts all semantic checks in the LLM client's
-validator callback before a cached response can be published.
-"""
+"""Isolated agent revision of one prepared chapter."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
-import base64
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
@@ -21,21 +15,26 @@ import re
 import shutil
 import stat
 import tempfile
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, cast
 
 from filelock import FileLock
-from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from epubforge.llm.client import LLMClient
+from epubforge.agent_runner import (
+    AgentIdentity,
+    AgentRunRequest,
+    AgentRunner,
+    AgentRunnerError,
+    BOOK_EDITOR_PROMPT,
+)
 from epubforge.strict_json import StrictJsonError, parse_json_document
 
 
 WORKSPACE_SCHEMA = "epubforge.chapter-workspace"
 WORKSPACE_SCHEMA_VERSION = 1
 REVISION_SCHEMA = "epubforge.chapter-revision"
-REVISION_SCHEMA_VERSION = 1
-REVISION_CONTRACT_VERSION = 1
+REVISION_SCHEMA_VERSION = 2
+REVISION_CONTRACT_VERSION = 2
 
 MAX_WORKSPACE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_CHAPTER_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -144,18 +143,33 @@ _TAG_ATTRS: dict[str, frozenset[str]] = {
     "td": frozenset({"colspan", "rowspan"}),
 }
 
-SYSTEM_PROMPT = """You are a precise corrected-HTML chapter editor. Use only the supplied HTML and annotated page images.
-Return one corrected complete HTML document.
-Correct headings and section boundaries, semantic block tags, reading order, OCR text, repeated headers or footers, page numbers, tables, figures, captions, footnotes, and paragraphs that continue across pages.
-Keep every data-content-idx reference. One element may use an ordered space-separated list to merge content IDs. A split may repeat one ID only with data-content-part="n/N"; use every part exactly once.
-Keep every original data-bbox numeric value. If its rectangle is unreliable, keep the value and add data-bbox-status="needs-repair". Never create coordinates.
-Do not guess text that the images do not support. Mark uncertain text with <span data-uncertain="true">...</span>.
-Remove only identified repeated headers, footers, or page numbers. Keep local asset src values unchanged and use safe semantic HTML.
-Return concise notes and open questions only when needed."""
+REVISION_TASK_PREFIX = """# Chapter correction task
 
-USER_PROMPT_PREFIX = """Correct this chapter using the complete HTML below and the following images in page order.
+Mode: `revision`
 
-COMPLETE HTML:
+Read `chapter.json`, `chapter.html`, referenced files under `assets/`, and the
+annotated JPEG files under `pages/` in the order listed below. Python has
+pre-seeded `corrected.html` with the complete source HTML. Edit only
+`corrected.html`; keep it as one complete HTML document.
+
+Correct headings and section boundaries, semantic block tags, reading order,
+OCR text, repeated headers or footers, page numbers, tables, figures, captions,
+footnotes, and paragraphs that continue across pages when the supplied evidence
+supports the change.
+
+Keep every substantive `data-content-idx` reference. You may remove a reference
+only when the evidence identifies it as a repeated header, footer, or page
+number. One element may use an ordered space-separated list to merge content
+IDs. A split may repeat one ID only with `data-content-part="n/N"`; use every
+part exactly once and in order.
+
+Keep every original `data-bbox` numeric value. If a rectangle is unreliable,
+keep its value and add `data-bbox-status="needs-repair"`. Never create
+coordinates. Do not guess unsupported text. Mark uncertain text with
+`<span data-uncertain="true">...</span>`. Remove only identified repeated
+headers, footers, or page numbers. Keep local asset `src` values unchanged.
+
+Ordered annotated page evidence:
 """
 
 
@@ -174,24 +188,6 @@ class ChapterRevisionPublicationError(ChapterRevisionError):
         super().__init__(message + suffix)
 
 
-class ChapterRevisionResponse(BaseModel):
-    """The deliberately small structured response accepted from the model."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    corrected_html: str = Field(min_length=1, max_length=MAX_HTML_BYTES)
-    notes: list[str] = Field(default_factory=list, max_length=4)
-    open_questions: list[str] = Field(default_factory=list, max_length=4)
-
-    @model_validator(mode="after")
-    def _validate_notes(self) -> ChapterRevisionResponse:
-        if len(self.notes) + len(self.open_questions) > 8:
-            raise ValueError("the combined notes and open_questions list is too long")
-        if any(len(value) > 400 for value in (*self.notes, *self.open_questions)):
-            raise ValueError("notes and open questions must be concise")
-        return self
-
-
 class ChapterRevisionRecord(BaseModel):
     """Metadata proving which inputs produced ``corrected.html``."""
 
@@ -200,45 +196,32 @@ class ChapterRevisionRecord(BaseModel):
     schema_name: Literal["epubforge.chapter-revision"] = Field(
         default=REVISION_SCHEMA, alias="schema"
     )
-    schema_version: Literal[1] = REVISION_SCHEMA_VERSION
-    model: str = Field(min_length=1)
+    schema_version: Literal[2] = REVISION_SCHEMA_VERSION
+    agent_name: str = Field(min_length=1)
+    agent_model: str = Field(min_length=1)
+    agent_variant: str = Field(min_length=1)
+    agent_fingerprint: str = Field(pattern=_SHA256_PATTERN)
     prompt_sha256: str = Field(pattern=_SHA256_PATTERN)
     contract_sha256: str = Field(pattern=_SHA256_PATTERN)
+    session_id: str | None = Field(default=None, min_length=1, max_length=256)
     workspace_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_chapter_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_chapter_html_sha256: str = Field(pattern=_SHA256_PATTERN)
     source_images_sha256: dict[str, str]
+    source_assets_sha256: dict[str, str]
     corrected_html_sha256: str = Field(pattern=_SHA256_PATTERN)
-    notes: list[str] = Field(default_factory=list, max_length=4)
-    open_questions: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
-    def _validate_notes(self) -> ChapterRevisionRecord:
+    def _validate_hash_maps(self) -> ChapterRevisionRecord:
         if any(
             not _SHA256_RE.fullmatch(value)
-            for value in self.source_images_sha256.values()
+            for value in (
+                *self.source_images_sha256.values(),
+                *self.source_assets_sha256.values(),
+            )
         ):
-            raise ValueError("source image hashes must be lowercase SHA-256 values")
-        if len(self.notes) + len(self.open_questions) > 8:
-            raise ValueError("the combined notes and open_questions list is too long")
-        if any(len(value) > 400 for value in (*self.notes, *self.open_questions)):
-            raise ValueError("notes and open questions must be concise")
+            raise ValueError("source file hashes must be lowercase SHA-256 values")
         return self
-
-
-class ParsedRevisionClient(Protocol):
-    """Small protocol used by tests and by configured ``LLMClient`` objects."""
-
-    model: str
-
-    def chat_parsed(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        *,
-        response_format: type[ChapterRevisionResponse],
-        validator: Callable[[ChapterRevisionResponse], bool | None] | None = None,
-        bypass_cache: bool = False,
-    ) -> ChapterRevisionResponse: ...
 
 
 @dataclass(frozen=True)
@@ -342,10 +325,12 @@ class _ChapterInput:
     root_manifest: _RootManifest
     root_manifest_sha256: str
     chapter_manifest: _ChapterManifest
+    chapter_manifest_bytes: bytes
     chapter_manifest_sha256: str
     chapter_html: str
     chapter_html_sha256: str
     page_bytes: tuple[tuple[str, bytes, str], ...]
+    asset_bytes: tuple[tuple[str, bytes, str], ...]
     seed: _SeedInfo
 
 
@@ -446,14 +431,14 @@ class _TreeParser(HTMLParser):
 
 def revise_chapter(
     chapter_dir: str | Path,
-    llm_client: LLMClient | ParsedRevisionClient,
+    agent_runner: AgentRunner,
     *,
     force: bool = False,
 ) -> Path:
     """Revise one ``04_edit/chapters/NNNN`` directory.
 
     The return value always points to the published ``corrected.html``.  A
-    fresh validated output returns without making a model request.
+    fresh validated output returns without starting an agent run.
     """
     chapter_path = _absolute_path(Path(chapter_dir))
     workspace_dir = _workspace_for_chapter(chapter_path)
@@ -462,7 +447,7 @@ def revise_chapter(
     result = _revise_one(
         workspace,
         entry,
-        llm_client,
+        agent_runner,
         force=force,
     )
     return result[0]
@@ -470,7 +455,7 @@ def revise_chapter(
 
 def revise_all_chapters(
     edit_dir: str | Path,
-    llm_client: LLMClient | ParsedRevisionClient,
+    agent_runner: AgentRunner,
     *,
     force: bool = False,
     continue_on_error: bool = False,
@@ -489,7 +474,7 @@ def revise_all_chapters(
             path, skipped = _revise_one(
                 workspace,
                 entry,
-                llm_client,
+                agent_runner,
                 force=force,
             )
         except Exception as exc:
@@ -508,27 +493,28 @@ def revise_all_chapters(
 def _revise_one(
     workspace: _WorkspaceInput,
     entry: Mapping[str, Any],
-    llm_client: LLMClient | ParsedRevisionClient,
+    agent_runner: AgentRunner,
     *,
     force: bool,
 ) -> tuple[Path, bool]:
     chapter_path = workspace.root / PurePosixPath(cast(str, entry["path"]))
     with _chapter_lock(chapter_path):
         _cleanup_orphans(chapter_path)
-        return _revise_one_locked(workspace, entry, llm_client, force=force)
+        return _revise_one_locked(workspace, entry, agent_runner, force=force)
 
 
 def _revise_one_locked(
     workspace: _WorkspaceInput,
     entry: Mapping[str, Any],
-    llm_client: LLMClient | ParsedRevisionClient,
+    agent_runner: AgentRunner,
     *,
     force: bool,
 ) -> tuple[Path, bool]:
-    model = _resolve_model(llm_client)
+    identity = _resolve_agent_identity(agent_runner)
     chapter_path = workspace.root / PurePosixPath(cast(str, entry["path"]))
     chapter = _load_chapter(workspace, entry, chapter_path)
-    prompt_hash = _prompt_sha256()
+    task = _revision_task(chapter)
+    prompt_hash = _prompt_sha256(identity, task)
     contract_hash = _contract_sha256()
     corrected_path = chapter_path / "corrected.html"
     revision_path = chapter_path / "revision.json"
@@ -537,47 +523,59 @@ def _revise_one_locked(
         chapter,
         corrected_path,
         revision_path,
-        model=model,
+        identity=identity,
         prompt_hash=prompt_hash,
         contract_hash=contract_hash,
     ):
         return corrected_path, True
 
-    messages = _build_messages(chapter)
-
-    def validate_response(value: ChapterRevisionResponse) -> None:
-        response = ChapterRevisionResponse.model_validate(value)
-        _validate_corrected_html(response.corrected_html, chapter.seed)
-
     try:
-        raw = llm_client.chat_parsed(
-            messages,
-            response_format=ChapterRevisionResponse,
-            validator=validate_response,
-            bypass_cache=force,
+        files = _agent_workspace_files(chapter, task)
+        result = agent_runner(
+            AgentRunRequest(
+                title=f"epubforge chapter {chapter.chapter_manifest.ordinal:04d}",
+                prompt=BOOK_EDITOR_PROMPT,
+                files=files,
+                output_limits={"corrected.html": MAX_HTML_BYTES},
+                forbidden_roots=(workspace.root.parent,),
+            )
         )
-        response = ChapterRevisionResponse.model_validate(raw)
-        _validate_corrected_html(response.corrected_html, chapter.seed)
+        corrected_bytes = result.outputs.get("corrected.html")
+        if not isinstance(corrected_bytes, bytes):
+            raise ChapterRevisionError("agent did not return corrected.html")
+        try:
+            corrected_html = corrected_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ChapterRevisionError("corrected HTML is not UTF-8") from exc
+        _validate_corrected_html(corrected_html, chapter.seed)
     except ChapterRevisionError:
         raise
+    except AgentRunnerError as exc:
+        raise ChapterRevisionError(f"chapter revision agent failed: {exc}") from exc
     except Exception as exc:
-        raise ChapterRevisionError(f"chapter revision request failed: {exc}") from exc
+        raise ChapterRevisionError(f"chapter revision agent failed: {exc}") from exc
 
-    corrected_bytes = response.corrected_html.encode("utf-8")
     if len(corrected_bytes) > MAX_HTML_BYTES:
         raise ChapterRevisionError("corrected HTML exceeds the size limit")
     corrected_hash = _sha256_bytes(corrected_bytes)
     record = ChapterRevisionRecord(
-        model=model,
+        agent_name=identity.name,
+        agent_model=identity.model,
+        agent_variant=identity.variant,
+        agent_fingerprint=identity.fingerprint,
         prompt_sha256=prompt_hash,
         contract_sha256=contract_hash,
+        session_id=result.session_id,
         workspace_manifest_sha256=chapter.root_manifest_sha256,
         source_chapter_manifest_sha256=chapter.chapter_manifest_sha256,
         source_chapter_html_sha256=chapter.chapter_html_sha256,
         source_images_sha256={name: digest for name, _, digest in chapter.page_bytes},
+        source_assets_sha256={
+            name: digest
+            for name, _, digest in chapter.asset_bytes
+            if name in chapter.seed.referenced_assets
+        },
         corrected_html_sha256=corrected_hash,
-        notes=list(response.notes),
-        open_questions=list(response.open_questions),
     )
     _publish_pair(
         chapter_path,
@@ -587,36 +585,39 @@ def _revise_one_locked(
     return corrected_path, False
 
 
-def _build_messages(chapter: _ChapterInput) -> list[ChatCompletionMessageParam]:
-    content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": USER_PROMPT_PREFIX + chapter.chapter_html,
-        }
-    ]
-    for _, data, _ in chapter.page_bytes:
-        encoded = base64.b64encode(data).decode("ascii")
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
-            }
-        )
-    return cast(
-        list[ChatCompletionMessageParam],
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ],
+def _revision_task(chapter: _ChapterInput) -> str:
+    ordered_pages = "\n".join(
+        f"{position}. `{relative}`"
+        for position, (relative, _, _) in enumerate(chapter.page_bytes, start=1)
     )
+    return REVISION_TASK_PREFIX + ordered_pages + "\n\nWrite no other files.\n"
 
 
-def _prompt_sha256() -> str:
+def _agent_workspace_files(chapter: _ChapterInput, task: str) -> dict[str, bytes]:
+    files = {
+        "TASK.md": task.encode("utf-8"),
+        "chapter.json": chapter.chapter_manifest_bytes,
+        "chapter.html": chapter.chapter_html.encode("utf-8"),
+        "corrected.html": chapter.chapter_html.encode("utf-8"),
+    }
+    files.update({name: data for name, data, _ in chapter.page_bytes})
+    files.update(
+        {
+            name: data
+            for name, data, _ in chapter.asset_bytes
+            if name in chapter.seed.referenced_assets
+        }
+    )
+    return files
+
+
+def _prompt_sha256(identity: AgentIdentity, task: str) -> str:
     return _sha256_json(
         {
             "version": REVISION_CONTRACT_VERSION,
-            "system": SYSTEM_PROMPT,
-            "user_prefix": USER_PROMPT_PREFIX,
+            "agent_prompt_sha256": identity.prompt_sha256,
+            "invocation_prompt": BOOK_EDITOR_PROMPT,
+            "task": task,
         }
     )
 
@@ -625,7 +626,7 @@ def _contract_sha256() -> str:
     return _sha256_json(
         {
             "version": REVISION_CONTRACT_VERSION,
-            "response_schema": ChapterRevisionResponse.model_json_schema(),
+            "output_file": "corrected.html",
             "html_tags": sorted(_ALLOWED_TAGS),
             "html_attributes": sorted(_GLOBAL_ATTRS),
             "reference_contract": {
@@ -700,7 +701,7 @@ def _fresh_output(
     corrected_path: Path,
     revision_path: Path,
     *,
-    model: str,
+    identity: AgentIdentity,
     prompt_hash: str,
     contract_hash: str,
 ) -> bool:
@@ -716,12 +717,16 @@ def _fresh_output(
 
     try:
         corrected_bytes = _read_snapshot(
-            corrected_path, "corrected HTML", max_bytes=MAX_HTML_BYTES
+            corrected_path,
+            "corrected HTML",
+            max_bytes=MAX_HTML_BYTES,
+            require_single_link=True,
         )
         revision_bytes = _read_snapshot(
             revision_path,
             "chapter revision metadata",
             max_bytes=MAX_CHAPTER_MANIFEST_BYTES,
+            require_single_link=True,
         )
         payload = parse_json_document(
             revision_bytes,
@@ -730,7 +735,10 @@ def _fresh_output(
         )
         record = ChapterRevisionRecord.model_validate(payload)
         if (
-            record.model != model
+            record.agent_name != identity.name
+            or record.agent_model != identity.model
+            or record.agent_variant != identity.variant
+            or record.agent_fingerprint != identity.fingerprint
             or record.prompt_sha256 != prompt_hash
             or record.contract_sha256 != contract_hash
             or record.workspace_manifest_sha256 != chapter.root_manifest_sha256
@@ -738,6 +746,12 @@ def _fresh_output(
             or record.source_chapter_html_sha256 != chapter.chapter_html_sha256
             or record.source_images_sha256
             != {name: digest for name, _, digest in chapter.page_bytes}
+            or record.source_assets_sha256
+            != {
+                name: digest
+                for name, _, digest in chapter.asset_bytes
+                if name in chapter.seed.referenced_assets
+            }
             or record.corrected_html_sha256 != _sha256_bytes(corrected_bytes)
         ):
             return False
@@ -966,22 +980,22 @@ def _load_chapter(
     if len(assets) != len(chapter_manifest.assets) or len(assets) > MAX_ASSET_COUNT:
         raise ChapterRevisionError("chapter asset list is invalid")
     _validate_asset_paths(assets)
-    for relative in assets:
+    asset_bytes: list[tuple[str, bytes, str]] = []
+    for relative in sorted(assets):
         path = chapter_dir / PurePosixPath(relative)
-        _ensure_regular_path(path, f"chapter asset {relative}")
         root_relative = _relative(workspace.root, path)
         expected_hash = workspace.manifest.files_sha256.get(root_relative)
         if expected_hash is None:
             raise ChapterRevisionError(
                 f"chapter asset is absent from hashes: {relative}"
             )
-        actual_hash = _hash_snapshot(
-            path,
-            f"chapter asset {relative}",
-            max_bytes=MAX_ASSET_BYTES,
+        data = _read_snapshot(
+            path, f"chapter asset {relative}", max_bytes=MAX_ASSET_BYTES
         )
+        actual_hash = _sha256_bytes(data)
         if actual_hash != expected_hash:
             raise ChapterRevisionError(f"chapter asset hash mismatch: {relative}")
+        asset_bytes.append((relative, data, actual_hash))
 
     pages = _validate_page_paths(chapter_manifest.pages)
     if len(pages) > min(MAX_IMAGE_COUNT, MAX_IMAGES):
@@ -1024,10 +1038,12 @@ def _load_chapter(
         root_manifest=workspace.manifest,
         root_manifest_sha256=workspace.manifest_sha256,
         chapter_manifest=chapter_manifest,
+        chapter_manifest_bytes=chapter_manifest_bytes,
         chapter_manifest_sha256=chapter_hash,
         chapter_html=chapter_html,
         chapter_html_sha256=html_hash,
         page_bytes=tuple(page_bytes),
+        asset_bytes=tuple(asset_bytes),
         seed=seed,
     )
 
@@ -1035,26 +1051,26 @@ def _load_chapter(
 def is_chapter_revision_fresh(
     edit_dir: str | Path,
     *,
-    model: str,
+    agent_identity: AgentIdentity,
 ) -> bool:
     """Return whether every chapter has a valid current revision.
 
     The preflight reuses the workspace, chapter, and revision validators used
-    by :func:`revise_all_chapters`. It performs no provider or network work.
+    by :func:`revise_all_chapters`. It does not construct an agent runner.
     """
-    if not isinstance(model, str) or not model.strip():
-        raise ChapterRevisionError("an LLM model is required for freshness checks")
+    if not isinstance(agent_identity, AgentIdentity):
+        raise ChapterRevisionError("a valid agent identity is required")
     workspace = _load_workspace(_resolve_edit_dir(Path(edit_dir)))
-    prompt_hash = _prompt_sha256()
     contract_hash = _contract_sha256()
     for entry in workspace.entries:
         chapter_path = workspace.root / PurePosixPath(cast(str, entry["path"]))
         chapter = _load_chapter(workspace, entry, chapter_path)
+        prompt_hash = _prompt_sha256(agent_identity, _revision_task(chapter))
         if not _fresh_output(
             chapter,
             chapter_path / "corrected.html",
             chapter_path / "revision.json",
-            model=model,
+            identity=agent_identity,
             prompt_hash=prompt_hash,
             contract_hash=contract_hash,
         ):
@@ -1544,11 +1560,6 @@ def _ensure_directory(path: Path, label: str) -> None:
     os.close(fd)
 
 
-def _ensure_regular_path(path: Path, label: str) -> None:
-    fd = _open_path(path, label, directory=False)
-    os.close(fd)
-
-
 def _open_path(path: Path, label: str, *, directory: bool) -> int:
     if (
         os.name != "posix"
@@ -1599,10 +1610,18 @@ def _open_path(path: Path, label: str, *, directory: bool) -> int:
         os.close(directory_fd)
 
 
-def _read_snapshot(path: Path, label: str, *, max_bytes: int) -> bytes:
+def _read_snapshot(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int,
+    require_single_link: bool = False,
+) -> bytes:
     fd = _open_path(path, label, directory=False)
     try:
         before = os.fstat(fd)
+        if require_single_link and before.st_nlink != 1:
+            raise ChapterRevisionError(f"{label} must have exactly one hard link")
         if before.st_size > max_bytes:
             raise ChapterRevisionError(f"{label} exceeds the size limit")
         chunks: list[bytes] = []
@@ -1616,7 +1635,11 @@ def _read_snapshot(path: Path, label: str, *, max_bytes: int) -> bytes:
                 raise ChapterRevisionError(f"{label} exceeds the size limit")
             chunks.append(chunk)
         after = os.fstat(fd)
-        if not _same_snapshot(before, after) or total != before.st_size:
+        if (
+            not _same_snapshot(before, after)
+            or (require_single_link and after.st_nlink != 1)
+            or total != before.st_size
+        ):
             raise ChapterRevisionError(f"{label} changed while being read")
         return b"".join(chunks)
     except OSError as exc:
@@ -1701,6 +1724,8 @@ def _publish_pair(chapter_dir: Path, corrected: bytes, revision: bytes) -> None:
                 raise ChapterRevisionError(f"output is a symlink: {target}")
         except OSError as exc:
             raise ChapterRevisionError(f"cannot inspect output: {target}") from exc
+    for target in targets:
+        _target_exists(target)
 
     staging_dir: Path | None = None
     backup_dir: Path | None = None
@@ -1778,6 +1803,10 @@ def _target_exists(path: Path) -> bool:
         raise ChapterRevisionError(f"publication target is a symlink: {path}")
     if not stat.S_ISREG(info.st_mode):
         raise ChapterRevisionError(f"publication target is not a regular file: {path}")
+    if info.st_nlink != 1:
+        raise ChapterRevisionError(
+            f"publication target must have exactly one hard link: {path}"
+        )
     return True
 
 
@@ -1824,13 +1853,11 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _resolve_model(llm_client: LLMClient | ParsedRevisionClient) -> str:
-    candidate = getattr(llm_client, "model", None)
-    if not isinstance(candidate, str) or not candidate.strip():
-        raise ChapterRevisionError(
-            "an LLM model is required; configure llm_client.model"
-        )
-    return candidate
+def _resolve_agent_identity(agent_runner: AgentRunner) -> AgentIdentity:
+    identity = getattr(agent_runner, "identity", None)
+    if not isinstance(identity, AgentIdentity):
+        raise ChapterRevisionError("agent_runner.identity must be AgentIdentity")
+    return identity
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -1855,15 +1882,13 @@ __all__ = [
     "ChapterRevisionPublicationError",
     "ChapterRevisionRecord",
     "ChapterRevisionReport",
-    "ChapterRevisionResponse",
     "is_chapter_revision_fresh",
     "MAX_HTML_BYTES",
     "MAX_HTML_ELEMENTS",
     "MAX_IMAGE_BYTES",
     "MAX_IMAGE_COUNT",
     "MAX_TOTAL_IMAGE_BYTES",
-    "ParsedRevisionClient",
-    "SYSTEM_PROMPT",
+    "REVISION_TASK_PREFIX",
     "revise_all_chapters",
     "revise_chapter",
 ]

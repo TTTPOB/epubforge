@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "epubforge"
 version = "0.1.0"
-description = "MinerU-Luna PDF pipeline for corrected chapter HTML"
+description = "MinerU and OpenCode pipeline for corrected chapter HTML"
 readme = "README.md"
 requires-python = ">=3.13"
 classifiers = [
@@ -14,7 +14,6 @@ classifiers = [
     "Operating System :: POSIX",
 ]
 dependencies = [
-    "openai>=1.54",
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2.7",
@@ -40,6 +39,18 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/epubforge"]
+artifacts = ["src/epubforge/agents/*.md"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.beads",
+    "/.claude",
+    "/.codegraph",
+    "/.opencode",
+    "/.pytest_cache",
+    "/config.local.toml",
+    "/work",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

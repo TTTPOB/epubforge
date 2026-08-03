@@ -13,7 +13,7 @@ from epubforge.observability import log_path_for, setup_logging
 
 app = typer.Typer(
     name="epubforge",
-    help="MinerU-Luna PDF pipeline for corrected chapter HTML.",
+    help="MinerU and OpenCode pipeline for corrected chapter HTML.",
     no_args_is_help=True,
 )
 
@@ -75,12 +75,8 @@ def _init_logging(
 
 
 def _log_startup_banner(cfg: Config, log_path: Path | None) -> None:
-    log.info(
-        "epubforge startup: model=%s cache_dir=%s log=%s",
-        cfg.llm.model,
-        cfg.runtime.cache_dir,
-        log_path or "(stderr only)",
-    )
+    del cfg
+    log.info("epubforge startup: log=%s", log_path or "(stderr only)")
 
 
 def _run_logged_stage(

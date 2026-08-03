@@ -1,8 +1,9 @@
-"""Architecture checks for the direct MinerU-Luna workflow."""
+"""Architecture checks for the isolated OpenCode book-editor workflow."""
 
 from __future__ import annotations
 
 import importlib
+import logging
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from epubforge import pipeline
+from epubforge.agent_runner import book_editor_identity
 from epubforge.cli import app
 from epubforge.config import ChaptersSettings, Config, load_config
 
@@ -20,6 +22,7 @@ REPO_ROOT = Path(__file__).parents[1]
 SOURCE_ROOT = REPO_ROOT / "src" / "epubforge"
 COMMANDS = {"run", "parse", "normalize", "segment", "prepare", "revise"}
 RETAINED_MODULES = (
+    "agent_runner",
     "annotation",
     "chapter_revision",
     "chapter_segmentation",
@@ -31,7 +34,6 @@ RETAINED_MODULES = (
     "page_geometry",
     "pipeline",
     "strict_json",
-    "llm.client",
 )
 DELETED_MODULES = (
     "assembler",
@@ -49,6 +51,7 @@ DELETED_MODULES = (
     "query",
     "stage3_artifacts",
     "text_utils",
+    "llm.client",
 )
 
 
@@ -140,7 +143,56 @@ jpeg_quality = 88
     assert ChaptersSettings().render_dpi == 150
     assert not hasattr(cfg, "editor")
     assert not hasattr(cfg, "extract")
+    assert not hasattr(cfg, "llm")
+    assert not hasattr(cfg.runtime, "cache_dir")
 
 
-def test_default_model_selects_luna_provider_id() -> None:
-    assert Config().llm.model == "openai/gpt-5.6-luna"
+def test_packaged_agent_selects_luna_medium() -> None:
+    identity = book_editor_identity()
+
+    assert identity.name == "book-editor"
+    assert identity.model == "openai/gpt-5.6-luna"
+    assert identity.variant == "medium"
+    assert len(identity.fingerprint) == 64
+
+    markdown = (SOURCE_ROOT / "agents/book-editor.md").read_text(encoding="utf-8")
+    assert "permission:" in markdown
+    assert '  "*": deny' in markdown
+    assert "  bash: deny" in markdown
+    assert "  external_directory: deny" in markdown
+
+
+def test_production_has_no_direct_openai_or_llm_client_architecture() -> None:
+    python_sources = list(SOURCE_ROOT.rglob("*.py"))
+
+    assert not any((SOURCE_ROOT / "llm").rglob("*.py"))
+    for path in python_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "from openai" not in source
+        assert "import openai" not in source
+        assert "LLMClient" not in source
+        assert "EPUBFORGE_LLM_" not in source
+
+    project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"openai>=' not in project
+
+
+def test_old_llm_environment_values_are_not_loaded(monkeypatch) -> None:
+    monkeypatch.setenv("EPUBFORGE_LLM_API_KEY", "must-not-enter-config")
+    monkeypatch.setenv("EPUBFORGE_RUNTIME_CACHE_DIR", "must-not-enter-config")
+
+    cfg = load_config()
+
+    assert not hasattr(cfg, "llm")
+    assert not hasattr(cfg.runtime, "cache_dir")
+
+
+def test_cli_startup_banner_has_no_model_or_cache(caplog) -> None:
+    from epubforge import cli
+
+    caplog.set_level(logging.INFO, logger="epubforge.cli")
+    cli._log_startup_banner(Config(), None)
+
+    assert "epubforge startup" in caplog.text
+    assert "model=" not in caplog.text
+    assert "cache" not in caplog.text.lower()

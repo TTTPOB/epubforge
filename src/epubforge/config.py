@@ -15,20 +15,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ---------------------------------------------------------------------------
 
 
-class ProviderSettings(BaseModel):
-    """Settings for the text LLM provider endpoint."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    base_url: str = "https://openrouter.ai/api/v1"
-    api_key: str | None = None
-    model: str = "openai/gpt-5.6-luna"
-    timeout_seconds: float = 300.0
-    max_tokens: int | None = None
-    prompt_caching: bool = True
-    extra_body: dict[str, Any] = Field(default_factory=dict)
-
-
 class MineruSettings(BaseModel):
     """Settings for the MinerU official cloud API."""
 
@@ -52,7 +38,6 @@ class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     concurrency: int = 4
-    cache_dir: Path = Path("work/.cache")
     work_dir: Path = Path("work")
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
 
@@ -76,16 +61,9 @@ class Config(BaseSettings):
 
     model_config = SettingsConfigDict(extra="ignore")
 
-    llm: ProviderSettings = Field(default_factory=ProviderSettings)
     mineru: MineruSettings = Field(default_factory=MineruSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     chapters: ChaptersSettings = Field(default_factory=ChaptersSettings)
-
-    def require_llm(self) -> None:
-        if not self.llm.api_key:
-            raise SystemExit(
-                "LLM API key is required (set [llm].api_key or EPUBFORGE_LLM_API_KEY)"
-            )
 
     def require_mineru(self) -> None:
         if not self.mineru.api_key:
@@ -110,17 +88,6 @@ def _bool_env(v: str) -> bool:
 
 _ENV_MAP: list[tuple[str, str, str, Any]] = [
     # (env_name, section, field, cast)
-    ("EPUBFORGE_LLM_BASE_URL", "llm", "base_url", str),
-    ("EPUBFORGE_LLM_API_KEY", "llm", "api_key", str),
-    ("EPUBFORGE_LLM_MODEL", "llm", "model", str),
-    ("EPUBFORGE_LLM_TIMEOUT", "llm", "timeout_seconds", float),
-    (
-        "EPUBFORGE_LLM_MAX_TOKENS",
-        "llm",
-        "max_tokens",
-        lambda v: None if v == "" else int(v),
-    ),
-    ("EPUBFORGE_LLM_PROMPT_CACHING", "llm", "prompt_caching", _bool_env),
     ("EPUBFORGE_MINERU_API_KEY", "mineru", "api_key", str),
     ("EPUBFORGE_MINERU_BASE_URL", "mineru", "base_url", str),
     ("EPUBFORGE_MINERU_MODEL_VERSION", "mineru", "model_version", str),
@@ -144,7 +111,6 @@ _ENV_MAP: list[tuple[str, str, str, Any]] = [
     ("EPUBFORGE_MINERU_ENABLE_TABLE", "mineru", "enable_table", _bool_env),
     ("EPUBFORGE_MINERU_LANGUAGE", "mineru", "language", str),
     ("EPUBFORGE_RUNTIME_CONCURRENCY", "runtime", "concurrency", int),
-    ("EPUBFORGE_RUNTIME_CACHE_DIR", "runtime", "cache_dir", Path),
     ("EPUBFORGE_RUNTIME_WORK_DIR", "runtime", "work_dir", Path),
     ("EPUBFORGE_RUNTIME_LOG_LEVEL", "runtime", "log_level", str),
     ("EPUBFORGE_CHAPTERS_RENDER_DPI", "chapters", "render_dpi", int),
@@ -189,7 +155,7 @@ def load_config(config_path: Path | None = None) -> Config:
             toml_data = tomllib.load(fh)
         # Accept only known top-level sections; unknown keys at the top level are silently
         # ignored (Config.model_config extra="ignore" handles this at parse time too).
-        for key in ("llm", "mineru", "runtime", "chapters"):
+        for key in ("mineru", "runtime", "chapters"):
             if key in toml_data:
                 base[key] = dict(toml_data[key])
 

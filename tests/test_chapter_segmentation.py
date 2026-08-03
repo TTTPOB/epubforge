@@ -4,44 +4,42 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from epubforge import chapter_segmentation as segmentation
+from epubforge.agent_runner import (
+    AgentIdentity,
+    AgentRunRequest,
+    AgentRunResult,
+    book_editor_identity,
+)
 from epubforge.chapter_segmentation import (
     ChapterSegmentationError,
+    ChapterSegmentationPublicationError,
     ChapterSegmentationResponse,
     segment_chapters,
     validate_boundaries,
 )
 
 
-class FakeLLM:
-    def __init__(self, response: Any, model: str = "luna-medium") -> None:
-        self.model = model
+class FakeAgentRunner:
+    def __init__(self, response: Any) -> None:
+        self.identity = book_editor_identity()
         self.response = response
-        self.calls: list[list[dict[str, Any]]] = []
-        self.bypass_calls: list[bool] = []
-        self.validator_calls = 0
+        self.calls: list[AgentRunRequest] = []
 
-    def chat_parsed(
-        self,
-        messages,
-        *,
-        response_format,
-        validator=None,
-        bypass_cache=False,
-    ):
-        self.calls.append(messages)
-        self.bypass_calls.append(bypass_cache)
-        parsed = response_format.model_validate(self.response)
-        if validator is not None:
-            self.validator_calls += 1
-            validator(parsed)
-        return parsed
+    def __call__(self, request: AgentRunRequest) -> AgentRunResult:
+        self.calls.append(request)
+        return AgentRunResult(
+            outputs={"boundaries.json": json.dumps(self.response).encode("utf-8")},
+            session_id="ses_segmentation_test",
+        )
 
 
 def _items() -> list[dict[str, Any]]:
@@ -221,7 +219,7 @@ def _success_response() -> dict[str, Any]:
 
 def test_success_filters_toc_and_embedded_heading_traps(tmp_path: Path) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
 
     output_path = segment_chapters(content_path, tmp_path, fake)
 
@@ -229,51 +227,63 @@ def test_success_filters_toc_and_embedded_heading_traps(tmp_path: Path) -> None:
     artifact = json.loads(output_path.read_text(encoding="utf-8"))
     assert [b["start_content_idx"] for b in artifact["boundaries"]] == [0, 5, 7, 9]
     assert artifact["source_content_sha256"]
-    assert artifact["model"] == "luna-medium"
+    assert artifact["agent_name"] == "book-editor"
+    assert artifact["agent_model"] == "openai/gpt-5.6-luna"
+    assert artifact["agent_variant"] == "medium"
+    assert artifact["session_id"] == "ses_segmentation_test"
     assert len(fake.calls) == 1
-    assert fake.validator_calls == 1
-    prompt = "\n".join(str(message["content"]) for message in fake.calls[0]).lower()
-    assert "dense toc title lists are not body starts" in prompt
-    assert "embedded document/article titles" in prompt
-    assert "use surrounding content" in prompt
-    assert '"content_idx":10' in prompt
-    assert "an embedded article" in prompt
+    request = fake.calls[0]
+    task = request.files["TASK.md"].decode("utf-8").lower()
+    projection = request.files["content-projection.json"].decode("utf-8").lower()
+    assert "dense table-of-contents title lists are not body starts" in task
+    assert "embedded document or article titles" in task
+    assert "surrounding content" in task
+    assert '"content_idx":10' in projection
+    assert "an embedded article" in projection
     for forbidden in ("pdf", "render-page", "source.jpg", "image inspection"):
-        assert forbidden not in prompt
+        assert forbidden not in projection
 
 
 def test_fresh_skip_model_prompt_and_force(tmp_path: Path, monkeypatch) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     segment_chapters(content_path, tmp_path, fake)
     segment_chapters(content_path, tmp_path, fake)
     assert len(fake.calls) == 1
 
-    fake.model = "another-model"
+    original = fake.identity
+    fake.identity = AgentIdentity(
+        name=original.name,
+        model="another-model",
+        variant=original.variant,
+        prompt_sha256=original.prompt_sha256,
+        fingerprint="b" * 64,
+    )
     segment_chapters(content_path, tmp_path, fake)
     assert len(fake.calls) == 2
 
     monkeypatch.setattr(
-        segmentation, "SYSTEM_PROMPT", segmentation.SYSTEM_PROMPT + "\nChanged."
+        segmentation,
+        "SEGMENTATION_TASK",
+        segmentation.SEGMENTATION_TASK + "\nChanged.\n",
     )
     segment_chapters(content_path, tmp_path, fake)
     assert len(fake.calls) == 3
 
     segment_chapters(content_path, tmp_path, fake, force=True)
     assert len(fake.calls) == 4
-    assert fake.bypass_calls == [False, False, False, True]
 
 
 def test_public_function_runs_semantic_validator_before_publish(tmp_path: Path) -> None:
     content_path = _write_content(tmp_path)
     invalid = _success_response()
     invalid["boundaries"][1]["title"] = "wrong title"
-    fake = FakeLLM(invalid)
+    fake = FakeAgentRunner(invalid)
 
     with pytest.raises(ChapterSegmentationError, match="exactly match"):
         segment_chapters(content_path, tmp_path, fake)
 
-    assert fake.validator_calls == 1
+    assert len(fake.calls) == 1
     assert not (tmp_path / "03_chapters" / "chapters.json").exists()
 
 
@@ -281,24 +291,17 @@ def test_failed_call_preserves_old_output_and_damaged_output_rebuilds(
     tmp_path: Path,
 ) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     output_path = segment_chapters(content_path, tmp_path, fake)
     old_bytes = output_path.read_bytes()
 
-    class FailingLLM(FakeLLM):
-        def chat_parsed(
-            self,
-            messages,
-            *,
-            response_format,
-            validator=None,
-            bypass_cache=False,
-        ):
+    class FailingAgent(FakeAgentRunner):
+        def __call__(self, request: AgentRunRequest) -> AgentRunResult:
             raise RuntimeError("provider unavailable")
 
-    with pytest.raises(RuntimeError, match="provider unavailable"):
+    with pytest.raises(ChapterSegmentationError, match="provider unavailable"):
         segment_chapters(
-            content_path, tmp_path, FailingLLM(_success_response()), force=True
+            content_path, tmp_path, FailingAgent(_success_response()), force=True
         )
     assert output_path.read_bytes() == old_bytes
 
@@ -399,7 +402,7 @@ def test_rejects_tampered_content_contract(tmp_path: Path, field: str) -> None:
         payload[field] = "b" * 64
     content_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     with pytest.raises(ChapterSegmentationError):
         segment_chapters(content_path, tmp_path, fake)
     assert not fake.calls
@@ -412,7 +415,7 @@ def test_rejects_missing_source_pdf_sha256(tmp_path: Path) -> None:
     content_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ChapterSegmentationError):
-        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
 
 
 def test_rejects_duplicate_keys_and_unordered_items(tmp_path: Path) -> None:
@@ -425,7 +428,7 @@ def test_rejects_duplicate_keys_and_unordered_items(tmp_path: Path) -> None:
     )
     content_path.write_text(duplicate, encoding="utf-8")
     with pytest.raises(ChapterSegmentationError, match="Cannot read"):
-        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
 
     payload = json.loads(valid)
     payload["items"][1], payload["items"][2] = (
@@ -442,7 +445,7 @@ def test_rejects_duplicate_keys_and_unordered_items(tmp_path: Path) -> None:
     ).hexdigest()
     content_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ChapterSegmentationError, match="contiguous ordered"):
-        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
 
 
 @pytest.mark.parametrize("non_finite", ["NaN", "Infinity", "-Infinity"])
@@ -455,7 +458,7 @@ def test_rejects_item_page_outside_page_count_and_non_finite_json(
     payload["items_sha256"] = _items_sha256(payload["items"])
     content_path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ChapterSegmentationError, match="outside page_count"):
-        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
 
     payload = json.loads(content_path.read_text(encoding="utf-8"))
     payload["items"] = _items()
@@ -463,14 +466,14 @@ def test_rejects_item_page_outside_page_count_and_non_finite_json(
     raw = json.dumps(payload).replace('"text": "Contents"', f'"text": {non_finite}', 1)
     content_path.write_text(raw, encoding="utf-8")
     with pytest.raises(ChapterSegmentationError, match="Cannot read"):
-        segment_chapters(content_path, tmp_path, FakeLLM(_success_response()))
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
 
 
 def test_projection_contract_change_invalidates_fresh_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     segment_chapters(content_path, tmp_path, fake)
 
     monkeypatch.setattr(
@@ -485,7 +488,7 @@ def test_projection_contract_change_invalidates_fresh_artifact(
 
 def test_page_geometry_change_invalidates_fresh_artifact(tmp_path: Path) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     segment_chapters(content_path, tmp_path, fake)
     payload = json.loads(content_path.read_text(encoding="utf-8"))
     payload["page_geometry"][0]["width"] = 101.0
@@ -508,7 +511,7 @@ def test_page_geometry_hash_canonicalizes_integer_and_float_dimensions() -> None
 
 def test_symlink_output_is_not_reused(tmp_path: Path) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     output_path = segment_chapters(content_path, tmp_path, fake)
     target_path = tmp_path / "existing-chapters.json"
     target_path.write_bytes(output_path.read_bytes())
@@ -526,7 +529,7 @@ def test_atomic_publish_failure_keeps_existing_file(
     tmp_path: Path, monkeypatch
 ) -> None:
     content_path = _write_content(tmp_path)
-    fake = FakeLLM(_success_response())
+    fake = FakeAgentRunner(_success_response())
     output_path = segment_chapters(content_path, tmp_path, fake)
     old_bytes = output_path.read_bytes()
 
@@ -541,3 +544,109 @@ def test_atomic_publish_failure_keeps_existing_file(
     with pytest.raises(OSError, match="replace failed"):
         segment_chapters(content_path, tmp_path, fake, force=True)
     assert output_path.read_bytes() == old_bytes
+
+
+def test_parent_fsync_failure_rolls_back_previous_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    output_path = segment_chapters(content_path, tmp_path, fake)
+    old_bytes = output_path.read_bytes()
+    real_fsync = segmentation.os.fsync
+    failed = False
+
+    def fail_first_directory_fsync(fd: int) -> None:
+        nonlocal failed
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and not failed:
+            failed = True
+            raise OSError("directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(segmentation.os, "fsync", fail_first_directory_fsync)
+    with pytest.raises(OSError, match="directory fsync failed"):
+        segment_chapters(content_path, tmp_path, fake, force=True)
+
+    assert output_path.read_bytes() == old_bytes
+    assert output_path.stat().st_nlink == 1
+
+
+def test_parent_fsync_failure_without_previous_artifact_removes_new_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content_path = _write_content(tmp_path)
+    real_fsync = segmentation.os.fsync
+    failed = False
+
+    def fail_first_directory_fsync(fd: int) -> None:
+        nonlocal failed
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and not failed:
+            failed = True
+            raise OSError("directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(segmentation.os, "fsync", fail_first_directory_fsync)
+    with pytest.raises(OSError, match="directory fsync failed"):
+        segment_chapters(content_path, tmp_path, FakeAgentRunner(_success_response()))
+
+    assert not (tmp_path / "03_chapters" / "chapters.json").exists()
+
+
+def test_failed_rollback_fsync_preserves_recovery_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    output_path = segment_chapters(content_path, tmp_path, fake)
+    old_bytes = output_path.read_bytes()
+    real_fsync = segmentation.os.fsync
+
+    def fail_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(segmentation.os, "fsync", fail_directory_fsync)
+    with pytest.raises(ChapterSegmentationPublicationError) as caught:
+        segment_chapters(content_path, tmp_path, fake, force=True)
+
+    assert caught.value.evidence
+    assert all(path.exists() for path in caught.value.evidence)
+    assert output_path.read_bytes() == old_bytes
+
+
+def test_hardlinked_artifact_is_not_reused(
+    tmp_path: Path,
+) -> None:
+    content_path = _write_content(tmp_path)
+    fake = FakeAgentRunner(_success_response())
+    output_path = segment_chapters(content_path, tmp_path, fake)
+    backing_path = tmp_path / "chapters-backup.json"
+    os.link(output_path, backing_path)
+
+    segment_chapters(content_path, tmp_path, fake)
+
+    assert len(fake.calls) == 2
+    assert output_path.stat().st_nlink == 1
+    assert backing_path.stat().st_nlink == 1
+
+
+@pytest.mark.parametrize("parent_kind", ["symlink", "file", "fifo"])
+def test_rejects_unsafe_stage3_output_parent(tmp_path: Path, parent_kind: str) -> None:
+    content_path = _write_content(tmp_path)
+    unsafe_parent = tmp_path / f"unsafe-{parent_kind}"
+    if parent_kind == "symlink":
+        target = tmp_path / "real-parent"
+        target.mkdir()
+        unsafe_parent.symlink_to(target, target_is_directory=True)
+    elif parent_kind == "file":
+        unsafe_parent.write_bytes(b"not a directory")
+    else:
+        import os
+
+        os.mkfifo(unsafe_parent)
+
+    with pytest.raises(ChapterSegmentationError, match="output parent"):
+        segment_chapters(
+            content_path, unsafe_parent, FakeAgentRunner(_success_response())
+        )

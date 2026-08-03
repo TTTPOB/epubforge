@@ -2,14 +2,16 @@
 
 ## Scope
 
-epubforge converts a PDF through MinerU and Luna into corrected chapter HTML.
+epubforge converts a PDF through MinerU and a restricted OpenCode book-editor
+agent into corrected chapter HTML.
 The repository contains one five-stage pipeline and ends at corrected chapter
 HTML.
 
-Agents work from the chapter workspace produced by Stage 4. They receive the
-chapter HTML, its annotated page JPEGs, and the chapter manifest. They must
-never open, render, or otherwise access the source PDF. The pipeline owns PDF
-access and page rendering before an agent starts.
+The book-editor agent has segmentation and revision modes selected by TASK.md.
+Segmentation receives a normalized content projection. Revision receives one
+chapter's HTML, manifest, referenced assets, and annotated page JPEGs. Agents
+must never open, render, or otherwise access the source PDF. Python owns PDF
+access and page rendering.
 
 ## Five Stages
 
@@ -31,12 +33,19 @@ the original MinerU response archive unchanged; segmented requests use an
 outer archive with `manifest.json` and ordered response ZIP members.
 
 Stage 2 validates ZIP paths, JSON syntax, source-PDF identity, page count,
-page geometry, and asset hashes. Stage 3 asks the configured Luna model for
-ordered chapter boundaries and validates every boundary against the content
+page geometry, and asset hashes. Stage 3 runs the packaged OpenCode agent in an
+isolated workspace and validates every returned boundary against the content
 contract. Stage 4 writes deterministic HTML with content IDs, page IDs, bboxes,
-and annotated JPEG evidence. Stage 5 sends only that chapter evidence and HTML
-to Luna, validates the returned HTML, and publishes the corrected pair
+and annotated JPEG evidence. Stage 5 lets the same agent edit a pre-seeded
+`corrected.html`, validates the result, and publishes the corrected pair
 atomically.
+
+Agent workspaces use mode 0700 system temporary directories outside the
+repository and book workspace. The runner disables project config and external
+skills. It denies shell commands, subagents, external directories, web tools,
+skills, questions, and MCP tools. It allows file reads, listing, globbing,
+grep, and edits only inside the isolated directory. Never place a PDF in an
+agent workspace.
 
 ## Configuration
 
@@ -44,21 +53,16 @@ Pass a TOML file explicitly with `--config`. Without it, epubforge loads
 defaults and the listed environment variables. `config.example.toml` contains
 the complete section shape:
 
-- `[llm]`: endpoint, API key, model, token budget, prompt caching, and provider extras
 - `[mineru]`: API key, endpoint, polling, archive limits, and extraction options
-- `[runtime]`: concurrency, cache directory, work directory, and log level
+- `[runtime]`: concurrency, work directory, and log level
 - `[chapters]`: page JPEG DPI and quality
 
-The main credentials are `EPUBFORGE_LLM_API_KEY` and
-`EPUBFORGE_MINERU_API_KEY`. Leaf overrides also include
-`EPUBFORGE_LLM_MODEL`, `EPUBFORGE_LLM_TIMEOUT`,
-`EPUBFORGE_LLM_MAX_TOKENS`, `EPUBFORGE_LLM_PROMPT_CACHING`, all
-`EPUBFORGE_MINERU_*` fields, all `EPUBFORGE_RUNTIME_*` fields, and
-`EPUBFORGE_CHAPTERS_RENDER_DPI` / `EPUBFORGE_CHAPTERS_JPEG_QUALITY`.
-
-LLM requests use `work/.cache/` by default. Logs go to
-`work/<book_name>/logs/` and stderr. The CLI accepts `--log-level` and
-`--log-file`.
+The epubforge credential is `EPUBFORGE_MINERU_API_KEY`. Leaf overrides include
+the documented `EPUBFORGE_MINERU_*` fields,
+`EPUBFORGE_RUNTIME_CONCURRENCY`, `EPUBFORGE_RUNTIME_WORK_DIR`,
+`EPUBFORGE_RUNTIME_LOG_LEVEL`, and the chapter rendering fields. OpenCode owns
+model authentication and provider configuration. Logs go to
+`work/<book_name>/logs/` and stderr.
 
 ## Tests and Quality Gates
 
@@ -72,9 +76,10 @@ uv lock --check
 uv run epubforge --help
 ```
 
-Tests must use temporary work and cache directories. Credential smoke tests
-must skip without both API keys and must never write to a shared repository
-work directory.
+Tests must use temporary work and agent directories. MinerU smoke tests skip
+without its API key; real agent tests also require a usable OpenCode
+environment. Smoke tests must never write to a shared repository work
+directory.
 
 Keep code comments in English. Do not add compatibility modules for removed
 workflow stages.

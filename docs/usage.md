@@ -2,12 +2,12 @@
 
 ## 快速开始
 
-安装依赖并配置两个 API key：
+安装依赖，配置 MinerU API key，并确认 OpenCode 已完成模型认证：
 
 ```bash
 uv sync
 export EPUBFORGE_MINERU_API_KEY=...
-export EPUBFORGE_LLM_API_KEY=...
+opencode --version
 uv run epubforge --config config.example.toml run fixtures/bmsf.pdf
 ```
 
@@ -67,27 +67,31 @@ Stage 1 发布结果要求 POSIX 环境、目录 `fsync` 和原子重命名。�
 
 ## Agent 页面工作区
 
-Stage 4 在程序内部读取 source PDF，生成带 content ID、page ID 和 bbox 标记的章节
-HTML，以及 `pages/page-*.jpg` 标注页面。章节 agent 只接收这些 HTML 和 JPEG 文件，
-不会打开、渲染或访问 PDF。
+Stage 3 创建隔离目录，写入 `TASK.md` 和 `content-projection.json`。打包的
+`book-editor` agent 使用 `openai/gpt-5.6-luna` medium，写出
+`boundaries.json`。Python 对照源 content index、page index 和精确标题校验边界，
+再原子发布 `chapters.json`。
 
-Luna 在 Stage 3 只返回经过校验的章节边界，在 Stage 5 只返回修订后的 HTML。程序会
-检查边界、标签、content ID、bbox 和文件哈希，再原子发布结果。
+Stage 4 在程序内部读取 source PDF，生成带 content ID、page ID 和 bbox 标记的章节
+HTML，以及 `pages/page-*.jpg` 标注页面。Stage 5 只把 `chapter.html`、
+`chapter.json`、HTML 引用的 assets、按页排序的 JPEG、`TASK.md` 和预置的
+`corrected.html` 复制进隔离目录。Agent 编辑 `corrected.html`。Python 检查标签、
+content ID、bbox、asset 引用和文件哈希，再原子发布 HTML 与 revision metadata。
+
+Runner 在系统临时目录创建 mode 0700 工作区，不把仓库、book workdir 或 PDF 暴露给
+agent。它禁用项目配置和外部 skills，拒绝 shell、subagent、外部目录、web、MCP、
+skill 和 question，只允许隔离目录内的文件读取、检索与编辑。Runner 限制运行时间、
+stdout、stderr、单行和输出文件大小，失败时终止进程组并清理目录。
 
 ## 配置与日志
 
 ```toml
-[llm]
-api_key = "sk-or-..."
-model = "openai/gpt-5.6-luna"
-
 [mineru]
 api_key = "..."
 model_version = "vlm"
 language = "ch"
 
 [runtime]
-cache_dir = "work/.cache"
 work_dir = "work"
 log_level = "INFO"
 
@@ -100,12 +104,12 @@ jpeg_quality = 92
 
 ```bash
 EPUBFORGE_MINERU_API_KEY=...
-EPUBFORGE_LLM_API_KEY=sk-or-...
-EPUBFORGE_LLM_MODEL=openai/gpt-5.6-luna
 EPUBFORGE_RUNTIME_WORK_DIR=work
-EPUBFORGE_RUNTIME_CACHE_DIR=work/.cache
 EPUBFORGE_RUNTIME_LOG_LEVEL=INFO
 ```
+
+epubforge 配置不接收模型 endpoint、model 或 API key。OpenCode 从自己的配置与认证
+存储中取得这些信息。
 
 日志默认写入 `work/<name>/logs/`，同时输出到 stderr：
 

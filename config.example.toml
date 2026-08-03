@@ -1,17 +1,10 @@
 # Example configuration for epubforge.
 # Pass this file via: uv run epubforge --config config.example.toml <command>
-# Settings here can be overridden by EPUBFORGE_* environment variables.
+# Settings here can be overridden by documented EPUBFORGE_* environment variables.
 # Unknown keys in known sections are rejected (fail-fast).
 
-[llm]
-base_url        = "https://openrouter.ai/api/v1"
-api_key         = ""  # required; or set EPUBFORGE_LLM_API_KEY
-model           = "openai/gpt-5.6-luna"  # Luna Medium; provider model ID
-timeout_seconds = 120
-# Wrap the system prompt with cache_control: ephemeral for Anthropic prompt caching.
-# Enabled by default. Safe on OpenRouter (ignored by Gemini & OpenAI which use implicit caching).
-# prompt_caching = true
-# Provider-specific reasoning settings belong in extra_body.
+# OpenCode owns book-editor model authentication and provider settings.
+# epubforge does not accept model API keys or endpoint configuration.
 
 [mineru]
 api_key               = ""  # required for MinerU API calls; or set EPUBFORGE_MINERU_API_KEY
@@ -29,7 +22,6 @@ language              = "ch"  # ch | en | korean | japan
 
 [runtime]
 concurrency = 4
-cache_dir   = "work/.cache"
 work_dir    = "work"
 log_level   = "INFO"   # DEBUG | INFO | WARNING
 

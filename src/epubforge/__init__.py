@@ -1,1 +1,1 @@
-"""epubforge: MinerU-Luna pipeline for corrected chapter HTML."""
+"""epubforge: MinerU and OpenCode pipeline for corrected chapter HTML."""

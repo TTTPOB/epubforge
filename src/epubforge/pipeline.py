@@ -21,10 +21,10 @@ from typing import Any
 import pymupdf
 from filelock import FileLock, Timeout
 
+from epubforge.agent_runner import OpenCodeAgentRunner, book_editor_identity
 from epubforge.config import Config
-from epubforge.llm.client import LLMClient
 from epubforge.mineru import MineruClient, MineruDownloadResult
-from epubforge.observability import get_tracker, stage_timer
+from epubforge.observability import stage_timer
 from epubforge.strict_json import StrictJsonError, read_json_document
 
 log = logging.getLogger(__name__)
@@ -1046,8 +1046,6 @@ def run_all(
             continue_on_error=continue_on_error,
         )
 
-    log.info("pipeline total: %s", get_tracker().summary_line())
-
 
 def run_parse(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     work = cfg.book_work_dir(pdf_path)
@@ -1163,7 +1161,7 @@ def run_normalize(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
 
 
 def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
-    """Run Stage 3, detecting chapter boundaries with the configured LLM."""
+    """Run Stage 3 with the isolated book-editor agent."""
     from epubforge.chapter_segmentation import (
         is_chapter_segmentation_fresh,
         segment_chapters,
@@ -1173,18 +1171,18 @@ def run_segment(pdf_path: Path, cfg: Config, *, force: bool = False) -> None:
     content_path = _require_stage_file(work, "02_content/content.json", 3)
     output_dir = work / "03_chapters"
     with stage_timer(log, "3 segment"):
+        identity = book_editor_identity()
         if not force and is_chapter_segmentation_fresh(
             content_path,
             output_dir,
-            model=cfg.llm.model,
+            agent_identity=identity,
         ):
             log.info("skip segment — reusing fresh %s", output_dir / "chapters.json")
             return
 
-        cfg.require_llm()
-        client = LLMClient(cfg)
-        log.info("Stage 3: segmenting chapters with model=%s...", client.model)
-        segment_chapters(content_path, output_dir, client, force=force)
+        agent_runner = OpenCodeAgentRunner()
+        log.info("Stage 3: segmenting chapters with agent=%s...", identity.name)
+        segment_chapters(content_path, output_dir, agent_runner, force=force)
         log.info("  -> %s", output_dir / "chapters.json")
 
 
@@ -1234,22 +1232,22 @@ def run_revise(
         )
     _require_stage_file(work, "04_edit/manifest.json", 5)
     with stage_timer(log, "5 revise"):
-        if not force and is_chapter_revision_fresh(edit_dir, model=cfg.llm.model):
+        identity = book_editor_identity()
+        if not force and is_chapter_revision_fresh(edit_dir, agent_identity=identity):
             log.info(
                 "skip revise — reusing fresh corrected chapter outputs in %s", edit_dir
             )
             return
 
-        cfg.require_llm()
-        client = LLMClient(cfg)
+        agent_runner = OpenCodeAgentRunner()
         log.info(
-            "Stage 5: revising chapters with model=%s (continue_on_error=%s)...",
-            client.model,
+            "Stage 5: revising chapters with agent=%s (continue_on_error=%s)...",
+            identity.name,
             continue_on_error,
         )
         report = revise_all_chapters(
             edit_dir,
-            client,
+            agent_runner,
             force=force,
             continue_on_error=continue_on_error,
         )

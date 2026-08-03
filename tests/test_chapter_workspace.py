@@ -14,6 +14,7 @@ import pytest
 import pymupdf
 
 from epubforge import chapter_workspace as workspace
+from epubforge.agent_runner import book_editor_identity
 from epubforge.chapter_workspace import (
     ChapterWorkspaceError,
     build_chapter_workspace,
@@ -175,11 +176,15 @@ def _write_inputs(tmp_path: Path) -> Path:
             "evidence": "Closing notes.",
         },
     ]
+    identity = book_editor_identity()
     chapter_plan = {
         "schema": "epubforge.chapter-segmentation",
-        "schema_version": 1,
+        "schema_version": 2,
         "source_content_sha256": _content_source_sha256(items, page_geometry),
-        "model": "test-model",
+        "agent_name": identity.name,
+        "agent_model": identity.model,
+        "agent_variant": identity.variant,
+        "agent_fingerprint": identity.fingerprint,
         "prompt_sha256": "b" * 64,
         "contract_sha256": "c" * 64,
         "boundaries": boundaries,

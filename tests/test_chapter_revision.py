@@ -8,16 +8,19 @@ import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, cast
 
 import pytest
 
 from epubforge import chapter_revision as revision_module
+from epubforge.agent_runner import (
+    AgentIdentity,
+    AgentRunRequest,
+    AgentRunResult,
+    book_editor_identity,
+)
 from epubforge.chapter_revision import (
     ChapterRevisionError,
     ChapterRevisionPublicationError,
-    ChapterRevisionResponse,
-    ParsedRevisionClient,
     revise_all_chapters,
     revise_chapter,
 )
@@ -32,33 +35,23 @@ _fixture_module = importlib.util.module_from_spec(_fixture_spec)
 _fixture_spec.loader.exec_module(_fixture_module)
 
 
-class _FakeRevisionClient:
-    model = "luna-medium-test"
-
+class _FakeAgentRunner:
     def __init__(self, transform=None, *, failure: str | None = None) -> None:
+        self.identity = book_editor_identity()
         self.transform = transform
         self.failure = failure
-        self.calls: list[tuple[list[dict[str, Any]], bool]] = []
+        self.calls: list[AgentRunRequest] = []
 
-    def chat_parsed(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        response_format,
-        validator=None,
-        bypass_cache=False,
-    ):
-        self.calls.append((messages, bypass_cache))
+    def __call__(self, request: AgentRunRequest) -> AgentRunResult:
+        self.calls.append(request)
         if self.failure is not None:
             raise RuntimeError(self.failure)
-        user_content = messages[1]["content"]
-        assert user_content[0]["type"] == "text"
-        seed = user_content[0]["text"].split("COMPLETE HTML:\n", 1)[1]
+        seed = request.files["corrected.html"].decode("utf-8")
         corrected = self.transform(seed) if self.transform is not None else seed
-        response = ChapterRevisionResponse(corrected_html=corrected)
-        if validator is not None:
-            validator(response)
-        return response
+        return AgentRunResult(
+            outputs={"corrected.html": corrected.encode("utf-8")},
+            session_id="ses_revision_test",
+        )
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -69,24 +62,28 @@ def test_multimodal_request_contains_complete_html_and_ordered_images(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace(tmp_path)
-    client = _FakeRevisionClient()
+    agent_runner = _FakeAgentRunner()
 
-    revise_chapter(workspace / "chapters/0002", cast(ParsedRevisionClient, client))
+    revise_chapter(workspace / "chapters/0002", agent_runner)
 
-    assert len(client.calls) == 1
-    messages, bypass_cache = client.calls[0]
-    assert bypass_cache is False
-    assert messages[0]["role"] == "system"
-    user_content = messages[1]["content"]
-    assert "source.pdf" not in str(messages).lower()
-    assert "render-page" not in str(messages).lower()
-    assert user_content[0]["text"].endswith(
-        (workspace / "chapters/0002/chapter.html").read_text()
+    assert len(agent_runner.calls) == 1
+    request = agent_runner.calls[0]
+    assert "source.pdf" not in str(request.files).lower()
+    assert "render-page" not in str(request.files).lower()
+    assert (
+        request.files["chapter.html"]
+        == (workspace / "chapters/0002/chapter.html").read_bytes()
     )
-    image_parts = user_content[1:]
-    assert len(image_parts) == 1
-    assert image_parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
-    assert str(workspace / "chapters/0002") not in str(messages)
+    assert request.files["corrected.html"] == request.files["chapter.html"]
+    assert "chapter.json" in request.files
+    assert "TASK.md" in request.files
+    assert [name for name in request.files if name.startswith("pages/")] == [
+        "pages/page-0001.jpg"
+    ]
+    assert [name for name in request.files if name.startswith("assets/")] == [
+        "assets/abc-cover.png"
+    ]
+    assert str(workspace / "chapters/0002") not in str(request.files)
 
 
 def test_valid_heading_header_removal_and_bbox_marker_publish(
@@ -106,19 +103,26 @@ def test_valid_heading_header_removal_and_bbox_marker_publish(
         'data-bbox="5,5,60,18" data-bbox-status="needs-repair"',
         1,
     )
-    client = _FakeRevisionClient(lambda _: corrected)
+    client = _FakeAgentRunner(lambda _: corrected)
 
-    revise_chapter(chapter, cast(ParsedRevisionClient, client))
+    revise_chapter(chapter, client)
 
     assert (chapter / "corrected.html").read_text() == corrected
-    assert (chapter / "revision.json").is_file()
+    record = json.loads((chapter / "revision.json").read_text())
+    assert record["schema_version"] == 2
+    assert record["agent_name"] == "book-editor"
+    assert record["agent_model"] == "openai/gpt-5.6-luna"
+    assert record["agent_variant"] == "medium"
+    assert record["session_id"] == "ses_revision_test"
+    assert "notes" not in record
+    assert "open_questions" not in record
 
 
 def test_invalid_reference_or_bbox_preserves_previous_output(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
-    good = _FakeRevisionClient()
-    revise_chapter(chapter, cast(ParsedRevisionClient, good))
+    good = _FakeAgentRunner()
+    revise_chapter(chapter, good)
     previous = (chapter / "corrected.html").read_bytes()
     seed = (chapter / "chapter.html").read_text()
 
@@ -130,38 +134,50 @@ def test_invalid_reference_or_bbox_preserves_previous_output(tmp_path: Path) -> 
         with pytest.raises(ChapterRevisionError):
             revise_chapter(
                 chapter,
-                cast(ParsedRevisionClient, _FakeRevisionClient(lambda _: invalid)),
+                _FakeAgentRunner(lambda _: invalid),
                 force=True,
             )
         assert (chapter / "corrected.html").read_bytes() == previous
 
 
-def test_fresh_skip_and_force_bypass(tmp_path: Path) -> None:
+def test_fresh_skip_and_force_rerun(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0003"
-    first = _FakeRevisionClient()
-    revise_chapter(chapter, cast(ParsedRevisionClient, first))
+    first = _FakeAgentRunner()
+    revise_chapter(chapter, first)
 
-    skipped = _FakeRevisionClient(failure="fresh output should skip")
-    revise_chapter(chapter, cast(ParsedRevisionClient, skipped))
+    skipped = _FakeAgentRunner(failure="fresh output should skip")
+    revise_chapter(chapter, skipped)
     assert skipped.calls == []
 
-    forced = _FakeRevisionClient()
-    revise_chapter(chapter, cast(ParsedRevisionClient, forced), force=True)
-    assert forced.calls[0][1] is True
+    changed = _FakeAgentRunner()
+    identity = changed.identity
+    changed.identity = AgentIdentity(
+        name=identity.name,
+        model=identity.model,
+        variant=identity.variant,
+        prompt_sha256=identity.prompt_sha256,
+        fingerprint="d" * 64,
+    )
+    revise_chapter(chapter, changed)
+    assert len(changed.calls) == 1
+
+    forced = _FakeAgentRunner()
+    revise_chapter(chapter, forced, force=True)
+    assert len(forced.calls) == 1
 
 
 def test_batch_order_and_conservative_failure_stop(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
 
-    class FailingSecond(_FakeRevisionClient):
-        def chat_parsed(self, messages, **kwargs):
-            html = messages[1]["content"][0]["text"]
+    class FailingSecond(_FakeAgentRunner):
+        def __call__(self, request: AgentRunRequest) -> AgentRunResult:
+            html = request.files["chapter.html"].decode("utf-8")
             if "Chapter &lt;One&gt;" in html:
                 raise RuntimeError("second chapter failed")
-            return super().chat_parsed(messages, **kwargs)
+            return super().__call__(request)
 
-    report = revise_all_chapters(workspace, cast(ParsedRevisionClient, FailingSecond()))
+    report = revise_all_chapters(workspace, FailingSecond())
 
     assert [path.name for path in report.completed] == ["0001"]
     assert [path.name for path in report.failed] == ["0002"]
@@ -177,7 +193,7 @@ def test_each_replace_failure_restores_the_complete_pair(
 ) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
-    revise_chapter(chapter, cast(ParsedRevisionClient, _FakeRevisionClient()))
+    revise_chapter(chapter, _FakeAgentRunner())
     old_corrected = (chapter / "corrected.html").read_bytes()
     old_revision = (chapter / "revision.json").read_bytes()
     real_replace = revision_module.os.replace
@@ -196,7 +212,7 @@ def test_each_replace_failure_restores_the_complete_pair(
     with pytest.raises(ChapterRevisionError):
         revise_chapter(
             chapter,
-            cast(ParsedRevisionClient, _FakeRevisionClient()),
+            _FakeAgentRunner(),
             force=True,
         )
     assert (chapter / "corrected.html").read_bytes() == old_corrected
@@ -209,7 +225,7 @@ def test_rollback_failure_preserves_actionable_evidence(
 ) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
-    revise_chapter(chapter, cast(ParsedRevisionClient, _FakeRevisionClient()))
+    revise_chapter(chapter, _FakeAgentRunner())
     real_replace = revision_module.os.replace
     calls = 0
 
@@ -226,7 +242,7 @@ def test_rollback_failure_preserves_actionable_evidence(
     with pytest.raises(ChapterRevisionPublicationError) as caught:
         revise_chapter(
             chapter,
-            cast(ParsedRevisionClient, _FakeRevisionClient()),
+            _FakeAgentRunner(),
             force=True,
         )
     assert caught.value.evidence
@@ -234,9 +250,7 @@ def test_rollback_failure_preserves_actionable_evidence(
     assert any(path.name.startswith(".revision-") for path in caught.value.evidence)
 
     monkeypatch.undo()
-    revise_chapter(
-        chapter, cast(ParsedRevisionClient, _FakeRevisionClient()), force=True
-    )
+    revise_chapter(chapter, _FakeAgentRunner(), force=True)
     assert not any(
         path.name.startswith((".revision-staging-", ".revision-backup-"))
         for path in chapter.iterdir()
@@ -249,7 +263,7 @@ def test_successful_pair_survives_cleanup_failure(
 ) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
-    revise_chapter(chapter, cast(ParsedRevisionClient, _FakeRevisionClient()))
+    revise_chapter(chapter, _FakeAgentRunner())
 
     real_rmtree = revision_module.shutil.rmtree
 
@@ -261,13 +275,13 @@ def test_successful_pair_survives_cleanup_failure(
     monkeypatch.setattr(revision_module.shutil, "rmtree", fail_cleanup)
     revise_chapter(
         chapter,
-        cast(ParsedRevisionClient, _FakeRevisionClient()),
+        _FakeAgentRunner(),
         force=True,
     )
     assert (chapter / "corrected.html").is_file()
     assert (chapter / "revision.json").is_file()
     monkeypatch.undo()
-    revise_chapter(chapter, cast(ParsedRevisionClient, _FakeRevisionClient()))
+    revise_chapter(chapter, _FakeAgentRunner())
     assert not any(
         path.name.startswith((".revision-staging-", ".revision-backup-"))
         for path in chapter.iterdir()
@@ -277,14 +291,14 @@ def test_successful_pair_survives_cleanup_failure(
 def test_concurrent_public_calls_publish_one_coherent_pair(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0003"
-    clients = [_FakeRevisionClient(), _FakeRevisionClient()]
+    clients = [_FakeAgentRunner(), _FakeAgentRunner()]
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(
                 revise_chapter,
                 chapter,
-                cast(ParsedRevisionClient, client),
+                client,
             )
             for client in clients
         ]
@@ -318,7 +332,7 @@ def test_reverse_split_order_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ChapterRevisionError):
         revise_chapter(
             chapter,
-            cast(ParsedRevisionClient, _FakeRevisionClient(lambda _: corrected)),
+            _FakeAgentRunner(lambda _: corrected),
             force=True,
         )
 
@@ -333,7 +347,7 @@ def test_malformed_root_manifest_is_wrapped_before_sorting(tmp_path: Path) -> No
     with pytest.raises(ChapterRevisionError):
         revise_chapter(
             workspace / "chapters/0001",
-            cast(ParsedRevisionClient, _FakeRevisionClient()),
+            _FakeAgentRunner(),
         )
 
 
@@ -355,11 +369,11 @@ def test_malformed_nested_chapter_manifest_is_wrapped(
     with pytest.raises(ChapterRevisionError):
         revise_chapter(
             workspace / "chapters/0001",
-            cast(ParsedRevisionClient, _FakeRevisionClient()),
+            _FakeAgentRunner(),
         )
 
 
-def test_symlink_and_image_size_fail_before_model_call(
+def test_symlink_and_image_size_fail_before_agent_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -368,15 +382,52 @@ def test_symlink_and_image_size_fail_before_model_call(
     page = chapter / "pages/page-0001.jpg"
     page.unlink()
     page.symlink_to(chapter / "chapter.html")
-    client = _FakeRevisionClient()
+    client = _FakeAgentRunner()
     with pytest.raises(ChapterRevisionError):
-        revise_chapter(chapter, cast(ParsedRevisionClient, client))
+        revise_chapter(chapter, client)
     assert client.calls == []
 
     workspace = _workspace(tmp_path / "size")
     chapter = workspace / "chapters/0002"
     monkeypatch.setattr(revision_module, "MAX_IMAGE_BYTES", 1)
-    client = _FakeRevisionClient()
+    client = _FakeAgentRunner()
     with pytest.raises(ChapterRevisionError):
-        revise_chapter(chapter, cast(ParsedRevisionClient, client))
+        revise_chapter(chapter, client)
     assert client.calls == []
+
+
+@pytest.mark.parametrize("target_name", ["corrected.html", "revision.json"])
+def test_hardlinked_published_output_is_rejected_and_preserved(
+    tmp_path: Path, target_name: str
+) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    revise_chapter(chapter, _FakeAgentRunner())
+    target = chapter / target_name
+    previous = target.read_bytes()
+    linked_copy = tmp_path / f"linked-{target_name}"
+    os.link(target, linked_copy)
+
+    with pytest.raises(ChapterRevisionError, match="hard link"):
+        revise_chapter(chapter, _FakeAgentRunner(), force=True)
+
+    assert target.read_bytes() == previous
+    assert linked_copy.read_bytes() == previous
+
+
+def test_hardlinked_source_asset_remains_valid_for_agent_handoff(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    chapter = workspace / "chapters/0002"
+    asset = chapter / "assets/abc-cover.png"
+    external_asset = tmp_path / "external-asset.png"
+    external_asset.write_bytes(asset.read_bytes())
+    asset.unlink()
+    os.link(external_asset, asset)
+
+    client = _FakeAgentRunner()
+    revise_chapter(chapter, client)
+
+    assert len(client.calls) == 1
+    assert (chapter / "corrected.html").is_file()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -15,20 +16,23 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "bmsf.pdf"
 
 @pytest.mark.skipif(not FIXTURE.is_file(), reason="No PDF fixture found")
 @pytest.mark.skipif(
-    not (
-        os.environ.get("EPUBFORGE_LLM_API_KEY")
-        and os.environ.get("EPUBFORGE_MINERU_API_KEY")
-    ),
-    reason="EPUBFORGE_LLM_API_KEY and EPUBFORGE_MINERU_API_KEY are required",
+    not os.environ.get("EPUBFORGE_MINERU_API_KEY"),
+    reason="EPUBFORGE_MINERU_API_KEY is required",
+)
+@pytest.mark.skipif(
+    shutil.which("opencode") is None,
+    reason="a usable opencode executable is required",
+)
+@pytest.mark.skipif(
+    os.environ.get("EPUBFORGE_RUN_REAL_AGENT_SMOKE") != "1",
+    reason="set EPUBFORGE_RUN_REAL_AGENT_SMOKE=1 for a configured OpenCode run",
 )
 def test_full_pipeline_smoke_uses_isolated_run_path(tmp_path: Path) -> None:
     work_root = tmp_path / "work"
-    cache_root = tmp_path / "cache"
     environment = os.environ.copy()
     environment.update(
         {
             "EPUBFORGE_RUNTIME_WORK_DIR": str(work_root),
-            "EPUBFORGE_RUNTIME_CACHE_DIR": str(cache_root),
         }
     )
 

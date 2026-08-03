@@ -1,17 +1,21 @@
 # epubforge
 
-epubforge is a MinerU-Luna pipeline that turns a PDF into corrected chapter
-HTML. MinerU supplies the raw document archive. Luna detects chapter boundaries
-and revises chapter HTML after the pipeline prepares annotated page evidence.
+epubforge turns a PDF into corrected chapter HTML. MinerU supplies the raw
+document archive. Python prepares bounded file workspaces and invokes a
+restricted OpenCode `book-editor` agent for chapter segmentation and revision.
 
 ## Quick Start
 
-Set `EPUBFORGE_MINERU_API_KEY` and `EPUBFORGE_LLM_API_KEY`, then run:
+Set `EPUBFORGE_MINERU_API_KEY`, configure a usable `opencode` installation, and
+run:
 
 ```bash
 uv sync
 uv run epubforge --config config.example.toml run input.pdf
 ```
+
+OpenCode owns model authentication and provider configuration. epubforge does
+not accept or store a model API key.
 
 The six CLI commands are `run`, `parse`, `normalize`, `segment`, `prepare`,
 and `revise`. Each stage command accepts `--force-rerun`; `run` also accepts
@@ -26,6 +30,17 @@ and `revise`. Each stage command accepts `--force-rerun`; `run` also accepts
 | 3 | `segment` | `03_chapters/chapters.json` |
 | 4 | `prepare` | `04_edit/manifest.json`, chapter HTML, annotated page JPEGs |
 | 5 | `revise` | `04_edit/chapters/<ordinal>/corrected.html`, `revision.json` |
+
+Stage 3 gives the agent only `TASK.md` and `content-projection.json`; the agent
+writes `boundaries.json`. Stage 5 gives it `TASK.md`, `chapter.json`, the complete
+chapter HTML, referenced assets, and ordered annotated page JPEGs. The agent
+edits a pre-seeded `corrected.html`.
+
+Python creates each agent workspace as a mode-0700 system temporary directory
+outside the repository and book work directory. It disables project config and
+external skills, denies commands, subagents, web tools, MCP, questions, and
+external paths, and removes the workspace after collecting bounded outputs. No
+source PDF enters an agent workspace.
 
 For a book named `input`, the workspace looks like:
 
@@ -64,9 +79,9 @@ Pass configuration explicitly:
 uv run epubforge --config config.example.toml parse input.pdf
 ```
 
-The configuration sections are `[llm]`, `[mineru]`, `[runtime]`, and
-`[chapters]`. Environment variables override individual fields. The main
-credentials are `EPUBFORGE_LLM_API_KEY` and `EPUBFORGE_MINERU_API_KEY`.
+The configuration sections are `[mineru]`, `[runtime]`, and `[chapters]`.
+Environment variables override individual fields. The only epubforge API
+credential is `EPUBFORGE_MINERU_API_KEY`.
 
 ## Tests
 
@@ -76,6 +91,7 @@ uv run pytest -n 0
 uv run pyrefly check
 uv run python -m compileall -q src tests scripts
 uv lock --check
+uv run epubforge --help
 ```
 
 The optional Paddle layout tuning script remains at
