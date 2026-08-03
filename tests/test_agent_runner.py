@@ -1414,15 +1414,6 @@ def _retained_workspaces(temp_root: Path) -> list[Path]:
     ]
 
 
-def _workspace_identity(workspace: Path) -> tuple[int, int] | None:
-    """Current (st_dev, st_ino) of *workspace*, or None when it is gone."""
-    try:
-        info = os.lstat(workspace)
-    except FileNotFoundError:
-        return None
-    return (info.st_dev, info.st_ino)
-
-
 def test_workspace_retention_defaults_are_never_for_direct_runners(
     tmp_path: Path,
 ) -> None:
@@ -1862,11 +1853,7 @@ def test_resecure_failure_removes_unsecurable_workspace(
     monkeypatch.setattr(
         runner_module,
         "_inspect_workspace_for_retention",
-        lambda workspace: (
-            "insecure",
-            "injected re-secure failure",
-            _workspace_identity(workspace),
-        ),
+        lambda workspace: ("insecure", "injected re-secure failure"),
     )
     runner = _runner(
         tmp_path,
@@ -1900,14 +1887,10 @@ def test_resecure_and_removal_failure_keeps_truthful_retained(
     monkeypatch.setattr(
         runner_module,
         "_inspect_workspace_for_retention",
-        lambda workspace: (
-            "insecure",
-            "injected re-secure failure",
-            _workspace_identity(workspace),
-        ),
+        lambda workspace: ("insecure", "injected re-secure failure"),
     )
 
-    def failing_remove(workspace: Path, original_identity: Any) -> None:
+    def failing_remove(workspace: Path) -> None:
         raise OSError("injected removal failure")
 
     monkeypatch.setattr(runner_module, "_remove_unverified_workspace", failing_remove)
@@ -1936,6 +1919,39 @@ def test_resecure_and_removal_failure_keeps_truthful_retained(
         "cannot securely keep or remove agent workspace" in record.message
         for record in caplog.records
     )
+
+
+def test_removal_error_records_deleted_when_path_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runner_module,
+        "_inspect_workspace_for_retention",
+        lambda workspace: ("insecure", "injected re-secure failure"),
+    )
+
+    def remove_then_raise(workspace: Path) -> None:
+        shutil.rmtree(workspace)
+        raise OSError("injected removal failure")
+
+    monkeypatch.setattr(
+        runner_module, "_remove_unverified_workspace", remove_then_raise
+    )
+    runner = _runner(
+        tmp_path,
+        journal_root=tmp_path / "agent-runs",
+        workspace_retention="on-failure",
+    )
+    result = runner(_request())
+    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
+
+    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
+
+    manifest = read_agent_run_manifest(
+        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
+    )
+    assert manifest.workspace_disposition is not None
+    assert manifest.workspace_disposition.disposition == "deleted"
 
 
 def test_symlink_at_workspace_path_is_removed_not_retained(
@@ -1976,274 +1992,6 @@ def test_symlink_at_workspace_path_is_removed_not_retained(
     # the symlink target was never chmodded and keeps its data
     assert stat.S_IMODE(decoy.stat().st_mode) == 0o755
     assert marker.read_text(encoding="utf-8") == "precious data"
-
-
-def test_resecure_after_path_replacement_classifies_current_path_truthfully(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A swap after the fd opens is classified by the current path, truthfully.
-
-    The directory descriptor pins the original inode and the mode restore
-    runs through ``fchmod`` on it, so the symlink target is never chmodded.
-    The identity re-check then sees that the path now holds a symlink, which
-    is not the original directory: the workspace is recorded ``deleted`` and
-    the symlink entry is removed — the original path is never claimed as a
-    secure retained workspace.
-    """
-    runner = _runner(
-        tmp_path,
-        journal_root=tmp_path / "agent-runs",
-        workspace_retention="on-failure",
-    )
-    result = runner(_request())
-    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
-    workspace = _retained_workspaces(tmp_path / "isolated")[0]
-    # force the mode-restore branch: the workspace root is world-accessible
-    os.chmod(workspace, 0o777)
-    decoy = tmp_path / "decoy"
-    decoy.mkdir()
-    marker = decoy / "marker.txt"
-    marker.write_text("precious data", encoding="utf-8")
-    os.chmod(decoy, 0o755)
-    swapped = {"done": False}
-    real_open = runner_module.os.open
-
-    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        descriptor = real_open(path, flags, *args, **kwargs)
-        if not swapped["done"] and str(path) == str(workspace):
-            # replace the path right after the directory descriptor opened
-            swapped["done"] = True
-            shutil.rmtree(workspace)
-            workspace.symlink_to(decoy, target_is_directory=True)
-        return descriptor
-
-    monkeypatch.setattr(runner_module.os, "open", swapping_open)
-    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
-
-    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
-
-    # the identity re-check classified the CURRENT path truthfully: the
-    # workspace is gone from the path, the symlink entry was removed, and the
-    # original path is never recorded as a secure retained workspace
-    assert not workspace.is_symlink()
-    assert not workspace.exists()
-    manifest = read_agent_run_manifest(
-        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
-    )
-    assert manifest.final_status == "rejected"
-    assert manifest.workspace_disposition is not None
-    assert manifest.workspace_disposition.disposition == "deleted"
-    assert any(
-        "removed unsecurable agent workspace" in record.message
-        for record in caplog.records
-    )
-    # the symlink target was never chmodded and keeps its data
-    assert stat.S_IMODE(decoy.stat().st_mode) == 0o755
-    assert marker.read_text(encoding="utf-8") == "precious data"
-
-
-def test_replaced_directory_after_open_is_never_deleted_or_claimed_original(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A different-directory replacement is kept and recorded truthfully.
-
-    The identity re-check sees a different ``(st_dev, st_ino)`` at the path;
-    the removal refuses to delete a directory not proven to be the original
-    workspace, so the replacement and its data survive and the record names
-    the mismatch.
-    """
-    runner = _runner(
-        tmp_path,
-        journal_root=tmp_path / "agent-runs",
-        workspace_retention="on-failure",
-    )
-    result = runner(_request())
-    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
-    workspace = _retained_workspaces(tmp_path / "isolated")[0]
-    swapped = {"done": False}
-    real_open = runner_module.os.open
-
-    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        descriptor = real_open(path, flags, *args, **kwargs)
-        if not swapped["done"] and str(path) == str(workspace):
-            swapped["done"] = True
-            shutil.rmtree(workspace)
-            workspace.mkdir()
-            (workspace / "marker.txt").write_text("other user's data", encoding="utf-8")
-        return descriptor
-
-    monkeypatch.setattr(runner_module.os, "open", swapping_open)
-    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
-
-    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
-
-    assert workspace.is_dir()
-    assert (workspace / "marker.txt").read_text(encoding="utf-8") == "other user's data"
-    manifest = read_agent_run_manifest(
-        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
-    )
-    assert manifest.final_status == "rejected"
-    assert manifest.workspace_disposition is not None
-    assert manifest.workspace_disposition.disposition == "retained"
-    assert manifest.workspace_disposition.reason is not None
-    assert "different directory" in manifest.workspace_disposition.reason
-    assert any(
-        "cannot securely keep or remove agent workspace" in record.message
-        for record in caplog.records
-    )
-
-
-def test_path_removed_after_open_records_deleted_not_retained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A path that vanishes after the open is recorded deleted, never retained."""
-    runner = _runner(
-        tmp_path,
-        journal_root=tmp_path / "agent-runs",
-        workspace_retention="on-failure",
-    )
-    result = runner(_request())
-    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
-    workspace = _retained_workspaces(tmp_path / "isolated")[0]
-    swapped = {"done": False}
-    real_open = runner_module.os.open
-
-    def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        descriptor = real_open(path, flags, *args, **kwargs)
-        if not swapped["done"] and str(path) == str(workspace):
-            swapped["done"] = True
-            shutil.rmtree(workspace)
-        return descriptor
-
-    monkeypatch.setattr(runner_module.os, "open", swapping_open)
-    caplog.set_level(logging.INFO, logger="epubforge.agent_runner")
-
-    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
-
-    assert not workspace.exists()
-    manifest = read_agent_run_manifest(
-        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
-    )
-    assert manifest.final_status == "rejected"
-    assert manifest.workspace_disposition is not None
-    assert manifest.workspace_disposition.disposition == "deleted"
-    assert any("no longer exists" in record.message for record in caplog.records)
-
-
-def test_removal_raise_after_partial_delete_records_deleted_when_path_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A removal that raises after deleting the path records deleted, never retained.
-
-    The secure-delete fallback is first classified insecure, then actually
-    removes the workspace before raising; the resolver must re-inspect and
-    record the truthful missing state instead of blaming the raise.
-    """
-    real_inspect = runner_module._inspect_workspace_for_retention
-    calls = {"count": 0}
-
-    def flaky_inspect(workspace: Path) -> tuple[str, str, Any]:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return ("insecure", "injected re-secure failure", None)
-        return real_inspect(workspace)
-
-    monkeypatch.setattr(
-        runner_module, "_inspect_workspace_for_retention", flaky_inspect
-    )
-
-    def remove_then_raise(workspace: Path, original_identity: Any) -> None:
-        shutil.rmtree(workspace)
-        raise OSError("injected removal failure after partial work")
-
-    monkeypatch.setattr(
-        runner_module, "_remove_unverified_workspace", remove_then_raise
-    )
-    runner = _runner(
-        tmp_path,
-        journal_root=tmp_path / "agent-runs",
-        workspace_retention="on-failure",
-    )
-    result = runner(_request())
-    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
-    workspace = _retained_workspaces(tmp_path / "isolated")[0]
-    caplog.set_level(logging.WARNING, logger="epubforge.agent_runner")
-
-    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
-
-    assert not workspace.exists()
-    manifest = read_agent_run_manifest(
-        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
-    )
-    assert manifest.final_status == "rejected"
-    assert manifest.workspace_disposition is not None
-    assert manifest.workspace_disposition.disposition == "deleted"
-    assert any(
-        "was removed despite a removal error" in record.message
-        for record in caplog.records
-    )
-
-
-def test_removal_raise_after_partial_delete_records_replaced_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A removal that raises after replacing the path records the replacement.
-
-    The partial deletion swapped the workspace for a symlink before raising;
-    the resolver must re-inspect, recognize the non-directory replacement,
-    and record the truthful retained state with the bounded final-state
-    reason rather than claiming deleted.
-    """
-    real_inspect = runner_module._inspect_workspace_for_retention
-    calls = {"count": 0}
-
-    def flaky_inspect(workspace: Path) -> tuple[str, str, Any]:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return ("insecure", "injected re-secure failure", None)
-        return real_inspect(workspace)
-
-    monkeypatch.setattr(
-        runner_module, "_inspect_workspace_for_retention", flaky_inspect
-    )
-
-    def replace_then_raise(workspace: Path, original_identity: Any) -> None:
-        shutil.rmtree(workspace)
-        decoy = tmp_path / "decoy"
-        decoy.mkdir()
-        workspace.symlink_to(decoy, target_is_directory=True)
-        raise OSError("injected removal failure after partial work")
-
-    monkeypatch.setattr(
-        runner_module, "_remove_unverified_workspace", replace_then_raise
-    )
-    runner = _runner(
-        tmp_path,
-        journal_root=tmp_path / "agent-runs",
-        workspace_retention="on-failure",
-    )
-    result = runner(_request())
-    assert isinstance(result.journal, runner_module.AgentRunLifecycleHandle)
-    workspace = _retained_workspaces(tmp_path / "isolated")[0]
-    caplog.set_level(logging.ERROR, logger="epubforge.agent_runner")
-
-    result.journal.mark_rejected("ChapterSegmentationError", "semantic rejection")
-
-    # the replacement survives and the record names its actual state
-    assert workspace.is_symlink()
-    manifest = read_agent_run_manifest(
-        _single_run_dir(tmp_path / "agent-runs") / "manifest.json"
-    )
-    assert manifest.final_status == "rejected"
-    assert manifest.workspace_disposition is not None
-    assert manifest.workspace_disposition.disposition == "retained"
-    assert manifest.workspace_disposition.reason is not None
-    assert "final state" in manifest.workspace_disposition.reason
-    assert "not the original directory" in manifest.workspace_disposition.reason
-    assert any(
-        "cannot securely keep or remove agent workspace" in record.message
-        for record in caplog.records
-    )
 
 
 def test_foreign_owned_workspace_is_never_removed(
@@ -2330,11 +2078,7 @@ def test_insecure_workspace_under_cleanup_error_is_never_removed(
     monkeypatch.setattr(
         runner_module,
         "_inspect_workspace_for_retention",
-        lambda workspace: (
-            "insecure",
-            "injected re-secure failure",
-            _workspace_identity(workspace),
-        ),
+        lambda workspace: ("insecure", "injected re-secure failure"),
     )
     runner = _runner(
         tmp_path,

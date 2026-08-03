@@ -411,7 +411,7 @@ def test_symlink_and_image_size_fail_before_agent_call(
 
 
 @pytest.mark.parametrize("target_name", ["corrected.html", "revision.json"])
-def test_hardlinked_published_output_is_rejected_and_preserved(
+def test_hardlinked_published_output_publishes_and_preserves_external_link(
     tmp_path: Path, target_name: str
 ) -> None:
     workspace = _workspace(tmp_path)
@@ -421,12 +421,29 @@ def test_hardlinked_published_output_is_rejected_and_preserved(
     previous = target.read_bytes()
     linked_copy = tmp_path / f"linked-{target_name}"
     os.link(target, linked_copy)
+    previous_inode = os.stat(linked_copy).st_ino
 
-    with pytest.raises(ChapterRevisionError, match="hard link"):
-        revise_chapter(chapter, _FakeAgentRunner(), force=True)
+    # A fresh hard-linked output is reused without an agent run.
+    skipped = _FakeAgentRunner(failure="fresh output should skip")
+    revise_chapter(chapter, skipped)
+    assert skipped.calls == []
 
-    assert target.read_bytes() == previous
+    seed = (chapter / "chapter.html").read_text()
+    published = seed.replace(
+        'data-bbox="5,45,75,80"',
+        'data-bbox="5,45,75,80" data-bbox-status="needs-repair"',
+        1,
+    )
+    revise_chapter(chapter, _FakeAgentRunner(lambda _: published), force=True)
+
+    if target_name == "corrected.html":
+        assert target.read_text() == published
+    else:
+        assert target.read_bytes() != previous
+    # The external hard link still points at the old inode.
     assert linked_copy.read_bytes() == previous
+    assert os.stat(linked_copy).st_ino == previous_inode
+    assert os.stat(target).st_ino != previous_inode
 
 
 def test_hardlinked_source_asset_remains_valid_for_agent_handoff(
@@ -1228,7 +1245,9 @@ def test_crash_recovery_raises_when_no_complete_copy(tmp_path: Path) -> None:
     "mutate",
     [
         lambda page: page["evidence"].update({"coordinate_space": "tampered"}),
-        lambda page: page["candidate"].update({"coordinate_space": {"source": "tampered"}}),
+        lambda page: page["candidate"].update(
+            {"coordinate_space": {"source": "tampered"}}
+        ),
         lambda page: page["candidate"]["inference_params"].update(
             {"source_sha256": "e" * 64}
         ),
@@ -1238,9 +1257,7 @@ def test_crash_recovery_raises_when_no_complete_copy(tmp_path: Path) -> None:
         lambda page: page["candidate"].pop("inference_params"),
     ],
 )
-def test_repair_evidence_contract_tampering_is_rejected(
-    tmp_path: Path, mutate
-) -> None:
+def test_repair_evidence_contract_tampering_is_rejected(tmp_path: Path, mutate) -> None:
     workspace = _workspace(tmp_path)
     chapter = workspace / "chapters/0002"
     candidate_box = _candidate(1, 40, 100, 150, 160)

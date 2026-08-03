@@ -1864,13 +1864,11 @@ def _fresh_output(
             corrected_path,
             "corrected HTML",
             max_bytes=MAX_HTML_BYTES,
-            require_single_link=True,
         )
         revision_bytes = _read_snapshot(
             revision_path,
             "chapter revision metadata",
             max_bytes=MAX_CHAPTER_MANIFEST_BYTES,
-            require_single_link=True,
         )
         payload = parse_json_document(
             revision_bytes,
@@ -2843,13 +2841,10 @@ def _read_snapshot(
     label: str,
     *,
     max_bytes: int,
-    require_single_link: bool = False,
 ) -> bytes:
     fd = _open_path(path, label, directory=False)
     try:
         before = os.fstat(fd)
-        if require_single_link and before.st_nlink != 1:
-            raise ChapterRevisionError(f"{label} must have exactly one hard link")
         if before.st_size > max_bytes:
             raise ChapterRevisionError(f"{label} exceeds the size limit")
         chunks: list[bytes] = []
@@ -2863,11 +2858,7 @@ def _read_snapshot(
                 raise ChapterRevisionError(f"{label} exceeds the size limit")
             chunks.append(chunk)
         after = os.fstat(fd)
-        if (
-            not _same_snapshot(before, after)
-            or (require_single_link and after.st_nlink != 1)
-            or total != before.st_size
-        ):
+        if not _same_snapshot(before, after) or total != before.st_size:
             raise ChapterRevisionError(f"{label} changed while being read")
         return b"".join(chunks)
     except OSError as exc:
@@ -3031,10 +3022,6 @@ def _target_exists(path: Path) -> bool:
         raise ChapterRevisionError(f"publication target is a symlink: {path}")
     if not stat.S_ISREG(info.st_mode):
         raise ChapterRevisionError(f"publication target is not a regular file: {path}")
-    if info.st_nlink != 1:
-        raise ChapterRevisionError(
-            f"publication target must have exactly one hard link: {path}"
-        )
     return True
 
 

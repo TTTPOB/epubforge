@@ -36,9 +36,11 @@ starts the record as ``pending``; the runner or the lifecycle handle resolves
 it to ``deleted`` or ``retained`` before finalizing the run, so a terminal
 manifest never claims a disposition the caller did not carry out.  A run
 finalized while its workspace disposition is still unresolved is resolved
-conservatively from the filesystem: a still-existing workspace is recorded as
-``retained`` (evidence is kept, never silently deleted), a vanished one as
-``deleted``.
+conservatively with a single no-follow type check: a path that no longer
+exists, or whose final component is a symlink or non-directory, is recorded
+as ``deleted``; a real directory is recorded as ``retained`` (evidence is
+kept, never silently deleted).  The fallback only records a disposition; it
+never removes or modifies a workspace.
 """
 
 from __future__ import annotations
@@ -894,19 +896,12 @@ class AgentRunJournal:
         A run finalized while its recorded workspace still carries an
         unresolved disposition (a direct journal user, or a crash between the
         runner returning and the lifecycle handle acting) must never produce a
-        terminal manifest with a pending disposition.  The resolution opens
-        the path with ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW`` and verifies the
-        opened descriptor, so a symlink at the path is never followed and a
-        path replacement cannot redirect the mode restore onto another
-        target: a path that no longer exists, or whose final component is a
-        symlink or plain file, is recorded as ``deleted``; a real directory
-        owned by the effective user is recorded as ``retained`` with its root
-        mode restored to 0700 through ``fchmod`` on the pinned descriptor.  A
-        directory or replacement not owned by the effective user is never
-        treated as an ordinary retained workspace: it is recorded as
-        ``retained`` with a truthful bounded reason naming the unsafe state,
-        and it is never deleted — the journal only records, it never removes
-        paths, and a foreign-owned path may hold another user's data.
+        terminal manifest with a pending disposition.  The fallback performs
+        one no-follow type check: a path that no longer exists, or whose final
+        component is a symlink or plain file, is recorded as ``deleted``; a
+        real directory is recorded as ``retained`` with a bounded reason.
+        The fallback only records a disposition; it never deletes or modifies
+        a workspace.
         """
         if (
             self._workspace_path is None
@@ -961,8 +956,9 @@ class AgentRunJournal:
                 }
                 return
             info = os.fstat(descriptor)
-            identity = (info.st_dev, info.st_ino)
             if not stat.S_ISDIR(info.st_mode):
+                # O_DIRECTORY already rejects non-directories on most platforms;
+                # keep the check for platforms without the flag.
                 self._workspace_disposition = {
                     "disposition": "deleted",
                     "deleted_at_utc": _utc_now(),
@@ -973,133 +969,6 @@ class AgentRunJournal:
                     ),
                 }
                 return
-            if info.st_uid != os.geteuid():
-                # A foreign-owned replacement is never silently treated as an
-                # ordinary retained workspace: the journal records the truthful
-                # unsafe state with a bounded reason and never deletes the path.
-                self._workspace_disposition = {
-                    "disposition": "retained",
-                    "deleted_at_utc": None,
-                    "retained_at_utc": _utc_now(),
-                    "reason": (
-                        "workspace is not owned by the effective user when the run "
-                        "was finalized without an explicit disposition; kept for "
-                        "manual inspection, not verified as a safe retained "
-                        "workspace"
-                    ),
-                }
-                return
-            if stat.S_IMODE(info.st_mode) != 0o700:
-                try:
-                    os.fchmod(descriptor, 0o700)
-                except OSError as exc:
-                    self._workspace_disposition = {
-                        "disposition": "retained",
-                        "deleted_at_utc": None,
-                        "retained_at_utc": _utc_now(),
-                        "reason": (
-                            "workspace mode could not be restored to 0700 when the "
-                            "run was finalized without an explicit disposition: "
-                            + _bounded_message(exc)
-                        ),
-                    }
-                    return
-                try:
-                    restored = os.fstat(descriptor)
-                except OSError as exc:
-                    self._workspace_disposition = {
-                        "disposition": "retained",
-                        "deleted_at_utc": None,
-                        "retained_at_utc": _utc_now(),
-                        "reason": (
-                            "workspace could not be re-inspected after mode restore "
-                            "when the run was finalized without an explicit "
-                            "disposition: " + _bounded_message(exc)
-                        ),
-                    }
-                    return
-                if (
-                    not stat.S_ISDIR(restored.st_mode)
-                    or stat.S_IMODE(restored.st_mode) != 0o700
-                ):
-                    self._workspace_disposition = {
-                        "disposition": "retained",
-                        "deleted_at_utc": None,
-                        "retained_at_utc": _utc_now(),
-                        "reason": (
-                            "workspace mode is still not 0700 after the restore "
-                            "attempt when the run was finalized without an "
-                            "explicit disposition"
-                        ),
-                    }
-                    return
-            # The descriptor pinned the original directory; prove the current path
-            # still holds that same inode before any retained claim is recorded.
-            # A path that disappeared, became a symlink or non-directory, or now
-            # points to a different directory inode is classified truthfully and
-            # the original is never recorded as a verified retained workspace.
-            current_descriptor: int | None = None
-            try:
-                try:
-                    current_descriptor = os.open(
-                        workspace,
-                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                    )
-                except FileNotFoundError:
-                    self._workspace_disposition = {
-                        "disposition": "deleted",
-                        "deleted_at_utc": _utc_now(),
-                        "retained_at_utc": None,
-                        "reason": (
-                            "workspace path no longer exists when the run was "
-                            "finalized without an explicit disposition"
-                        ),
-                    }
-                    return
-                except OSError as exc:
-                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                        self._workspace_disposition = {
-                            "disposition": "deleted",
-                            "deleted_at_utc": _utc_now(),
-                            "retained_at_utc": None,
-                            "reason": (
-                                "workspace path no longer holds the original "
-                                "directory when the run was finalized without an "
-                                "explicit disposition"
-                            ),
-                        }
-                        return
-                    self._workspace_disposition = {
-                        "disposition": "retained",
-                        "deleted_at_utc": None,
-                        "retained_at_utc": _utc_now(),
-                        "reason": (
-                            "workspace path could not be re-inspected when the run "
-                            "was finalized without an explicit disposition: "
-                            + _bounded_message(exc)
-                        ),
-                    }
-                    return
-                current = os.fstat(current_descriptor)
-                if (current.st_dev, current.st_ino) != identity:
-                    self._workspace_disposition = {
-                        "disposition": "retained",
-                        "deleted_at_utc": None,
-                        "retained_at_utc": _utc_now(),
-                        "reason": (
-                            "workspace path now points to a different directory than "
-                            "the recorded workspace when the run was finalized "
-                            "without an explicit disposition; not verified as the "
-                            "original workspace"
-                        ),
-                    }
-                    return
-            finally:
-                if current_descriptor is not None:
-                    try:
-                        os.close(current_descriptor)
-                    except OSError:
-                        pass
             self._workspace_disposition = {
                 "disposition": "retained",
                 "deleted_at_utc": None,

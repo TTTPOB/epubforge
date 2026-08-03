@@ -1215,39 +1215,23 @@ def _path_absent(path: Path) -> bool:
     return False
 
 
-def _inspect_workspace_for_retention(
-    workspace: Path,
-) -> tuple[str, str, tuple[int, int] | None]:
+def _inspect_workspace_for_retention(workspace: Path) -> tuple[str, str]:
     """No-follow fd-based inspection of a workspace the policy wants to keep.
 
     The path is opened with ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW`` and every
     check (directory type, effective-user ownership, root mode) runs against
-    the opened descriptor: ``fstat`` for type, owner, and the ``(st_dev,
-    st_ino)`` identity, ``fchmod`` for the mode restore, ``fstat`` again to
-    confirm.  A symlink at the path is never followed and never chmodded.  On
-    success the current path is re-opened no-follow and its identity is
-    compared with the pinned descriptor: only a path that still holds the
-    same directory inode is classified ``secure``.  If the path disappeared,
-    became a symlink or non-directory, or now points to a different directory
-    inode, the *current* path is classified truthfully and the original is
-    never recorded as a secure retained workspace.  Descriptors are closed on
-    every path.
+    the opened descriptor: ``fstat`` for type and owner, ``fchmod`` for the
+    mode restore, ``fstat`` again to confirm.  A symlink at the path is never
+    followed and never chmodded.  Descriptors are closed on every path.
 
-    Returns ``(state, reason, original_identity)`` where ``state`` is:
+    Returns ``(state, reason)`` where ``state`` is:
 
     - ``"gone"``: the path does not exist, so retention must never be
       claimed (the agent deleted its cwd or cleanup partially removed it);
-    - ``"secure"``: the current path still holds the original user-owned
-      directory with root mode 0700 — the mode is restored when a caller
-      mutated it;
-    - ``"insecure"``: the current path cannot be kept safely; *reason*
-      explains why (symlink, non-directory, foreign owner, failed mode
-      restore, or a replacement directory).
-
-    ``original_identity`` is the ``(st_dev, st_ino)`` of the directory that
-    was at the path when the inspection opened it, or None when the path
-    never held a verifiable directory (symlink, non-directory, or an
-    unreadable path).
+    - ``"secure"``: the path holds a user-owned directory with root mode
+      0700 — the mode is restored when a caller mutated it;
+    - ``"insecure"``: the path cannot be kept safely; *reason* explains why
+      (symlink, non-directory, foreign owner, or a failed mode restore).
     """
     descriptor: int | None = None
     try:
@@ -1257,35 +1241,18 @@ def _inspect_workspace_for_retention(
                 os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
             )
         except FileNotFoundError:
-            return "gone", "workspace no longer exists", None
+            return "gone", "workspace no longer exists"
         except OSError as exc:
             if exc.errno == errno.ELOOP:
-                return (
-                    "insecure",
-                    "workspace path is a symlink, not the original directory",
-                    None,
-                )
+                return "insecure", "workspace path is a symlink, not a directory"
             if exc.errno == errno.ENOTDIR:
-                return (
-                    "insecure",
-                    "workspace path is not the original directory",
-                    None,
-                )
-            return (
-                "insecure",
-                f"workspace cannot be inspected: {_bounded_text(exc)}",
-                None,
-            )
+                return "insecure", "workspace path is not a directory"
+            return "insecure", f"workspace cannot be inspected: {_bounded_text(exc)}"
         info = os.fstat(descriptor)
-        identity = (info.st_dev, info.st_ino)
         if not stat.S_ISDIR(info.st_mode):
-            return "insecure", "workspace path is not the original directory", identity
+            return "insecure", "workspace path is not a directory"
         if info.st_uid != os.geteuid():
-            return (
-                "insecure",
-                "workspace is not owned by the effective user",
-                identity,
-            )
+            return "insecure", "workspace is not owned by the effective user"
         if stat.S_IMODE(info.st_mode) != 0o700:
             try:
                 os.fchmod(descriptor, 0o700)
@@ -1293,7 +1260,6 @@ def _inspect_workspace_for_retention(
                 return (
                     "insecure",
                     f"workspace mode cannot be restored to 0700: {_bounded_text(exc)}",
-                    identity,
                 )
             try:
                 restored = os.fstat(descriptor)
@@ -1301,7 +1267,6 @@ def _inspect_workspace_for_retention(
                 return (
                     "insecure",
                     f"workspace cannot be re-inspected after chmod: {_bounded_text(exc)}",
-                    identity,
                 )
             if (
                 not stat.S_ISDIR(restored.st_mode)
@@ -1310,45 +1275,8 @@ def _inspect_workspace_for_retention(
                 return (
                     "insecure",
                     "workspace mode is still not 0700 after re-securing",
-                    identity,
                 )
-        # The descriptor pinned the original directory; prove the current path
-        # still holds that same inode before any secure-retained claim.
-        current_descriptor: int | None = None
-        try:
-            try:
-                current_descriptor = os.open(
-                    workspace,
-                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                )
-            except FileNotFoundError:
-                return "gone", "workspace path no longer exists", identity
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    return (
-                        "insecure",
-                        "workspace path no longer holds the original directory",
-                        identity,
-                    )
-                return (
-                    "insecure",
-                    f"workspace path cannot be re-inspected: {_bounded_text(exc)}",
-                    identity,
-                )
-            current = os.fstat(current_descriptor)
-            if (current.st_dev, current.st_ino) != identity:
-                return (
-                    "insecure",
-                    "workspace path now points to a different directory",
-                    identity,
-                )
-        finally:
-            if current_descriptor is not None:
-                try:
-                    os.close(current_descriptor)
-                except OSError:
-                    pass
-        return "secure", "", identity
+        return "secure", ""
     finally:
         if descriptor is not None:
             try:
@@ -1357,17 +1285,14 @@ def _inspect_workspace_for_retention(
                 pass
 
 
-def _remove_unverified_workspace(
-    workspace: Path, original_identity: tuple[int, int] | None
-) -> None:
+def _remove_unverified_workspace(workspace: Path) -> None:
     """Remove a workspace that failed retention verification.
 
-    A symlink or plain file at the path is unlinked as a path entry — the
-    target, if any, is never touched.  A directory is removed only when it is
-    owned by the effective user AND its ``(st_dev, st_ino)`` identity matches
-    *original_identity*: a replacement directory at the path may hold other
-    data and is refused, as is any path not owned by the effective user.  A
-    missing path is a successful no-op.  Any other failure raises.
+    The path is inspected with ``lstat``, so a symlink is never followed: a
+    symlink or plain file is unlinked as a path entry, its target untouched.
+    A directory is removed only when owned by the effective user; a
+    foreign-owned path is refused.  A missing path is a successful no-op.
+    Any other failure raises.
     """
     try:
         info = os.lstat(workspace)
@@ -1381,10 +1306,6 @@ def _remove_unverified_workspace(
         # unlink the symlink or plain-file entry itself; never the target
         os.unlink(workspace)
         return
-    if original_identity is None or (info.st_dev, info.st_ino) != original_identity:
-        raise OSError(
-            "refusing to remove a directory not proven to be the original workspace"
-        )
     _remove_workspace(workspace)
 
 
@@ -1397,26 +1318,23 @@ def _resolve_retained_workspace(
 ) -> None:
     """Verify, re-secure, record, and log one workspace the policy retains.
 
-    The path is inspected through a pinned no-follow descriptor before any
+    The path is inspected through a no-follow descriptor before any
     ``retained`` claim: a path that no longer exists (the agent deleted its
     cwd, or cleanup partially removed it) is recorded and logged as
-    ``deleted`` — retention is never claimed for a path that is not there.
-    The current path must still hold the original user-owned directory with
-    root mode 0700 (identity compared by ``(st_dev, st_ino)``); a mutated
-    mode is restored on the pinned descriptor.  A path that cannot be kept
-    securely is removed instead, unless ``allow_removal`` is False (a
-    possibly-live process may still access it under ``AgentCleanupError``):
-    then a clear security error is logged and the truthful existing state is
-    recorded with the bounded reason.  Removal never deletes a replacement
-    directory not proven to be the original workspace, nor any path not owned
-    by the effective user.  When the secure-delete fallback raises after
-    partial work, the path is re-inspected and its actual final state
-    (missing, retained directory, or a symlink/non-directory replacement) is
-    recorded and logged — ``retained`` is never recorded solely because
-    removal raised.  The log line is emitted even without a journal so direct
-    callers can locate retained workspaces.
+    ``deleted`` — retention is never claimed for a path that is not there.  A
+    user-owned directory with root mode 0700 is retained; a mutated mode is
+    restored on the descriptor.  A path that cannot be kept securely is
+    removed instead, unless ``allow_removal`` is False (a possibly-live
+    process may still access it under ``AgentCleanupError``): then a clear
+    security error is logged and the truthful existing state is recorded with
+    the bounded reason.  Removal never touches a path not owned by the
+    effective user and never follows a symlink.  When removal raises, a path
+    that is already gone is recorded ``deleted``; any existing or unreadable
+    path is recorded ``retained`` with a bounded reason.  The log line is
+    emitted even without a journal so direct callers can locate retained
+    workspaces.
     """
-    state, state_reason, identity = _inspect_workspace_for_retention(workspace)
+    state, state_reason = _inspect_workspace_for_retention(workspace)
     if state == "gone":
         _log.info(
             "agent workspace no longer exists; recording deleted: %s (%s)",
@@ -1444,16 +1362,9 @@ def _resolve_retained_workspace(
         )
         return
     try:
-        _remove_unverified_workspace(workspace, identity)
+        _remove_unverified_workspace(workspace)
     except Exception as exc:
-        # Never record retained solely because the removal raised: re-inspect
-        # the path without following symlinks and classify its actual final
-        # state before recording.  A path the partial removal actually took
-        # with it is recorded deleted; a path still present (a retained
-        # directory, or a symlink/non-directory replacement) is recorded
-        # retained with the truthful bounded state reason.
-        final_state, final_reason, _ = _inspect_workspace_for_retention(workspace)
-        if final_state == "gone":
+        if _path_absent(workspace):
             _log.warning(
                 "unsecurable agent workspace was removed despite a removal"
                 " error: %s (%s)",
@@ -1462,13 +1373,9 @@ def _resolve_retained_workspace(
             )
             _record_deleted_disposition(journal)
             return
-        if final_state == "secure":
-            effective_reason = f"{state_reason}; removal failed: {_bounded_text(exc)}"
-        else:
-            effective_reason = (
-                f"{state_reason}; removal failed: {_bounded_text(exc)};"
-                f" final state: {final_reason}"
-            )
+        # The path still exists or cannot be inspected. Keep the conservative
+        # retained state without trying to classify a replacement inode.
+        effective_reason = f"{state_reason}; removal failed: {_bounded_text(exc)}"
         _log.error(
             "cannot securely keep or remove agent workspace %s: %s",
             workspace,
