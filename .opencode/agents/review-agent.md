@@ -3,7 +3,6 @@ description: 代码审查 agent — 只读审查，不做任何代码修改
 mode: subagent
 model: openai/gpt-5.5
 reasoningEffort: xhigh
-steps: 50
 permission:
   edit: deny
   bash:

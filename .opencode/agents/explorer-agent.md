@@ -3,7 +3,6 @@ description: 现有实现调查 agent — 只读探索代码库并返回结构�
 mode: subagent
 model: deepseek/deepseek-v4-flash
 reasoningEffort: high
-steps: 50
 permission:
   edit: deny
   bash:
